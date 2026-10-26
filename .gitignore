@@ -1,0 +1,12 @@
+# Build output and caches.
+target/
+.kotlin/
+# Built installers, APKs and the Android signing key stay local (see unbihex-client/.gitignore).
+dist/
+*.apk
+*.aab
+*.jks
+*.keystore
+# Local working notes.
+NEXT_SESSION.md
+.gemini-task.md

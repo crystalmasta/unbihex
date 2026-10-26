@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="202 131 600 600" width="1024" height="1024">
+  <defs>
+    <!-- Основной градиент (мятный -> голубой -> фиолетовый) -->
+    <linearGradient id="mainGrad" x1="15%" y1="15%" x2="85%" y2="85%">
+      <stop offset="0%" stop-color="#2EE6A8" />
+      <stop offset="48%" stop-color="#1CC8EE" />
+      <stop offset="100%" stop-color="#7F5AF0" />
+    </linearGradient>
+
+    <!-- Градиент для внутренней сетки -->
+    <linearGradient id="gridGrad" x1="20%" y1="20%" x2="80%" y2="80%">
+      <stop offset="0%" stop-color="#2EE6A8" stop-opacity="0.85" />
+      <stop offset="50%" stop-color="#1CC8EE" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#7F5AF0" stop-opacity="0.85" />
+    </linearGradient>
+
+    <!-- Маска технологических разрывов в гексагонах -->
+    <mask id="hexCuts">
+      <rect width="1000" height="1000" fill="#fff" />
+      <g stroke="#000" stroke-width="14" stroke-linecap="butt">
+        <!-- Прорези для внешних дорожек -->
+        <line x1="383" y1="238" x2="455" y2="352" />
+        <line x1="617" y1="238" x2="545" y2="352" />
+        <line x1="280" y1="430" x2="365" y2="430" />
+        <line x1="635" y1="430" x2="720" y2="430" />
+        <line x1="385" y1="620" x2="455" y2="508" />
+        <line x1="613" y1="620" x2="545" y2="508" />
+        <!-- Дополнительные сегментные разрывы внутреннего контура -->
+        <line x1="438" y1="295" x2="438" y2="345" stroke-width="12" />
+        <line x1="512" y1="265" x2="512" y2="305" stroke-width="12" />
+        <line x1="350" y1="472" x2="390" y2="492" stroke-width="14" />
+        <line x1="566" y1="530" x2="566" y2="575" stroke-width="16" />
+        <line x1="615" y1="365" x2="655" y2="390" stroke-width="16" />
+      </g>
+    </mask>
+  </defs>
+  <rect x="202" y="131" width="600" height="600" rx="132" fill="#0B1736" />
+
+
+  <!-- Орбитальные кольца справа -->
+  <g fill="none" stroke="#6C5CE7" stroke-width="3" opacity="0.85">
+    <!-- Верхняя орбита -->
+    <circle cx="662" cy="340" r="40" />
+    <circle cx="662" cy="340" r="62" />
+    <circle cx="712" cy="303" r="11" fill="#6C5CE7" stroke="none" />
+    <!-- Нижняя орбита -->
+    <circle cx="668" cy="528" r="40" />
+    <circle cx="668" cy="528" r="62" />
+    <circle cx="718" cy="562" r="13" fill="#7F5AF0" stroke="none" />
+  </g>
+
+  <!-- Внутренняя изометрическая сетка -->
+  <g stroke="url(#gridGrad)" stroke-width="3.5" stroke-linecap="round">
+    <!-- Главные оси через центр (500, 430) -->
+    <line x1="500" y1="282" x2="500" y2="578" />
+    <line x1="372" y1="356" x2="628" y2="504" />
+    <line x1="372" y1="504" x2="628" y2="356" />
+    <!-- Вторичные линии решётки -->
+    <line x1="426" y1="318" x2="426" y2="542" />
+    <line x1="574" y1="318" x2="574" y2="542" />
+    <line x1="372" y1="418" x2="574" y2="302" />
+    <line x1="426" y1="302" x2="628" y2="418" />
+    <line x1="372" y1="442" x2="574" y2="558" />
+    <line x1="426" y1="558" x2="628" y2="442" />
+  </g>
+
+  <!-- Двойной гексагон с технологическими прорезями -->
+  <g mask="url(#hexCuts)" fill="none" stroke="url(#mainGrad)" stroke-linejoin="miter">
+    <!-- Внешний гексагон -->
+    <polygon points="500,230 673,330 673,530 500,630 327,530 327,330" stroke-width="22" />
+    <!-- Внутренний гексагон -->
+    <polygon points="500,278 632,354 632,506 500,582 368,506 368,354" stroke-width="22" />
+  </g>
+
+  <!-- Внешние контактные дорожки и узлы -->
+  <g stroke="url(#mainGrad)" stroke-width="5" stroke-linecap="round" fill="none">
+    <!-- Верхняя левая -->
+    <line x1="383" y1="238" x2="438" y2="326" />
+    <!-- Верхняя правая -->
+    <line x1="617" y1="238" x2="562" y2="326" />
+    <!-- Левая горизонтальная с изломом -->
+    <polyline points="280,430 356,430 388,448" />
+    <!-- Правая горизонтальная с изломом -->
+    <polyline points="720,430 640,430 612,414" />
+    <!-- Нижняя левая -->
+    <line x1="385" y1="620" x2="438" y2="532" />
+    <!-- Нижняя правая -->
+    <line x1="613" y1="620" x2="562" y2="532" />
+  </g>
+
+  <!-- Точки-узлы (внешние и внутренние) -->
+  <g stroke="none">
+    <!-- Внутренние узлы сетки -->
+    <circle cx="500" cy="430" r="20" fill="#29E3B6" />
+    <circle cx="426" cy="387" r="14" fill="#29E3B6" />
+    <circle cx="500" cy="515" r="14" fill="#7862F8" />
+    <circle cx="668" cy="528" r="21" fill="#7F5AF0" />
+    <!-- Внешние узлы на концах дорожек -->
+    <circle cx="383" cy="238" r="10" fill="#2EE6A8" />
+    <circle cx="617" cy="238" r="14" fill="#32A8E6" />
+    <circle cx="280" cy="430" r="14" fill="#2AE2B4" />
+    <circle cx="720" cy="430" r="14" fill="#7F5AF0" />
+    <circle cx="385" cy="620" r="14" fill="#20C4EE" />
+    <circle cx="613" cy="620" r="9" fill="#7F5AF0" />
+  </g>
+</svg>

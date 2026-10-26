@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Unbihex</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <nav class="nav" aria-label="Разделы">
+      <div class="brand">
+        <!-- icon.svg: the app icon, written by src-tauri/icons/source/make-icon.py -->
+        <img src="icon.svg" class="logo" alt="" />
+        <span>Unbihex</span>
+      </div>
+      <button class="nav-btn active" data-view="home"><svg viewBox="0 0 24 24"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0"/></svg><span>Главная</span></button>
+      <button class="nav-btn" data-view="servers"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg><span>Серверы</span></button>
+      <button class="nav-btn" data-view="subs"><svg viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.5"/></svg><span>Подписки</span></button>
+      <button class="nav-btn" data-view="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Настройки</span></button>
+      <button class="nav-btn" data-view="logs"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Журнал</span></button>
+    </nav>
+
+    <main class="main">
+      <!-- Главная -->
+      <section class="view active" id="view-home">
+        <div class="home">
+          <div class="connect-card" id="connect-card" data-state="off">
+            <button class="power" id="power" aria-label="Подключить">
+              <svg viewBox="0 0 24 24"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+            </button>
+            <div class="status-text" id="status-text">Не подключено</div>
+            <div class="status-sub" id="status-sub">Нажмите, чтобы подключиться</div>
+            <button class="server-chip" id="server-chip" data-goto="servers">
+              <span class="chip-label">Сервер</span>
+              <span class="chip-name" id="chip-name">не выбран</span>
+              <svg viewBox="0 0 24 24" class="chev"><path d="M9 6l6 6-6 6"/></svg>
+            </button>
+            <div class="stats" id="stats" hidden>
+              <div class="stat"><span class="stat-k">↑ отдача</span><span class="stat-v" id="st-up">0 Б/с</span><span class="stat-t" id="st-up-t">0 Б</span></div>
+              <div class="stat"><span class="stat-k">↓ загрузка</span><span class="stat-v" id="st-down">0 Б/с</span><span class="stat-t" id="st-down-t">0 Б</span></div>
+              <div class="stat"><span class="stat-k">напрямую</span><span class="stat-v" id="st-direct">0 Б</span><span class="stat-t">мимо VPN</span></div>
+            </div>
+          </div>
+
+          <div class="panel" id="mode-panel">
+            <div class="panel-title">Как пускать трафик</div>
+            <div class="segmented" id="mode-seg" role="radiogroup">
+              <button data-mode="system_proxy">Системный прокси</button>
+              <button data-mode="tun">TUN — весь трафик</button>
+              <button data-mode="proxy_only">Только порт</button>
+            </div>
+            <p class="hint" id="mode-hint"></p>
+            <div class="warn" id="admin-warn" hidden>
+              Для режима TUN нужны права администратора.
+              <button class="btn small" id="relaunch-admin">Перезапустить от администратора</button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">Маршрутизация</div>
+            <div class="segmented" id="routing-seg" role="radiogroup">
+              <button data-routing="global">Всё через VPN</button>
+              <button data-routing="bypass_ru">Россия напрямую</button>
+              <button data-routing="only_listed">Только выбранные сайты</button>
+              <button data-routing="blocked_only">Только заблокированные</button>
+            </div>
+            <p class="hint" id="routing-hint"></p>
+          </div>
+
+          <div class="panel" id="quota-panel" hidden></div>
+        </div>
+      </section>
+
+      <!-- Серверы -->
+      <section class="view" id="view-servers">
+        <header class="view-head">
+          <h1>Серверы</h1>
+          <div class="toolbar">
+            <input type="search" id="server-search" placeholder="Поиск" />
+            <button class="btn" id="sort-btn" title="Сортировка">По порядку</button>
+            <select id="ping-method" title="Как проверять пинг">
+              <option value="proxy_get" title="Запрос через сервер: работает ли вся цепочка">Через прокси, GET</option>
+              <option value="proxy_head" title="То же, запрос HEAD">Через прокси, HEAD</option>
+              <option value="tcp" title="Только TCP-соединение с портом сервера">TCP</option>
+              <option value="icmp" title="Обычный ping адреса сервера; многие серверы на него не отвечают">ICMP</option>
+            </select>
+            <button class="btn" id="ping-all">Проверить пинг</button>
+            <button class="btn primary" data-open="add">Добавить</button>
+          </div>
+        </header>
+        <div id="server-groups"></div>
+      </section>
+
+      <!-- Подписки -->
+      <section class="view" id="view-subs">
+        <header class="view-head">
+          <h1>Подписки</h1>
+          <div class="toolbar">
+            <button class="btn" id="update-all">Обновить все</button>
+            <button class="btn primary" data-open="add">Добавить</button>
+          </div>
+        </header>
+        <div id="sub-list"></div>
+      </section>
+
+      <!-- Настройки -->
+      <section class="view" id="view-settings">
+        <header class="view-head"><h1>Настройки</h1></header>
+        <form id="settings-form" class="settings" autocomplete="off">
+          <fieldset>
+            <legend>Списки сайтов</legend>
+            <p class="hint">По одному на строку: домен (с поддоменами), <code>full:точный.домен</code>, <code>keyword:слово</code>, IP или подсеть, <code>geosite:категория</code>, <code>geoip:код</code>.</p>
+            <label>Всегда через VPN<textarea name="proxy_list" rows="4" placeholder="youtube.com&#10;keyword:google"></textarea></label>
+            <label>Всегда напрямую<textarea name="direct_list" rows="4" placeholder="example.ru&#10;10.0.0.0/8"></textarea></label>
+            <label>Блокировать<textarea name="block_list" rows="3" placeholder="ads.example.com"></textarea></label>
+          </fieldset>
+          <fieldset>
+            <legend>Базы правил (geosite / geoip)</legend>
+            <p class="hint" id="geo-status">Не скачаны.</p>
+            <div class="form-actions"><button type="button" class="btn" id="geo-update">Скачать / обновить базы</button></div>
+            <label>geosite.dat<input name="geosite_url" /></label>
+            <label>geoip.dat<input name="geoip_url" /></label>
+            <label class="check"><input name="geo_auto_update" type="checkbox" /> Обновлять раз в неделю</label>
+          </fieldset>
+          <fieldset class="desktop-only">
+            <legend>Локальный прокси</legend>
+            <div class="row">
+              <label>SOCKS5/HTTP-порт<input name="socks_port" type="number" min="1" max="65535" /></label>
+              <label>HTTP-порт<input name="http_port" type="number" min="1" max="65535" /></label>
+            </div>
+            <label class="check"><input name="allow_lan" type="checkbox" /> Разрешить подключения из локальной сети</label>
+            <div class="lan-auth" id="lan-auth" hidden>
+              <div class="row">
+                <label>Логин для устройств в сети<input name="lan_username" readonly /></label>
+                <label>Пароль для устройств в сети<input name="lan_password" readonly /></label>
+              </div>
+              <div class="form-actions">
+                <button type="button" class="btn small" id="lan-copy">Копировать</button>
+                <button type="button" class="btn small" id="lan-new-password">Новый пароль</button>
+              </div>
+              <p class="hint">Устройствам в сети нужен этот логин и пароль; программы на этом компьютере подключаются без пароля.</p>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Обход DPI</legend>
+            <label class="check"><input name="fragment" type="checkbox" /> Дробить TLS ClientHello на мелкие части (VLESS с TLS или REALITY)</label>
+            <div class="row">
+              <label>Размер частей, байт<input name="fragment_length" placeholder="100-200" /></label>
+              <label>Пауза между частями, мс<input name="fragment_interval" placeholder="10-20" /></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Сеть</legend>
+            <label>DNS-серверы ядра<input name="dns_upstream" placeholder="1.1.1.1, 8.8.8.8" /></label>
+            <label>MTU туннеля<input name="mtu" type="number" min="1280" max="9000" /></label>
+          </fieldset>
+          <fieldset>
+            <legend>Подписки</legend>
+            <label>User-Agent<input name="user_agent" /></label>
+            <label class="check"><input name="send_hwid" type="checkbox" /> Отправлять идентификатор устройства (x-hwid) — нужен панелям с лимитом устройств</label>
+          </fieldset>
+          <fieldset>
+            <legend>Прочее</legend>
+            <label class="check"><input name="auto_connect" type="checkbox" /> Подключаться при запуске</label>
+            <label>Подробность журнала
+              <select name="log_level">
+                <option value="error">Только ошибки</option>
+                <option value="warn">Предупреждения</option>
+                <option value="info">Обычная</option>
+                <option value="debug">Отладка</option>
+              </select>
+            </label>
+          </fieldset>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">Сохранить</button>
+            <span class="hint" id="settings-note">При активном подключении оно перезапустится.</span>
+          </div>
+        </form>
+        <section class="about-card" aria-labelledby="about-head">
+          <h2 class="about-head" id="about-head">О программе</h2>
+          <div class="about-row">
+            <img src="icon.svg" class="about-logo" alt="" />
+            <div class="about-body">
+              <div class="about-title">Unbihex</div>
+              <p class="about-desc">VPN-клиент на собственном ядре. Название — от унбигексия (Ubh), гипотетического элемента №126.</p>
+              <p class="about-author">Автор: Crystalmasta · <a href="#" class="link" data-href="https://github.com/crystalmasta">github.com/crystalmasta</a></p>
+              <p class="about" id="about"></p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <!-- Журнал -->
+      <section class="view" id="view-logs">
+        <header class="view-head">
+          <h1>Журнал</h1>
+          <div class="toolbar">
+            <button class="btn" id="logs-copy">Копировать</button>
+            <button class="btn" id="logs-clear">Очистить</button>
+          </div>
+        </header>
+        <pre class="logs" id="logs"></pre>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="dlg-add">
+    <form method="dialog" class="dlg">
+      <h2>Добавить</h2>
+      <p class="hint">Вставьте ссылку на подписку (<code>https://…</code>) или ссылки на серверы (<code>vless://</code>, <code>ss://</code>, <code>socks://</code>), по одной на строку.</p>
+      <textarea id="add-text" rows="6" placeholder="https://panel.example.com/sub/…"></textarea>
+      <div class="dlg-actions">
+        <button type="button" class="btn" id="add-paste">Вставить из буфера</button>
+        <span class="spacer"></span>
+        <button value="cancel" class="btn">Отмена</button>
+        <button type="button" class="btn primary" id="add-submit">Добавить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-sub">
+    <form method="dialog" class="dlg">
+      <h2>Подписка</h2>
+      <label>Название<input id="sub-name" /></label>
+      <label>Адрес<input id="sub-url" /></label>
+      <label>User-Agent (пусто — из настроек)<input id="sub-ua" /></label>
+      <div class="dlg-actions">
+        <button type="button" class="btn danger" id="sub-delete">Удалить</button>
+        <span class="spacer"></span>
+        <button value="cancel" class="btn">Отмена</button>
+        <button type="button" class="btn primary" id="sub-save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

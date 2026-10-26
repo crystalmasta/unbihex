@@ -1,0 +1,13 @@
+/target
+.gemini-task.md
+# Files installer/build.sh copies in and produces.
+/installer/*.exe
+/installer/wintun.dll
+/installer/wintun-LICENSE.txt
+/installer/icon.ico
+# Built installers, APKs and the Android signing key: never commit them.
+/dist
+*.apk
+*.aab
+*.jks
+*.keystore

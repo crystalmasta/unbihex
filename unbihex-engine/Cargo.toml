@@ -1,0 +1,88 @@
+# Started as crates/unbihex-engine of the old Unbihex repository (now _archive\clean).
+[package]
+name = "unbihex-engine"
+description = "Unbihex network engine: routing, protocols, TUN (SPEC.md)"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MPL-2.0"
+authors = ["Crystalmasta (https://github.com/crystalmasta)"]
+homepage = "https://github.com/crystalmasta"
+
+[features]
+default = []
+# Exposes test-only helpers (custom TLS roots) to integration tests.
+test-util = []
+
+[dependencies]
+# src/adapter.rs (bridge to the old client, now in _archive\clean) is no longer compiled:
+# the engine builds standalone and the new client lives in ../unbihex-client.
+async-trait = "0.1.92"
+# Hot reload: lock-free swap of the routing table.
+arc-swap = "1"
+base64 = "0.22"
+bytes = "1"
+hex = "0.4"
+hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
+idna = "1"
+ipnet = { version = "2", features = ["serde"] }
+ipstack = "1"
+lru = "0.12"
+netdev = "0.46"
+parking_lot = "0.12"
+percent-encoding = "2"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = { version = "0.6", features = ["all"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tun-rs = { version = "2", features = ["async"] }
+url = "2"
+uuid = "1"
+# TLS: rustls with the ring provider (aws-lc-rs needs cmake and nasm).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
+# Shadowsocks AEAD primitives.
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+# REALITY: our own X25519 key (shared by the TLS key share and the REALITY auth key) and HMAC.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hmac = "0.12"
+# Routing rule data: sing-box .srs (zlib) and domain regexes.
+flate2 = "1"
+regex-lite = "0.1"
+# XHTTP transport: HTTP/2 client (and server, for tests and the server role).
+h2 = "0.4"
+http = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+
+[dev-dependencies]
+uuid = "1"
+unbihex-engine = { path = ".", features = ["test-util"] }
+etherparse = "0.20"
+rcgen = "0.14"
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[workspace]

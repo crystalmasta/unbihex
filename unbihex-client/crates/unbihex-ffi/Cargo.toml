@@ -1,0 +1,19 @@
+[package]
+name = "unbihex-ffi"
+description = "C ABI of the Unbihex engine (SPEC §14.1) for the iOS Packet Tunnel extension"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "unbihex"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+unbihex-engine.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "resources/wintun.dll": "wintun.dll",
+      "resources/wintun-LICENSE.txt": "wintun-LICENSE.txt"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": ["Russian", "English"]
+      }
+    }
+  }
+}
