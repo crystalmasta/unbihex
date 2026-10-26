@@ -7,6 +7,3 @@ dist/
 *.aab
 *.jks
 *.keystore
-# Local working notes.
-NEXT_SESSION.md
-.gemini-task.md
