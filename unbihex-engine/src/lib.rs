@@ -168,6 +168,8 @@ impl Instance {
                 InboundConfig::Socks(c) | InboundConfig::Http(c) | InboundConfig::Mixed(c) => {
                     Some(c.listen)
                 }
+                #[cfg(feature = "server")]
+                InboundConfig::Vless(c) => Some(c.listen),
                 InboundConfig::Tun(_) => None,
             })
             .collect();
@@ -223,6 +225,17 @@ impl Instance {
                     tokio::spawn(inbound::mixed::serve(
                         l,
                         c.clone(),
+                        dispatcher.clone(),
+                        handshake,
+                        handshakes.clone(),
+                        cancel.clone(),
+                    ))
+                }),
+                #[cfg(feature = "server")]
+                InboundConfig::Vless(c) => inbound::vless::bind(c).await.map(|(l, server)| {
+                    tokio::spawn(inbound::vless::serve(
+                        l,
+                        server,
                         dispatcher.clone(),
                         handshake,
                         handshakes.clone(),

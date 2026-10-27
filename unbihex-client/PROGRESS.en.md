@@ -50,8 +50,18 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - The `fp` parameter of links and JSON subscriptions: any browser gives Chrome for now, `none` gives rustls's hello.
 - Tested on 15 live servers (14 TLS+Vision, 1 REALITY+Vision): all connect.
 
+## 27.10 — server engine, step 1: VLESS+TLS+Vision (done)
+- A VLESS inbound (the engine's `server` feature; the client doesn't enable it): TLS with a certificate from PEM
+  files, X25519MLKEM768 on the server side, users with `id` / `email` / `flow`, Xray's Vision rules (a Vision user
+  must use it, other users may not). TCP only for now.
+- The `unbihex` binary: `run -c <file | stdin:>`, `version`, `uuid [-i text]`, `x25519 [-i key]`;
+  stops on Ctrl-C and SIGTERM. The config is still the engine's format, not Xray JSON.
+- Fixed a lost wakeup in the TLS stream: reading no longer sends data by itself; with large transfers in both
+  directions this could stall the connection.
+- `tests/server.rs`: our client ↔ our server, TLS and Vision, up to 1 MB, refusing strangers and wrong flows.
+
 ## Next
-1. The server side: VLESS / Vision / REALITY inbound.
+1. The server side: UDP and XUDP in the VLESS inbound, then a REALITY inbound.
 2. An Xray-like gRPC API (HandlerService, StatsService), strict Xray JSON parsing,
    the `run -c` / `version` / `x25519` / `uuid` / `api` CLI — for Marzban / 3x-ui / PasarGuard.
 3. Fuzzing and benchmarks, the engine README as an SDK.

@@ -50,8 +50,18 @@
 - Параметр `fp` ссылок и JSON-подписок: любой браузер пока даёт Chrome, `none` — ClientHello rustls.
 - Проверено на 15 живых серверах (14 TLS+Vision, 1 REALITY+Vision): все подключаются.
 
+## 27.10 — серверное ядро, шаг 1: VLESS+TLS+Vision (готово)
+- VLESS inbound (фича `server` ядра, клиент её не включает): TLS с сертификатом из PEM-файлов,
+  X25519MLKEM768 на стороне сервера, пользователи с `id` / `email` / `flow`, правила Vision как у Xray
+  (пользователь с Vision обязан его использовать, остальным он запрещён). Пока только TCP.
+- Бинарник `unbihex`: `run -c <файл | stdin:>`, `version`, `uuid [-i текст]`, `x25519 [-i ключ]`;
+  остановка по Ctrl-C и SIGTERM. Конфиг пока в формате ядра, не Xray JSON.
+- Исправлена потеря пробуждения в TLS-потоке: чтение больше не отправляет данные само, из-за этого
+  при передаче больших объёмов в два направления соединение могло зависнуть.
+- Тесты `tests/server.rs`: наш клиент ↔ наш сервер, TLS и Vision, до 1 МБ, отказ чужим и с неверным flow.
+
 ## Дальше
-1. Серверная часть: VLESS / Vision / REALITY inbound.
+1. Серверная часть: UDP и XUDP в VLESS inbound, затем REALITY inbound.
 2. gRPC API как у Xray (HandlerService, StatsService), чтение Xray JSON со строгим разбором,
    CLI `run -c` / `version` / `x25519` / `uuid` / `api` — для Marzban / 3x-ui / PasarGuard.
 3. Fuzzing и бенчмарки, README ядра как SDK.

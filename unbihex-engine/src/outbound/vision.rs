@@ -1,4 +1,4 @@
-//! XTLS Vision flow (`xtls-rprx-vision`), client side.
+//! XTLS Vision flow (`xtls-rprx-vision`), client and server side.
 //!
 //! Vision hides the length pattern of TLS-in-TLS: the first packets of each
 //! direction are wrapped in padded blocks
@@ -11,8 +11,9 @@
 //! and the sender stops using the outer TLS ("direct copy"). After a 2 from the
 //! server, the inner traffic arrives on the bare TCP connection.
 //!
-//! The client never switches its own direction to direct copy: it ends its padding
-//! with command 1 and keeps writing through TLS, which servers accept.
+//! We never switch our own direction to direct copy: padding ends with command 1 and
+//! writes keep going through TLS, which both Xray clients and servers accept. Reads
+//! follow the peer's command 2.
 
 use std::future::Future;
 use std::io;
@@ -232,6 +233,8 @@ pub struct VisionStream<S> {
     padding: bool,
     packets: u32,
     is_tls: bool,
+    /// Handshake type that marks our direction as TLS: ClientHello (1) or ServerHello (2).
+    hello_type: u8,
     out: PendingOut,
     first_wait: Option<Pin<Box<Sleep>>>,
     /// The padding-only first block is queued but not flushed yet; reads push it out.
@@ -253,6 +256,7 @@ impl<S> VisionStream<S> {
             padding: true,
             packets: 0,
             is_tls: false,
+            hello_type: 0x01,
             out: PendingOut::default(),
             first_wait: Some(Box::pin(tokio::time::sleep(FIRST_PACKET_WAIT))),
             first_unsent: false,
@@ -261,6 +265,16 @@ impl<S> VisionStream<S> {
             ready_pos: 0,
             eof: false,
         }
+    }
+
+    /// Server side of a `flow = xtls-rprx-vision` request: unpads the client's blocks and
+    /// pads the first downlink packets (the inner TLS is spotted by its ServerHello). The
+    /// server speaks second, so there is no padding-only first block.
+    pub fn new_server(inner: S, uuid: [u8; 16]) -> Self {
+        let mut s = Self::new(inner, uuid);
+        s.hello_type = 0x02;
+        s.first_wait = None;
+        s
     }
 
     fn take_uuid(&mut self) -> Option<[u8; 16]> {
@@ -272,14 +286,14 @@ impl<S> VisionStream<S> {
         }
     }
 
-    /// Pads one uplink chunk and queues it; returns how many bytes were taken.
+    /// Pads one outgoing chunk and queues it; returns how many bytes were taken.
     fn queue_padded(&mut self, data: &[u8]) -> usize {
         let chunk = &data[..data.len().min(MAX_CONTENT)];
         if self.packets == 0
             && chunk.len() >= 6
             && chunk[0] == 0x16
             && chunk[1] == 0x03
-            && chunk[5] == 0x01
+            && chunk[5] == self.hello_type
         {
             self.is_tls = true;
         }

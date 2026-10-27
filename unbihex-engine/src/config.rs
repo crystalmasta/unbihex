@@ -84,6 +84,9 @@ pub enum InboundConfig {
     Http(ProxyInboundConfig),
     /// SOCKS5 and HTTP proxy on one port, told apart by the first byte.
     Mixed(ProxyInboundConfig),
+    /// VLESS server over TLS (the `server` feature).
+    #[cfg(feature = "server")]
+    Vless(VlessInboundConfig),
 }
 
 impl InboundConfig {
@@ -92,8 +95,78 @@ impl InboundConfig {
         match self {
             InboundConfig::Tun(c) => &c.tag,
             InboundConfig::Socks(c) | InboundConfig::Http(c) | InboundConfig::Mixed(c) => &c.tag,
+            #[cfg(feature = "server")]
+            InboundConfig::Vless(c) => &c.tag,
         }
     }
+}
+
+/// VLESS server settings.
+#[cfg(feature = "server")]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VlessInboundConfig {
+    /// Inbound tag.
+    pub tag: String,
+    /// Address to listen on.
+    pub listen: SocketAddr,
+    /// Who may connect.
+    pub users: Vec<VlessUser>,
+    /// TLS settings; a VLESS server without TLS is not supported.
+    pub tls: ServerTlsConfig,
+}
+
+#[cfg(feature = "server")]
+impl VlessInboundConfig {
+    fn validate(&self) -> Result<()> {
+        if self.users.is_empty() {
+            return Err(Error::config(format!("inbound {}: no users", self.tag)));
+        }
+        let mut ids = HashSet::new();
+        for u in &self.users {
+            let id = uuid::Uuid::parse_str(u.id.expose())
+                .map_err(|_| Error::config(format!("inbound {}: invalid user id", self.tag)))?;
+            if !ids.insert(id) {
+                return Err(Error::config(format!("inbound {}: duplicate user id", self.tag)));
+            }
+            if !(u.flow.is_empty() || u.flow == FLOW_VISION || u.flow == "xtls-rprx-vision-udp443") {
+                return Err(Error::Unsupported(format!(
+                    "inbound {}: flow {:?}",
+                    self.tag, u.flow
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One VLESS user.
+#[cfg(feature = "server")]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VlessUser {
+    /// User UUID.
+    pub id: Secret,
+    /// Name for logs and statistics.
+    #[serde(default)]
+    pub email: String,
+    /// `xtls-rprx-vision` or empty.
+    #[serde(default)]
+    pub flow: String,
+}
+
+/// Server-side TLS settings.
+#[cfg(feature = "server")]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerTlsConfig {
+    /// PEM certificate chain.
+    pub certificate_file: std::path::PathBuf,
+    /// PEM private key.
+    pub key_file: std::path::PathBuf,
+    /// ALPN protocols, in preference order; default `h2`, `http/1.1` (as Xray).
+    #[serde(default)]
+    pub alpn: Vec<String>,
 }
 
 /// TUN inbound settings.
@@ -761,6 +834,10 @@ impl Config {
                     "duplicate or empty inbound tag {:?}",
                     i.tag()
                 )));
+            }
+            #[cfg(feature = "server")]
+            if let InboundConfig::Vless(v) = i {
+                v.validate()?;
             }
         }
         let mut out_tags = HashSet::new();

@@ -4,6 +4,8 @@ pub mod http;
 pub mod mixed;
 pub mod socks;
 pub mod tun;
+#[cfg(feature = "server")]
+pub mod vless;
 
 use std::net::SocketAddr;
 

@@ -13,6 +13,13 @@ homepage = "https://github.com/crystalmasta"
 default = []
 # Exposes test-only helpers (custom TLS roots) to integration tests.
 test-util = []
+# Server role: the VLESS inbound and the `unbihex` binary. Client builds leave it off.
+server = ["tokio/signal", "uuid/v4", "uuid/v5", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "unbihex"
+path = "src/bin/unbihex.rs"
+required-features = ["server"]
 
 [dependencies]
 # src/adapter.rs (bridge to the old client, now in _archive\clean) is no longer compiled:
@@ -64,6 +71,8 @@ regex-lite = "0.1"
 h2 = "0.4"
 http = "1"
 ml-kem = { version = "0.3.3", features = ["zeroize"] }
+# The `unbihex` binary's log output (server feature).
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "fmt"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
