@@ -23,6 +23,8 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   `http://` on the internet are refused. A subscription response is at most 8 MB, a database file at most 256 MB
   (written to disk as it downloads).
 - Adding `vless://`, `ss://` and `socks://` links by hand.
+- TLS and REALITY send a Chrome ClientHello (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768) instead of
+  rustls's recognisable one; `fp=none` in a link turns this off.
 - A choice of ping tests: through the proxy with GET or HEAD (the request goes through the engine itself to
   `cp.cloudflare.com/generate_204`, so the whole chain is checked), TCP (a connection to the server port only) or ICMP.
   TCP and ICMP also test servers whose protocol is not supported; in TUN mode the tests bypass the tunnel.
@@ -48,13 +50,22 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
 
 ### What the engine supports
 
-| Works | Listed, but not available yet |
-|---|---|
-| VLESS: TCP + TLS, REALITY, XTLS Vision (`xtls-rprx-vision`), XHTTP (packet-up, stream-up, stream-one), UDP over XUDP | ws / grpc / httpupgrade transports, XHTTP over HTTP/3, other `flow` kinds |
-| Shadowsocks AEAD (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305) | Shadowsocks 2022 and Shadowsocks plugins |
-| SOCKS5 | VMess, Trojan, Hysteria2, TUIC, WireGuard; VLESS without TLS (refused: the UUID and traffic go in the clear) |
+Works:
 
-Unsupported servers are shown greyed out with the reason. When the engine gains a protocol,
+- **VLESS** with TLS or REALITY, including XTLS Vision (`flow=xtls-rprx-vision`) and UDP over XUDP;
+  the TCP and XHTTP transports (packet-up, stream-up and stream-one over HTTP/2; packet-up also over HTTP/1.1).
+- **Shadowsocks** with the AEAD ciphers aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
+- **SOCKS5**.
+
+Not supported yet — such servers are listed, but greyed out:
+
+- the VMess, Trojan, Hysteria2, TUIC and WireGuard protocols;
+- for VLESS: the ws, grpc and httpupgrade transports, XHTTP over HTTP/3, and `flow` kinds other than Vision;
+- for Shadowsocks: Shadowsocks 2022 and plugins.
+
+The engine refuses VLESS without TLS or REALITY on purpose: the UUID and traffic would go in the clear.
+
+A greyed-out server shows the reason next to it. When the engine gains a protocol,
 it is enough to remove the matching check in `crates/client-core/src/links.rs`.
 
 ## Layout

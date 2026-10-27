@@ -22,6 +22,8 @@ VPN-клиент для подписок на собственном ядре **
   этого компьютера и локальной сети (`127.0.0.1`, `localhost`, `192.168.x.x` и т. п.),
   перенаправления на `http://` в интернет отклоняются. Ответ подписки — не больше 8 МБ, файл базы — 256 МБ (пишется на диск по мере скачивания).
 - Ручное добавление ссылок `vless://`, `ss://`, `socks://`.
+- TLS и REALITY отправляют ClientHello как у Chrome (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768),
+  а не узнаваемый ClientHello rustls; `fp=none` в ссылке отключает это.
 - Проверка пинга на выбор: через прокси GET или HEAD (запрос идёт через само ядро до `cp.cloudflare.com/generate_204`,
   проверяется вся цепочка), TCP (только соединение с портом сервера) или ICMP. TCP и ICMP проверяют и серверы
   с неподдерживаемыми протоколами; в режиме TUN проверки идут мимо туннеля.
@@ -47,13 +49,22 @@ VPN-клиент для подписок на собственном ядре **
 
 ### Что поддерживает ядро
 
-| Работает | Видно в списке, но пока недоступно |
-|---|---|
-| VLESS: TCP + TLS, REALITY, XTLS Vision (`xtls-rprx-vision`), XHTTP (packet-up, stream-up, stream-one), UDP через XUDP | транспорты ws / grpc / httpupgrade, XHTTP поверх HTTP/3, другие виды `flow` |
-| Shadowsocks AEAD (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305) | Shadowsocks 2022 и плагины Shadowsocks |
-| SOCKS5 | VMess, Trojan, Hysteria2, TUIC, WireGuard; VLESS без TLS (отклоняется: UUID и трафик идут открыто) |
+Работает:
 
-Неподдерживаемые серверы показываются серыми с причиной. Когда в ядре появится протокол,
+- **VLESS** с TLS или REALITY, в том числе XTLS Vision (`flow=xtls-rprx-vision`) и UDP через XUDP;
+  транспорты TCP и XHTTP (режимы packet-up, stream-up и stream-one поверх HTTP/2; packet-up — и поверх HTTP/1.1).
+- **Shadowsocks** с AEAD-шифрами aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
+- **SOCKS5**.
+
+Пока не поддерживается — такие серверы видны в списке, но серые:
+
+- протоколы VMess, Trojan, Hysteria2, TUIC, WireGuard;
+- у VLESS — транспорты ws, grpc, httpupgrade, XHTTP поверх HTTP/3 и другие виды `flow`, кроме Vision;
+- у Shadowsocks — Shadowsocks 2022 и плагины.
+
+VLESS без TLS и REALITY ядро отклоняет намеренно: UUID и трафик шли бы открытым текстом.
+
+Рядом с серым сервером показана причина. Когда в ядре появится протокол,
 достаточно убрать соответствующую проверку в `crates/client-core/src/links.rs`.
 
 ## Структура
