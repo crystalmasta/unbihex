@@ -70,8 +70,18 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - Tests: a plain user's UDP, XUDP over Vision, Mux with TCP and two UDP destinations in one session,
   TCP inside Mux refused for a Vision user.
 
+## 27.10 — server engine, step 2: REALITY (done)
+- The server has a folder of its own, `unbihex-server` (binary, tests, example configs); the protocols stay in the engine.
+- A REALITY inbound: the ClientHello is read whole (fragmented ones too) and its `session_id` checked with the
+  server key: short ID, server name and optionally the client's clock (`max_time_diff_ms`). Our clients get
+  TLS 1.3 with a throw-away Ed25519 certificate signed by HMAC; everyone else is sent to `dest` with the bytes
+  read so far and talks to the real site.
+- Tests: our client over REALITY (Vision, the Chrome fingerprint, XUDP, a fragmented hello, an empty short ID);
+  a browser over TLS and a plain HTTP request get the real site; a wrong short ID does not pass.
+- Not yet: matching our handshake record sizes to `dest` (Xray does), client version checks.
+
 ## Next
-1. The server side: a REALITY inbound.
+1. The server side: per-user stats and the gRPC API (HandlerService, StatsService), the `api` command.
 2. An Xray-like gRPC API (HandlerService, StatsService), strict Xray JSON parsing,
    the `run -c` / `version` / `x25519` / `uuid` / `api` CLI — for Marzban / 3x-ui / PasarGuard.
 3. Fuzzing and benchmarks, the engine README as an SDK.

@@ -4,6 +4,8 @@ pub mod http;
 pub mod mixed;
 #[cfg(feature = "server")]
 pub mod mux;
+#[cfg(feature = "server")]
+pub mod reality;
 pub mod socks;
 pub mod tun;
 #[cfg(feature = "server")]

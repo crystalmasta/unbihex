@@ -46,3 +46,24 @@ pub async fn udp_echo() -> SocketAddr {
     });
     addr
 }
+
+/// Starts an engine whose config `make` builds for a listen port, retrying on another
+/// port when a parallel test took the free one first.
+pub async fn start_on_free_port(
+    make: impl Fn(u16) -> unbihex_engine::Config,
+) -> (unbihex_engine::Instance, u16) {
+    let mut tries = 0;
+    loop {
+        let port = free_port();
+        match unbihex_engine::Instance::start(make(port), unbihex_engine::PlatformHooks::default())
+            .await
+        {
+            Ok(i) => return (i, port),
+            Err(e) if tries < 5 => {
+                tries += 1;
+                eprintln!("port {port}: {e}; retrying");
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+}

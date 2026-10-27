@@ -1,4 +1,4 @@
-//! VLESS server (the `server` feature): TLS, then the VLESS request; XTLS Vision for
+//! VLESS server (the `server` feature): TLS or REALITY (`reality.rs`), then the VLESS request; XTLS Vision for
 //! users with `flow = xtls-rprx-vision`. Commands: TCP, UDP (`len(be16) | payload`
 //! packets to one destination) and Mux.Cool, which carries XUDP (see `mux.rs`).
 //!
@@ -25,8 +25,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::ct_eq;
 use super::mux::{self, MuxContext};
+use super::reality::{Handshake, RealityServer};
 use crate::address::{Address, TargetAddr, normalize_domain};
-use crate::config::{FLOW_VISION, VlessInboundConfig};
+use crate::config::{FLOW_VISION, ServerTlsConfig, VlessInboundConfig};
 use crate::dispatcher::Dispatcher;
 use crate::error::{Error, Result};
 use crate::net::PendingOut;
@@ -47,16 +48,34 @@ struct User {
     vision: bool,
 }
 
+/// How the connection is secured.
+enum Security {
+    Tls(Arc<ServerConfig>),
+    Reality(Box<RealityServer>),
+}
+
 /// A configured VLESS server, ready to serve its listener.
 pub struct VlessServer {
     tag: String,
     users: Vec<User>,
-    tls: Arc<ServerConfig>,
+    security: Security,
 }
 
 /// Loads the certificate and binds the listening socket (fails fast on a busy port).
 pub async fn bind(cfg: &VlessInboundConfig) -> Result<(TcpListener, VlessServer)> {
-    let tls = server_tls(cfg)?;
+    let security = match (&cfg.tls, &cfg.reality) {
+        (Some(tls), _) => Security::Tls(server_tls(&cfg.tag, tls)?),
+        (None, Some(r)) => Security::Reality(Box::new(
+            RealityServer::new(r)
+                .map_err(|e| Error::config(format!("vless inbound {}: {e}", cfg.tag)))?,
+        )),
+        (None, None) => {
+            return Err(Error::config(format!(
+                "vless inbound {}: neither tls nor reality",
+                cfg.tag
+            )));
+        }
+    };
     let users = cfg
         .users
         .iter()
@@ -81,27 +100,25 @@ pub async fn bind(cfg: &VlessInboundConfig) -> Result<(TcpListener, VlessServer)
         VlessServer {
             tag: cfg.tag.clone(),
             users,
-            tls,
+            security,
         },
     ))
 }
 
-fn server_tls(cfg: &VlessInboundConfig) -> Result<Arc<ServerConfig>> {
-    let fail =
-        |what: &str, e: String| Error::config(format!("vless inbound {}: {what}: {e}", cfg.tag));
-    let certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_file_iter(&cfg.tls.certificate_file)
-            .map_err(|e| fail("certificate_file", e.to_string()))?
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|e| fail("certificate_file", e.to_string()))?;
+fn server_tls(tag: &str, cfg: &ServerTlsConfig) -> Result<Arc<ServerConfig>> {
+    let fail = |what: &str, e: String| Error::config(format!("vless inbound {tag}: {what}: {e}"));
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&cfg.certificate_file)
+        .map_err(|e| fail("certificate_file", e.to_string()))?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| fail("certificate_file", e.to_string()))?;
     if certs.is_empty() {
         return Err(fail(
             "certificate_file",
             "no certificate in the file".into(),
         ));
     }
-    let key = PrivateKeyDer::from_pem_file(&cfg.tls.key_file)
-        .map_err(|e| fail("key_file", e.to_string()))?;
+    let key =
+        PrivateKeyDer::from_pem_file(&cfg.key_file).map_err(|e| fail("key_file", e.to_string()))?;
     let mut provider = rustls::crypto::ring::default_provider();
     // Browsers and Xray clients offer X25519MLKEM768 first; take it when they do.
     provider.kx_groups.insert(0, &X25519_MLKEM768);
@@ -111,10 +128,10 @@ fn server_tls(cfg: &VlessInboundConfig) -> Result<Arc<ServerConfig>> {
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| fail("certificate", e.to_string()))?;
-    sc.alpn_protocols = if cfg.tls.alpn.is_empty() {
+    sc.alpn_protocols = if cfg.alpn.is_empty() {
         vec![b"h2".to_vec(), b"http/1.1".to_vec()]
     } else {
-        cfg.tls.alpn.iter().map(|a| a.as_bytes().to_vec()).collect()
+        cfg.alpn.iter().map(|a| a.as_bytes().to_vec()).collect()
     };
     Ok(Arc::new(sc))
 }
@@ -151,11 +168,20 @@ pub async fn serve(
         let (server, d) = (server.clone(), dispatcher.clone());
         tokio::spawn(async move {
             let _ = stream.set_nodelay(true);
-            let r = tokio::time::timeout(handshake_timeout, accept(&server, stream, peer)).await;
+            let r = tokio::time::timeout(
+                handshake_timeout,
+                accept(&server, stream, peer, handshake_timeout / 2),
+            )
+            .await;
             drop(permit);
             match r {
                 Ok(Ok(Accepted::Tcp(stream, sess))) => d.dispatch_tcp(sess, stream).await,
                 Ok(Ok(Accepted::Udp(flow, sess))) => d.dispatch_udp(sess, flow).await,
+                Ok(Ok(Accepted::Fallback(tcp, prefix))) => {
+                    if let Security::Reality(r) = &server.security {
+                        r.forward(tcp, prefix).await;
+                    }
+                }
                 Ok(Ok(Accepted::Mux(stream, allow_tcp))) => {
                     let ctx = MuxContext {
                         dispatcher: d,
@@ -178,11 +204,24 @@ enum Accepted {
     Udp(Box<dyn PacketStream>, Session),
     /// The Mux.Cool stream and whether it may carry TCP sessions.
     Mux(BoxStream, bool),
+    /// Not a REALITY client of ours: the connection goes to `dest` with these bytes.
+    Fallback(TcpStream, Vec<u8>),
 }
 
 /// TLS handshake and VLESS request, checked against the user's flow as Xray does.
-async fn accept(server: &VlessServer, tcp: TcpStream, peer: SocketAddr) -> Result<Accepted> {
-    let mut tls = TlsRecordStream::accept(tcp, server.tls.clone()).await?;
+async fn accept(
+    server: &VlessServer,
+    tcp: TcpStream,
+    peer: SocketAddr,
+    hello_wait: Duration,
+) -> Result<Accepted> {
+    let mut tls = match &server.security {
+        Security::Tls(cfg) => TlsRecordStream::accept(tcp, cfg.clone()).await?,
+        Security::Reality(r) => match r.accept(tcp, hello_wait).await? {
+            Handshake::Done(tls) => *tls,
+            Handshake::Fallback(tcp, prefix) => return Ok(Accepted::Fallback(tcp, prefix)),
+        },
+    };
     let req = read_request(&mut tls, &server.users).await?;
     let user = &server.users[req.user];
     if req.vision && !user.vision {

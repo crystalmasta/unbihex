@@ -13,7 +13,7 @@ use unbihex_engine::outbound::vless::{CMD_MUX, VlessOutbound, VlessStream, encod
 use unbihex_engine::outbound::xudp::mux_target;
 use unbihex_engine::outbound::{Outbound, ServerEndpoint};
 use unbihex_engine::session::{Network, Session};
-use unbihex_engine::{Config, Instance, PlatformHooks};
+use unbihex_engine::{Config, Instance};
 
 const PLAIN_USER: &str = "6f1d7e2a-3b4c-4d5e-8f60-718293a4b5c6";
 const VISION_USER: &str = "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9";
@@ -33,22 +33,21 @@ async fn server() -> Server {
     let (cert_file, key_file) = (dir.join("cert.pem"), dir.join("key.pem"));
     std::fs::write(&cert_file, ck.cert.pem()).unwrap();
     std::fs::write(&key_file, ck.signing_key.serialize_pem()).unwrap();
-    let port = free_port();
-    let json = serde_json::json!({
-        "inbounds": [{
-            "type": "vless", "tag": "vless-in", "listen": format!("127.0.0.1:{port}"),
-            "users": [
-                {"id": PLAIN_USER, "email": "plain@test"},
-                {"id": VISION_USER, "email": "vision@test", "flow": "xtls-rprx-vision"}
-            ],
-            "tls": {"certificate_file": cert_file, "key_file": key_file}
-        }],
-        "outbounds": [{"type": "direct", "tag": "direct"}]
-    });
-    let cfg = Config::from_json(&json.to_string()).unwrap();
-    let instance = Instance::start(cfg, PlatformHooks::default())
-        .await
-        .unwrap();
+    let (instance, port) = start_on_free_port(|port| {
+        let json = serde_json::json!({
+            "inbounds": [{
+                "type": "vless", "tag": "vless-in", "listen": format!("127.0.0.1:{port}"),
+                "users": [
+                    {"id": PLAIN_USER, "email": "plain@test"},
+                    {"id": VISION_USER, "email": "vision@test", "flow": "xtls-rprx-vision"}
+                ],
+                "tls": {"certificate_file": cert_file, "key_file": key_file}
+            }],
+            "outbounds": [{"type": "direct", "tag": "direct"}]
+        });
+        Config::from_json(&json.to_string()).unwrap()
+    })
+    .await;
     Server {
         instance,
         port,

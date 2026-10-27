@@ -8,11 +8,13 @@ process, the CLI and the tests.
 
 ## What it does
 - VLESS over TLS (certificate from PEM files), X25519MLKEM768 on the server side.
+- REALITY: our clients are recognised by the key inside the ClientHello; everyone else is passed through to
+  the real site (`dest`) untouched, so a scanner or a browser sees that site.
 - XTLS Vision (`flow: xtls-rprx-vision`) with Xray's rules: a Vision user must use it.
 - UDP: the VLESS UDP command and Mux.Cool / XUDP (Vision users' UDP, full cone from Xray clients).
 - Routing, DNS and outbounds: everything the engine has.
 
-In progress: REALITY, an Xray-like gRPC API (HandlerService, StatsService), reading Xray JSON.
+In progress: an Xray-like gRPC API (HandlerService, StatsService), reading Xray JSON.
 
 ## Commands
 ```text
@@ -22,7 +24,9 @@ unbihex uuid [-i text]                   a random UUID, or Xray's UUIDv5 of the 
 unbihex x25519 [-i key]                  a REALITY key pair (base64url), or the public key of a private one
 ```
 
-The config is the engine's format (`../unbihex-engine/SPEC.en.md`, §5); see [`config.example.json`](config.example.json).
+The config is the engine's format (`../unbihex-engine/SPEC.en.md`, §5); see [`config.example.json`](config.example.json) (TLS)
+and [`config.reality.example.json`](config.reality.example.json) (REALITY: `unbihex x25519` makes the keys,
+clients need the public one).
 The log level comes from `log.level` or the `RUST_LOG` variable.
 
 ## Building and tests
@@ -31,4 +35,5 @@ cargo build --release
 cargo test
 ```
 The binary is `target/release/unbihex`. The tests run our client against our server on loopback:
-TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users.
+TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users; REALITY with Vision and the
+Chrome fingerprint, a fragmented ClientHello, and what strangers see: the real site over TLS and HTTP.

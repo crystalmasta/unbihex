@@ -1,0 +1,23 @@
+{
+  "log": { "level": "info" },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-reality",
+      "listen": "0.0.0.0:443",
+      "users": [
+        { "id": "6f1d7e2a-3b4c-4d5e-8f60-718293a4b5c6", "email": "alice", "flow": "xtls-rprx-vision" }
+      ],
+      "reality": {
+        "dest": "www.microsoft.com:443",
+        "server_names": ["www.microsoft.com"],
+        "private_key": "<Private key из unbihex x25519>",
+        "short_ids": ["", "0123abcd"],
+        "max_time_diff_ms": 60000
+      }
+    }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ]
+}

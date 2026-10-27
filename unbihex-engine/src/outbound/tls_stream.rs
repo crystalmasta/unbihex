@@ -208,6 +208,26 @@ impl TlsRecordStream {
         Ok(s)
     }
 
+    /// Server side, when the first records were read already (REALITY reads the
+    /// ClientHello itself to check the client); `prefix` ends at a record boundary.
+    pub async fn accept_prefixed(
+        tcp: TcpStream,
+        mut conn: ServerConnection,
+        prefix: &[u8],
+    ) -> Result<Self> {
+        let mut rest = prefix;
+        while !rest.is_empty() {
+            if conn.read_tls(&mut rest)? == 0 {
+                break;
+            }
+            conn.process_new_packets()
+                .map_err(|e| Error::Tls(e.to_string()))?;
+        }
+        let mut s = TlsRecordStream::new(tcp, conn);
+        s.handshake().await?;
+        Ok(s)
+    }
+
     /// The peer's address.
     pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
         self.tcp.peer_addr()
