@@ -27,6 +27,11 @@ thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# The engine's patched rustls (ClientHello rewriting for the browser TLS fingerprint);
+# see ../unbihex-engine/vendor/rustls/UNBIHEX-PATCH.md.
+[patch.crates-io]
+rustls = { path = "../unbihex-engine/vendor/rustls" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

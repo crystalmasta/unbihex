@@ -11,7 +11,7 @@ then the server.
 
 ## Stage 0 — now: the client connects to real subscriptions
 1. Finish XTLS Vision + REALITY (done).
-2. TLS fingerprint (fp=chrome). The rustls ClientHello is easy to tell apart from a browser; Russia's TSPU
+2. TLS fingerprint (fp=chrome) — done 27.10: our own Chrome-template ClientHello on a patched rustls. The rustls ClientHello is easy to tell apart from a browser; Russia's TSPU
    can block by fingerprint. Options: our own ClientHello that mimics Chrome (like uTLS),
    or BoringSSL (the `boring` crate) instead of rustls for the outer TLS/REALITY.
    Without it REALITY may work worse than in Xray clients.

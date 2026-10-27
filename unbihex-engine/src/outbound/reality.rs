@@ -37,6 +37,8 @@ use sha2::{Sha256, Sha512};
 use tokio::net::TcpStream;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use super::fingerprint::Fingerprint;
+use super::pq::{HybridSecrets, X25519MlKem768};
 use super::tls_stream::TlsRecordStream;
 use crate::config::RealityConfig;
 use crate::error::{Error, Result};
@@ -53,6 +55,7 @@ pub struct RealityClient {
     short_id: [u8; 8],
     server_name: ServerName<'static>,
     alpn: Vec<Vec<u8>>,
+    fingerprint: Option<Fingerprint>,
 }
 
 impl std::fmt::Debug for RealityClient {
@@ -68,6 +71,8 @@ impl std::fmt::Debug for RealityClient {
 struct HelloState {
     /// Our X25519 secret (TLS key share and REALITY auth key).
     secret: Option<[u8; 32]>,
+    /// ML-KEM-768 seed of the X25519MLKEM768 share (its X25519 half is `secret`).
+    mlkem_seed: Option<[u8; 64]>,
     /// Randomness handed out so far (first pass) or to hand out (second pass).
     fills: Vec<Vec<u8>>,
     /// Second pass: next fill to replay.
@@ -111,6 +116,17 @@ impl SecureRandom for HookedRandom {
 struct HookedX25519;
 
 static HOOKED_X25519: HookedX25519 = HookedX25519;
+
+/// X25519MLKEM768 built on the same X25519 secret, so either share yields our auth key.
+static HOOKED_HYBRID: X25519MlKem768 = X25519MlKem768::new(|| {
+    HELLO.with(|h| {
+        let h = h.borrow();
+        match (h.secret, h.mlkem_seed) {
+            (Some(x25519), Some(mlkem_seed)) => Ok(HybridSecrets { x25519, mlkem_seed }),
+            _ => Err(rustls::Error::General("reality: no key share prepared".into())),
+        }
+    })
+});
 
 struct X25519Exchange {
     secret: StaticSecret,
@@ -258,9 +274,25 @@ impl ServerCertVerifier for NoVerifier {
     }
 }
 
-fn provider() -> CryptoProvider {
-    let mut p = rustls::crypto::ring::default_provider();
-    p.kx_groups = vec![&HOOKED_X25519];
+fn provider(fingerprint: Option<Fingerprint>) -> CryptoProvider {
+    let mut p = match fingerprint {
+        Some(fp) => {
+            let mut p = fp.provider();
+            // Chrome's groups, with the key shares tied to our REALITY secret.
+            p.kx_groups = vec![
+                &HOOKED_HYBRID,
+                &HOOKED_X25519,
+                rustls::crypto::ring::kx_group::SECP256R1,
+                rustls::crypto::ring::kx_group::SECP384R1,
+            ];
+            p
+        }
+        None => {
+            let mut p = rustls::crypto::ring::default_provider();
+            p.kx_groups = vec![&HOOKED_X25519];
+            p
+        }
+    };
     p.secure_random = &HOOKED_RANDOM;
     p
 }
@@ -268,8 +300,9 @@ fn provider() -> CryptoProvider {
 fn client_config(
     verifier: Arc<dyn ServerCertVerifier>,
     alpn: &[Vec<u8>],
+    fingerprint: Option<Fingerprint>,
 ) -> Result<Arc<ClientConfig>> {
-    let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider()))
+    let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider(fingerprint)))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| Error::Tls(e.to_string()))?
         .dangerous()
@@ -277,6 +310,7 @@ fn client_config(
         .with_no_client_auth();
     cfg.resumption = rustls::client::Resumption::disabled();
     cfg.alpn_protocols = alpn.to_vec();
+    cfg.client_hello_rewriter = fingerprint.map(|fp| fp.rewriter());
     Ok(Arc::new(cfg))
 }
 
@@ -325,6 +359,7 @@ impl RealityClient {
             short_id: cfg.short_id_bytes()?,
             server_name,
             alpn,
+            fingerprint: Fingerprint::from_name(cfg.fingerprint.as_deref()),
         })
     }
 
@@ -334,16 +369,19 @@ impl RealityClient {
         let algs = rustls::crypto::ring::default_provider().signature_verification_algorithms;
         let mut secret = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
+        let mut mlkem_seed = [0u8; 64];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut mlkem_seed);
         let shared = StaticSecret::from(secret).diffie_hellman(&PublicKey::from(self.server_public));
         if !shared.was_contributory() {
             return Err(Error::config("reality: invalid public key"));
         }
 
         // Pass 1: learn the exact ClientHello.
-        let probe_cfg = client_config(Arc::new(NoVerifier(algs)), &self.alpn)?;
+        let probe_cfg = client_config(Arc::new(NoVerifier(algs)), &self.alpn, self.fingerprint)?;
         let (conn, state) = with_state(
             HelloState {
                 secret: Some(secret),
+                mlkem_seed: Some(mlkem_seed),
                 ..Default::default()
             },
             || ClientConnection::new(probe_cfg, self.server_name.clone()),
@@ -389,10 +427,11 @@ impl RealityClient {
             .ok_or_else(|| Error::Tls("reality: cannot locate the session_id source".into()))?;
         fills[slot] = sealed.clone();
         let verifier = Arc::new(RealityVerifier { auth_key, algs });
-        let cfg = client_config(verifier, &self.alpn)?;
+        let cfg = client_config(verifier, &self.alpn, self.fingerprint)?;
         let (conn, _) = with_state(
             HelloState {
                 secret: Some(secret),
+                mlkem_seed: Some(mlkem_seed),
                 fills,
                 replay_pos: Some(0),
             },
@@ -453,6 +492,7 @@ mod tests {
             ),
             short_id: "0123abcd".into(),
             alpn: Vec::new(),
+            fingerprint: None,
         };
         let client = RealityClient::new(&cfg).unwrap();
         let prepared = client.prepare_with_bytes().unwrap();

@@ -1,5 +1,5 @@
-//! TLS client (SPEC §11.4): rustls + ring + webpki roots, optional leaf pinning.
-//! Certificate verification can never be disabled.
+//! TLS client (SPEC §11.4): rustls + ring + webpki roots, optional leaf pinning, and a
+//! browser ClientHello (`fingerprint`). Certificate verification can never be disabled.
 
 use std::sync::Arc;
 
@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+use super::fingerprint::Fingerprint;
 use super::tls_stream::TlsRecordStream;
 use crate::config::TlsConfig;
 use crate::error::{Error, Result};
@@ -53,7 +54,11 @@ impl TlsClient {
         default_sni: &str,
         extra_roots: Vec<CertificateDer<'static>>,
     ) -> Result<TlsClient> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let fingerprint = Fingerprint::from_name(cfg.fingerprint.as_deref());
+        let provider = Arc::new(match fingerprint {
+            Some(fp) => fp.provider(),
+            None => rustls::crypto::ring::default_provider(),
+        });
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         for r in extra_roots {
@@ -87,6 +92,15 @@ impl TlsClient {
                 .with_no_client_auth()
         };
         config.alpn_protocols = cfg.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
+        if let Some(fp) = fingerprint {
+            config.client_hello_rewriter = Some(fp.rewriter());
+            // A resumption PSK binder covers rustls's own hello bytes, not the rewritten ones.
+            config.resumption = rustls::client::Resumption::disabled();
+            if config.alpn_protocols.is_empty() {
+                // Browsers always offer ALPN; this is also Xray's default.
+                config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            }
+        }
 
         let sni = cfg.sni.clone().unwrap_or_else(|| default_sni.to_string());
         let server_name = ServerName::try_from(sni.clone())

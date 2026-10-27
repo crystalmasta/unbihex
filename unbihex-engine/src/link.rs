@@ -71,6 +71,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut flow = None;
     let mut pbk = None;
     let mut sid = String::new();
+    let mut fingerprint = None;
     let mut xhttp: Option<serde_json::Map<String, serde_json::Value>> = None;
     let mut xhttp_fields = serde_json::Map::new();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
@@ -113,6 +114,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
             }
             "pbk" | "publicKey" if !v.is_empty() => pbk = Some(v),
             "sid" | "shortId" => sid = v,
+            "fp" | "fingerprint" if !v.is_empty() => fingerprint = Some(v),
             _ => {}
         }
     }
@@ -123,6 +125,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
                 sni: sni.or_else(|| Some(server.clone())),
                 alpn,
                 pinned_sha256: Vec::new(),
+                fingerprint,
             }),
             None,
         ),
@@ -137,6 +140,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
                     public_key,
                     short_id: sid,
                     alpn,
+                    fingerprint,
                 }),
             )
         }
@@ -288,6 +292,7 @@ mod tests {
         assert_eq!(r.server_name, "www.microsoft.com");
         assert_eq!(r.short_id_bytes().unwrap(), [0x6b, 0xa8, 0x51, 0x79, 0xe3, 0x0d, 0x4f, 0xc2]);
         assert_eq!(r.public_key_bytes().unwrap().len(), 32);
+        assert_eq!(r.fingerprint.as_deref(), Some("chrome"));
         assert!(!v.is_plaintext() && v.is_vision());
         // Vision without TLS, REALITY without a key and bad short IDs are refused.
         assert!(parse_link(&format!("vless://{UUID}@h:1?flow=xtls-rprx-vision"), "p").is_err());

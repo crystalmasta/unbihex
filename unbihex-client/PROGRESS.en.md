@@ -40,12 +40,22 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - The first release, 0.1.0, on GitHub: an installer and a portable version for Windows, an APK for Android.
 - The Windows build has been tested on a live system: system proxy and TUN.
 
+## 27.10 — a Chrome-like TLS fingerprint (done)
+- Chrome's ClientHello for TLS and REALITY: GREASE, Chrome's cipher suite and extension sets, extensions shuffled
+  per connection, GREASE ECH, ALPS, brotli certificate compression. JA4: `t13d1516h2_8daaf6152771_d8a2da3f94cd`
+  (checked with tls.peet.ws), rustls's was `t13d1011_…`.
+- X25519MLKEM768 post-quantum key exchange in pure Rust (`ml-kem`), with a separate X25519 share as in Chrome.
+- rustls 0.23.46 is vendored in `unbihex-engine/vendor/rustls` with one hook (`UNBIHEX-PATCH.md`): the ClientHello
+  is rewritten before it is hashed, so the handshake transcript matches the server's.
+- The `fp` parameter of links and JSON subscriptions: any browser gives Chrome for now, `none` gives rustls's hello.
+- Tested on 15 live servers (14 TLS+Vision, 1 REALITY+Vision): all connect.
+
 ## Next
-1. A Chrome-like TLS fingerprint in pure Rust (our own ClientHello: GREASE, extension order).
-2. The server side: VLESS / Vision / REALITY inbound.
-3. An Xray-like gRPC API (HandlerService, StatsService), strict Xray JSON parsing,
+1. The server side: VLESS / Vision / REALITY inbound.
+2. An Xray-like gRPC API (HandlerService, StatsService), strict Xray JSON parsing,
    the `run -c` / `version` / `x25519` / `uuid` / `api` CLI — for Marzban / 3x-ui / PasarGuard.
-4. Fuzzing and benchmarks, the engine README as an SDK.
+3. Fuzzing and benchmarks, the engine README as an SDK.
+4. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).
 
 ## To check by hand
 1. The APK on a phone: connecting, ping, Vision/REALITY servers, ICMP ping.

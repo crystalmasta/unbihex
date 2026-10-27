@@ -11,7 +11,7 @@
 
 ## Этап 0 — сейчас: клиент подключается к реальным подпискам
 1. Доделать XTLS Vision + REALITY (готово).
-2. Отпечаток TLS (fp=chrome). ClientHello rustls легко отличить от браузера; ТСПУ в РФ
+2. Отпечаток TLS (fp=chrome) — готово 27.10: свой ClientHello по шаблону Chrome поверх патченного rustls. ClientHello rustls легко отличить от браузера; ТСПУ в РФ
    умеет блокировать по отпечатку. Варианты: собственная сборка ClientHello, повторяющая Chrome
    (как uTLS), или BoringSSL (крейт `boring`) на месте rustls для внешнего TLS/REALITY.
    Без этого REALITY может работать хуже, чем у Xray-клиентов.

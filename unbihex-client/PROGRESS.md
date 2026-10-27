@@ -40,12 +40,22 @@
 - Первый релиз 0.1.0 на GitHub: установщик и portable-версия для Windows, APK для Android.
 - Windows-сборка проверена на живой системе: системный прокси и TUN.
 
+## 27.10 — отпечаток TLS как у Chrome (готово)
+- ClientHello Chrome для TLS и REALITY: GREASE, набор шифров и расширений Chrome, перемешивание расширений
+  на каждое соединение, GREASE ECH, ALPS, сжатие сертификатов brotli. JA4: `t13d1516h2_8daaf6152771_d8a2da3f94cd`
+  (проверено сервисом tls.peet.ws), до этого — `t13d1011_…` rustls.
+- Пост-квантовый обмен ключами X25519MLKEM768 на чистом Rust (`ml-kem`), отдельная доля X25519 как у Chrome.
+- rustls 0.23.46 вендорен в `unbihex-engine/vendor/rustls` с одним хуком (`UNBIHEX-PATCH.md`): ClientHello
+  переписывается до хеширования, так что транскрипт рукопожатия сходится с сервером.
+- Параметр `fp` ссылок и JSON-подписок: любой браузер пока даёт Chrome, `none` — ClientHello rustls.
+- Проверено на 15 живых серверах (14 TLS+Vision, 1 REALITY+Vision): все подключаются.
+
 ## Дальше
-1. Отпечаток TLS как у Chrome на чистом Rust (свой ClientHello: GREASE, порядок расширений).
-2. Серверная часть: VLESS / Vision / REALITY inbound.
-3. gRPC API как у Xray (HandlerService, StatsService), чтение Xray JSON со строгим разбором,
+1. Серверная часть: VLESS / Vision / REALITY inbound.
+2. gRPC API как у Xray (HandlerService, StatsService), чтение Xray JSON со строгим разбором,
    CLI `run -c` / `version` / `x25519` / `uuid` / `api` — для Marzban / 3x-ui / PasarGuard.
-4. Fuzzing и бенчмарки, README ядра как SDK.
+3. Fuzzing и бенчмарки, README ядра как SDK.
+4. Шаблоны Firefox и Safari для `fp=firefox` / `fp=safari` (сейчас они дают Chrome).
 
 ## Проверить вручную
 1. APK на телефоне: подключение, пинг, Vision/REALITY-серверы, ICMP-пинг.
