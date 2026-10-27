@@ -1,5 +1,4 @@
 //! The VLESS server inbound against our own VLESS client, on loopback.
-#![cfg(feature = "server")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;

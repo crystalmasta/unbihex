@@ -54,11 +54,11 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - A VLESS inbound (the engine's `server` feature; the client doesn't enable it): TLS with a certificate from PEM
   files, X25519MLKEM768 on the server side, users with `id` / `email` / `flow`, Xray's Vision rules (a Vision user
   must use it, other users may not). TCP only for now.
-- The `unbihex` binary: `run -c <file | stdin:>`, `version`, `uuid [-i text]`, `x25519 [-i key]`;
+- The `unbihex` binary (the `unbihex-server` folder): `run -c <file | stdin:>`, `version`, `uuid [-i text]`, `x25519 [-i key]`;
   stops on Ctrl-C and SIGTERM. The config is still the engine's format, not Xray JSON.
 - Fixed a lost wakeup in the TLS stream: reading no longer sends data by itself; with large transfers in both
   directions this could stall the connection.
-- `tests/server.rs`: our client ↔ our server, TLS and Vision, up to 1 MB, refusing strangers and wrong flows.
+- `unbihex-server/tests/server.rs`: our client ↔ our server, TLS and Vision, up to 1 MB, refusing strangers and wrong flows.
 
 ## 27.10 — server engine, step 1b: UDP and Mux.Cool / XUDP (done)
 - The VLESS UDP command (`length | data` packets to one address) and Mux.Cool: many TCP and UDP sessions

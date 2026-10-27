@@ -7,7 +7,7 @@
 //! unbihex x25519 [-i key]        a REALITY key pair (base64url), or the public key of `key`
 //! ```
 //!
-//! The config is the engine's own JSON (SPEC.md §5) for now.
+//! The config is the engine's own JSON (../unbihex-engine/SPEC.md §5) for now.
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         Some("version" | "-version" | "--version") => {
             println!(
                 "Unbihex {} ({}/{})",
-                env!("CARGO_PKG_VERSION"),
+                unbihex_engine::VERSION,
                 std::env::consts::OS,
                 std::env::consts::ARCH
             );
