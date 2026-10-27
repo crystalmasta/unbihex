@@ -1,6 +1,8 @@
 # Unbihex Client
 
-VPN-клиент для подписок на собственном ядре **Unbihex** (`Desktop\unbihex-engine`).
+**Русский** · [English](README.en.md)
+
+VPN-клиент для подписок на собственном ядре **Unbihex** (папка `../unbihex-engine` рядом).
 Один код для Windows, Linux, macOS, Android и iOS: логика на Rust, интерфейс на HTML/JS внутри Tauri 2.
 
 Автор: Crystalmasta — https://github.com/crystalmasta. Название — от унбигексия (Ubh), гипотетического
@@ -9,8 +11,6 @@ VPN-клиент для подписок на собственном ядре **
 `cargo tauri icon icons/source/icon-1024.png --ios-color "#0B1736"` из `app/src-tauri`. После неё передний слой Android
 заменяется на `android-fg-<размер>.png` (108/162/216/324/432 — mdpi…xxxhdpi), а цвет фона в
 `icons/android/values/ic_launcher_background.xml` — на `#0B1736`.
-
-Старый проект `clean` (бывшая Strela) лежит в `../_archive/clean` и не используется: клиент зависит только от `../unbihex-engine`.
 
 ## Что умеет
 
@@ -22,7 +22,9 @@ VPN-клиент для подписок на собственном ядре **
   этого компьютера и локальной сети (`127.0.0.1`, `localhost`, `192.168.x.x` и т. п.),
   перенаправления на `http://` в интернет отклоняются. Ответ подписки — не больше 8 МБ, файл базы — 256 МБ (пишется на диск по мере скачивания).
 - Ручное добавление ссылок `vless://`, `ss://`, `socks://`.
-- Проверка «реальной» задержки: соединение идёт через само ядро до `cp.cloudflare.com/generate_204`.
+- Проверка пинга на выбор: через прокси GET или HEAD (запрос идёт через само ядро до `cp.cloudflare.com/generate_204`,
+  проверяется вся цепочка), TCP (только соединение с портом сервера) или ICMP. TCP и ICMP проверяют и серверы
+  с неподдерживаемыми протоколами; в режиме TUN проверки идут мимо туннеля.
 - Режимы на ПК:
   - **Системный прокси** — без прав администратора, ядро слушает `127.0.0.1:10809` (HTTP) и `:10808` (SOCKS5 и HTTP на одном порту,
     так что `HTTP_PROXY=http://127.0.0.1:10808` тоже работает);
@@ -33,7 +35,9 @@ VPN-клиент для подписок на собственном ядре **
   Программы на этом компьютере и системный прокси подключаются без пароля.
 - Android и iOS: системный VPN (TUN).
 - Маршрутизация: «Всё через VPN», «Россия напрямую» (.ru/.su/.рф и крупные российские сервисы),
-  «Только выбранные сайты», плюс свои списки «через VPN / напрямую / блокировать».
+  «Только выбранные сайты», «Только заблокированные» (по базам geosite/geoip),
+  плюс свои списки «через VPN / напрямую / блокировать». Базы правил — geosite.dat / geoip.dat (v2fly) и `.srs` (sing-box),
+  обновляются раз в неделю.
   QUIC (UDP/443) в TUN блокируется, чтобы браузеры шли по TCP через туннель — так быстрее.
   IPv6 в режиме TUN тоже идёт в туннель, а в Windows все DNS-запросы правилом NRPT отправляются только в DNS туннеля.
 - Статистика скорости и трафика, журнал, иконка в трее, автоподключение.
@@ -45,9 +49,9 @@ VPN-клиент для подписок на собственном ядре **
 
 | Работает | Видно в списке, но пока недоступно |
 |---|---|
-| VLESS поверх TCP + TLS | VLESS REALITY, XTLS Vision (`flow`) |
-| Shadowsocks AEAD (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305) | транспорты ws / grpc / xhttp / httpupgrade |
-| SOCKS5 | VMess, Trojan, Hysteria2, TUIC, WireGuard, Shadowsocks 2022 |
+| VLESS: TCP + TLS, REALITY, XTLS Vision (`xtls-rprx-vision`), XHTTP (packet-up, stream-up, stream-one), UDP через XUDP | транспорты ws / grpc / httpupgrade, XHTTP поверх HTTP/3, другие виды `flow` |
+| Shadowsocks AEAD (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305) | Shadowsocks 2022 и плагины Shadowsocks |
+| SOCKS5 | VMess, Trojan, Hysteria2, TUIC, WireGuard; VLESS без TLS (отклоняется: UUID и трафик идут открыто) |
 
 Неподдерживаемые серверы показываются серыми с причиной. Когда в ядре появится протокол,
 достаточно убрать соответствующую проверку в `crates/client-core/src/links.rs`.
@@ -70,9 +74,12 @@ unbihex-client/
 └─ ios/PacketTunnel/          исходники Network Extension для iOS
 ```
 
-Ядро должно лежать рядом: `Desktop\unbihex-engine` и `Desktop\unbihex-client`.
+Ядро должно лежать рядом: `unbihex-client` и `unbihex-engine` — соседние папки, как в этом репозитории.
 
-## Готовые сборки (папка `dist/`)
+## Готовые сборки
+
+Скачать — в [релизах на GitHub](https://github.com/crystalmasta/unbihex/releases/latest).
+Локально сборки складываются в папку `dist/` (её нет в репозитории):
 
 - `dist/Unbihex-0.1.0-setup.exe` — установщик для Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — портативная версия; рядом должен лежать `wintun.dll`.
@@ -81,7 +88,7 @@ unbihex-client/
   Подписан ключом автора `dist/android/unbihex.jks` (alias `unbihex`); ключ и пароль в репозиторий не входят.
   Для публикации сделайте свой ключ: обновления APK должны подписываться тем же ключом, что и первая установка.
 
-Сборки не запускались на живом устройстве — проверьте на своём.
+Windows-сборка проверена на живой системе (системный прокси и TUN); Android-сборка на устройстве пока не проверялась.
 
 ## Сборка на Windows
 
@@ -89,7 +96,7 @@ unbihex-client/
    WebView2 уже есть в Windows 10/11.
 2. Быстрый запуск без установщика:
    ```
-   cd Desktop\unbihex-client
+   cd unbihex-client
    cargo run --release -p unbihex-client
    ```
    `wintun.dll` скопируется рядом с exe автоматически (`target\release\`).
@@ -129,7 +136,7 @@ cargo tauri android build --apk  # готовый APK
 Подводные камни на Windows:
 - Путь к проекту должен быть только латиницей: линкер NDK (`clang.cmd`) ломает кириллицу
   («Новая папка»). `subst` не помогает — tauri-cli раскрывает его в настоящий путь.
-  Проще всего: `git clone` ядра и клиента рядом в, например, `C:\ub-build\` и собирать оттуда.
+  Проще всего клонировать репозиторий в папку без кириллицы, например `C:\src\unbihex`, и собирать оттуда.
 - Без «Режима разработчика» Windows не даёт создать симлинк на `.so`, и `cargo tauri android build`
   падает уже после сборки Rust. Тогда скопируйте `target\aarch64-linux-android\release\libunbihex_client_lib.so`
   в `app\src-tauri\gen\android\app\src\main\jniLibs\arm64-v8a\` и соберите Gradle напрямую:
@@ -171,16 +178,6 @@ cargo tauri android build --apk  # готовый APK
 `state.json` (подписки, серверы, настройки) в папке данных приложения:
 Windows — `%APPDATA%\com.unbihex.client`, Android/iOS — внутренняя папка приложения.
 Ссылки на серверы содержат ключи доступа: не публикуйте этот файл.
-
-## Изменения в ядре
-
-В `unbihex-engine` убрана зависимость от `../clean/crates/unbihex-core`:
-модуль `src/adapter.rs` (мост к старому клиенту) больше не компилируется, файл оставлен
-на месте; тест `engine_trait_runs_a_connection_plan`, который его использовал, удалён.
-Исправлена сборка ядра под Android и iOS: в `src/inbound/tun.rs` создание TUN-устройства
-(`tun_rs::DeviceBuilder`, `name()`, `if_index()`) теперь только для десктопа — на мобильных
-этих функций в `tun-rs` нет, там TUN всегда приходит от системы (`tun_fd`).
-Остальной код ядра не менялся, все его тесты проходят.
 
 ## Автор и лицензия
 

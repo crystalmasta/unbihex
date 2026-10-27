@@ -1,5 +1,7 @@
 # Unbihex Engine
 
+**Русский** · [English](README.en.md)
+
 Собственное сетевое ядро Unbihex на Rust: TUN, маршрутизация, DNS с fake-IP, VLESS (TLS, REALITY,
 XTLS Vision, XHTTP, XUDP), Shadowsocks, SOCKS5, локальные SOCKS5/HTTP-прокси. Совместимо с серверами Xray.
 Им пользуется клиент `../unbihex-client`. Поведение и интерфейсы описаны в `SPEC.md`.
