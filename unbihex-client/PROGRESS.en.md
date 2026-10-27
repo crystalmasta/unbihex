@@ -60,8 +60,18 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   directions this could stall the connection.
 - `tests/server.rs`: our client ↔ our server, TLS and Vision, up to 1 MB, refusing strangers and wrong flows.
 
+## 27.10 — server engine, step 1b: UDP and Mux.Cool / XUDP (done)
+- The VLESS UDP command (`length | data` packets to one address) and Mux.Cool: many TCP and UDP sessions
+  in one connection, XUDP with an address on every packet, replies tagged with their source address.
+- Xray's rules: Vision does not carry the UDP command (Vision users' UDP comes as XUDP), and a Vision user's
+  Mux connection may carry UDP only.
+- Each UDP address of a session is a flow of its own through the router: rules apply per address, but the
+  outgoing port differs per address (true full cone and GlobalID reconnects come later).
+- Tests: a plain user's UDP, XUDP over Vision, Mux with TCP and two UDP destinations in one session,
+  TCP inside Mux refused for a Vision user.
+
 ## Next
-1. The server side: UDP and XUDP in the VLESS inbound, then a REALITY inbound.
+1. The server side: a REALITY inbound.
 2. An Xray-like gRPC API (HandlerService, StatsService), strict Xray JSON parsing,
    the `run -c` / `version` / `x25519` / `uuid` / `api` CLI — for Marzban / 3x-ui / PasarGuard.
 3. Fuzzing and benchmarks, the engine README as an SDK.

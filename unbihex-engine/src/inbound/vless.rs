@@ -1,10 +1,12 @@
 //! VLESS server (the `server` feature): TLS, then the VLESS request; XTLS Vision for
-//! users with `flow = xtls-rprx-vision`. TCP only for now: UDP and Mux.Cool (XUDP)
-//! requests are refused.
+//! users with `flow = xtls-rprx-vision`. Commands: TCP, UDP (`len(be16) | payload`
+//! packets to one destination) and Mux.Cool, which carries XUDP (see `mux.rs`).
 //!
 //! As in Xray, the response header (`version 0, no addons`) goes out together with the
 //! first downlink bytes, so it never shows up as a TLS record of its own. A user whose
 //! flow is Vision must use it for TCP: plain TLS-in-TLS has a recognisable shape.
+//! Vision does not wrap the UDP command, and a Mux.Cool stream of a Vision user may
+//! carry UDP only.
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -22,19 +24,22 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::ct_eq;
+use super::mux::{self, MuxContext};
 use crate::address::{Address, TargetAddr, normalize_domain};
 use crate::config::{FLOW_VISION, VlessInboundConfig};
 use crate::dispatcher::Dispatcher;
 use crate::error::{Error, Result};
 use crate::net::PendingOut;
-use crate::outbound::BoxStream;
 use crate::outbound::pq::X25519_MLKEM768;
 use crate::outbound::tls_stream::TlsRecordStream;
 use crate::outbound::vision::{RawSwitch, VisionStream};
+use crate::outbound::vless::VlessUdp;
+use crate::outbound::{BoxStream, PacketStream};
 use crate::session::{Network, Session};
 
 const CMD_TCP: u8 = 0x01;
 const CMD_UDP: u8 = 0x02;
+const CMD_MUX: u8 = 0x03;
 
 struct User {
     uuid: [u8; 16],
@@ -149,7 +154,17 @@ pub async fn serve(
             let r = tokio::time::timeout(handshake_timeout, accept(&server, stream, peer)).await;
             drop(permit);
             match r {
-                Ok(Ok((stream, sess))) => d.dispatch_tcp(sess, stream).await,
+                Ok(Ok(Accepted::Tcp(stream, sess))) => d.dispatch_tcp(sess, stream).await,
+                Ok(Ok(Accepted::Udp(flow, sess))) => d.dispatch_udp(sess, flow).await,
+                Ok(Ok(Accepted::Mux(stream, allow_tcp))) => {
+                    let ctx = MuxContext {
+                        dispatcher: d,
+                        source: peer,
+                        inbound_tag: server.tag.clone(),
+                        allow_tcp,
+                    };
+                    mux::serve(stream, ctx).await;
+                }
                 Ok(Err(e)) => tracing::debug!("vless {peer}: {e}"),
                 Err(_) => tracing::debug!("vless {peer}: handshake timed out"),
             }
@@ -157,53 +172,71 @@ pub async fn serve(
     }
 }
 
-/// TLS handshake and VLESS request; the stream to relay and its session.
-async fn accept(
-    server: &VlessServer,
-    tcp: TcpStream,
-    peer: SocketAddr,
-) -> Result<(BoxStream, Session)> {
+/// What an accepted VLESS connection asks for.
+enum Accepted {
+    Tcp(BoxStream, Session),
+    Udp(Box<dyn PacketStream>, Session),
+    /// The Mux.Cool stream and whether it may carry TCP sessions.
+    Mux(BoxStream, bool),
+}
+
+/// TLS handshake and VLESS request, checked against the user's flow as Xray does.
+async fn accept(server: &VlessServer, tcp: TcpStream, peer: SocketAddr) -> Result<Accepted> {
     let mut tls = TlsRecordStream::accept(tcp, server.tls.clone()).await?;
     let req = read_request(&mut tls, &server.users).await?;
     let user = &server.users[req.user];
-    if req.command != CMD_TCP {
-        return Err(Error::Unsupported(format!(
-            "vless command {} (UDP is not served yet)",
-            req.command
-        )));
+    if req.vision && !user.vision {
+        return Err(Error::protocol(
+            "vless: this user may not use flow xtls-rprx-vision",
+        ));
     }
-    match (req.vision, user.vision) {
-        (true, false) => {
-            return Err(Error::protocol(
-                "vless: this user may not use flow xtls-rprx-vision",
-            ));
-        }
-        (false, true) => {
+    match req.command {
+        CMD_TCP if user.vision && !req.vision => {
             return Err(Error::protocol(
                 "vless: this user must use flow xtls-rprx-vision",
             ));
         }
-        _ => {}
+        // Xray clients send UDP of Vision users as XUDP.
+        CMD_UDP if req.vision => {
+            return Err(Error::protocol(
+                "vless: xtls-rprx-vision does not carry UDP",
+            ));
+        }
+        CMD_TCP | CMD_UDP | CMD_MUX => {}
+        c => return Err(Error::Unsupported(format!("vless command {c}"))),
     }
     let who = if user.email.is_empty() {
         "user"
     } else {
         user.email.as_str()
     };
-    tracing::debug!("vless {peer}: {who} -> {}", req.target);
     let stream = ResponseFirst::new(tls);
-    let stream: BoxStream = if req.vision {
-        Box::new(VisionStream::new_server(stream, user.uuid))
-    } else {
-        Box::new(stream)
-    };
-    let sess = Session {
-        network: Network::Tcp,
+    let session = |network| Session {
+        network,
         source: Some(peer),
-        target: req.target,
+        target: req.target.clone(),
         inbound_tag: server.tag.clone(),
     };
-    Ok((stream, sess))
+    Ok(match req.command {
+        CMD_UDP => {
+            tracing::debug!("vless {peer}: {who} -> udp {}", req.target);
+            Accepted::Udp(Box::new(VlessUdp::new(stream)), session(Network::Udp))
+        }
+        cmd => {
+            let stream: BoxStream = if req.vision {
+                Box::new(VisionStream::new_server(stream, user.uuid))
+            } else {
+                Box::new(stream)
+            };
+            if cmd == CMD_MUX {
+                tracing::debug!("vless {peer}: {who} -> mux");
+                Accepted::Mux(stream, !user.vision)
+            } else {
+                tracing::debug!("vless {peer}: {who} -> {}", req.target);
+                Accepted::Tcp(stream, session(Network::Tcp))
+            }
+        }
+    })
 }
 
 /// A parsed VLESS request header.

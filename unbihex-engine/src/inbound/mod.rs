@@ -2,6 +2,8 @@
 
 pub mod http;
 pub mod mixed;
+#[cfg(feature = "server")]
+pub mod mux;
 pub mod socks;
 pub mod tun;
 #[cfg(feature = "server")]
