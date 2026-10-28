@@ -80,10 +80,22 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   a browser over TLS and a plain HTTP request get the real site; a wrong short ID does not pass.
 - Not yet: matching our handshake record sizes to `dest` (Xray does), client version checks.
 
+## 28.10 — server engine, step 3: stats and the gRPC API (done)
+- Traffic counters with Xray's names: `user>>>email>>>traffic>>>uplink/downlink`, `inbound>>>tag>>>traffic>>>…`;
+  TCP, Mux and UDP payload is counted, outside Vision, so raw and padded traffic count the same.
+- VLESS users are added and removed on the fly: a removed user's open connections stay, new ones are refused (as in Xray).
+- A gRPC API on Xray's paths (`proto/` is a subset of Xray's protos with the same field numbers):
+  StatsService (GetStats, QueryStats, GetSysStats, GetUsersStats), HandlerService (AlterInbound with
+  AddUserOperation / RemoveUserOperation, GetInboundUsers, GetInboundUsersCount). Turned on by `"api": {"listen": …}`;
+  an unknown service in `api.services` fails the start. Building needs no protoc (`protox`).
+- `unbihex api`: stats, statsquery, sysstats, adu (one user from flags), rmu, inbounduser, inboundusercount.
+- Tests `tests/api.rs`: user and inbound traffic, reset, adding and removing a user with a live client,
+  errors (duplicate, missing user, a foreign operation), the `unbihex api` command through the binary.
+- Not yet: online stats (GetStatsOnline and the like), AddInbound / AddOutbound, accounts other than VLESS.
+
 ## Next
-1. The server side: per-user stats and the gRPC API (HandlerService, StatsService), the `api` command.
-2. An Xray-like gRPC API (HandlerService, StatsService), strict Xray JSON parsing,
-   the `run -c` / `version` / `x25519` / `uuid` / `api` CLI — for Marzban / 3x-ui / PasarGuard.
+1. Strict Xray JSON parsing (the subset Marzban / 3x-ui / PasarGuard generate).
+2. Runs with real panels: their configs, API, stats, restarts.
 3. Fuzzing and benchmarks, the engine README as an SDK.
 4. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).
 

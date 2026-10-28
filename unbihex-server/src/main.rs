@@ -5,9 +5,11 @@
 //! unbihex version
 //! unbihex uuid [-i text]         a random UUID, or the UUIDv5 Xray derives from `text`
 //! unbihex x25519 [-i key]        a REALITY key pair (base64url), or the public key of `key`
+//! unbihex api <command> ...      calls the gRPC API of a running server, like `xray api`
 //! ```
 //!
-//! The config is the engine's own JSON (../unbihex-engine/SPEC.md §5) for now.
+//! The config is the engine's own JSON (../unbihex-engine/SPEC.md §5) for now, plus an
+//! Xray-style `"api": {"listen": "127.0.0.1:10085"}` that turns the gRPC API on.
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -15,12 +17,15 @@ use std::process::ExitCode;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use unbihex_engine::{Config, Instance, PlatformHooks};
+use unbihex_server::api::{self, ApiConfig};
+use unbihex_server::cli_api;
 
 const USAGE: &str = "usage:
   unbihex run -c <config.json | stdin:>
   unbihex version
   unbihex uuid [-i <text>]
-  unbihex x25519 [-i <private key>]";
+  unbihex x25519 [-i <private key>]
+  unbihex api <command> ...   (unbihex api help)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,6 +43,7 @@ fn main() -> ExitCode {
         }
         Some("uuid") => uuid(rest),
         Some("x25519") => x25519(rest),
+        Some("api") => cli_api::run(rest),
         None | Some("help" | "-h" | "--help") => {
             println!("{USAGE}");
             Ok(())
@@ -85,7 +91,7 @@ fn run(args: &[String]) -> Result<(), String> {
     } else {
         std::fs::read_to_string(&source).map_err(|e| format!("{source}: {e}"))?
     };
-    let config = Config::from_json(&text).map_err(|e| e.to_string())?;
+    let (config, api_cfg) = parse_config(&text)?;
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| config.log.level.clone());
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
@@ -99,11 +105,53 @@ fn run(args: &[String]) -> Result<(), String> {
         let instance = Instance::start(config, PlatformHooks::default())
             .await
             .map_err(|e| e.to_string())?;
+        let (stop_api, api_stopped) = tokio::sync::oneshot::channel::<()>();
+        let api_task = match api_cfg {
+            Some(cfg) => {
+                let listener = match tokio::net::TcpListener::bind(cfg.listen).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        instance.shutdown().await;
+                        return Err(format!("api: cannot listen on {}: {e}", cfg.listen));
+                    }
+                };
+                let control = instance.server();
+                Some(tokio::spawn(async move {
+                    let stopped = async {
+                        let _ = api_stopped.await;
+                    };
+                    if let Err(e) = api::serve_listener(&cfg, listener, control, stopped).await {
+                        tracing::error!("{e}");
+                    }
+                }))
+            }
+            None => None,
+        };
         stop_signal().await;
         tracing::info!("stopping");
+        let _ = stop_api.send(());
+        if let Some(t) = api_task {
+            let _ = t.await;
+        }
         instance.shutdown().await;
         Ok(())
     })
+}
+
+/// The engine config and the optional `api` section, which the engine does not know.
+fn parse_config(text: &str) -> Result<(Config, Option<ApiConfig>), String> {
+    let mut json: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("config: {e}"))?;
+    let api = match json.as_object_mut().and_then(|o| o.remove("api")) {
+        Some(v) => {
+            let cfg: ApiConfig = serde_json::from_value(v).map_err(|e| format!("api: {e}"))?;
+            cfg.validate()?;
+            Some(cfg)
+        }
+        None => None,
+    };
+    let config = Config::from_json(&json.to_string()).map_err(|e| e.to_string())?;
+    Ok((config, api))
 }
 
 /// Ctrl-C, or SIGTERM on Unix (how service managers and panels stop the process).

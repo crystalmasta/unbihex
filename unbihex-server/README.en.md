@@ -14,7 +14,11 @@ process, the CLI and the tests.
 - UDP: the VLESS UDP command and Mux.Cool / XUDP (Vision users' UDP, full cone from Xray clients).
 - Routing, DNS and outbounds: everything the engine has.
 
-In progress: an Xray-like gRPC API (HandlerService, StatsService), reading Xray JSON.
+- Xray's gRPC API: StatsService (counters `user>>>email>>>traffic>>>uplink/downlink` and `inbound>>>…`)
+  and HandlerService (adding and removing VLESS users without a restart). Turned on by
+  `"api": {"listen": "127.0.0.1:10085"}` in the config; adding inbounds and outbounds through the API is not supported yet.
+
+In progress: reading Xray JSON.
 
 ## Commands
 ```text
@@ -22,6 +26,8 @@ unbihex run -c <config.json | stdin:>   run; stops on Ctrl-C and SIGTERM
 unbihex version
 unbihex uuid [-i text]                   a random UUID, or Xray's UUIDv5 of the text
 unbihex x25519 [-i key]                  a REALITY key pair (base64url), or the public key of a private one
+unbihex api <command> [-s address]       calls the gRPC API of a running server, like `xray api`:
+                                         stats, statsquery, sysstats, adu, rmu, inbounduser, inboundusercount
 ```
 
 The config is the engine's format (`../unbihex-engine/SPEC.en.md`, §5); see [`config.example.json`](config.example.json) (TLS)
@@ -36,4 +42,5 @@ cargo test
 ```
 The binary is `target/release/unbihex`. The tests run our client against our server on loopback:
 TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users; REALITY with Vision and the
-Chrome fingerprint, a fragmented ClientHello, and what strangers see: the real site over TLS and HTTP.
+Chrome fingerprint, a fragmented ClientHello, and what strangers see: the real site over TLS and HTTP;
+the gRPC API: traffic counters, live users and the `unbihex api` command.

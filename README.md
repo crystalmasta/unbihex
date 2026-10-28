@@ -25,7 +25,7 @@ Windows SmartScreen может предупредить о неизвестно�
 |---|---|
 | [`unbihex-client`](unbihex-client) | приложение на Tauri 2: подписки, серверы, системный прокси, TUN, Android VpnService, iOS Packet Tunnel |
 | [`unbihex-engine`](unbihex-engine) | ядро: TUN, маршрутизация, DNS с fake-IP, протоколы; описано в `SPEC.md` |
-| [`unbihex-server`](unbihex-server) | сервер: бинарник `unbihex` (VLESS / Vision / REALITY, UDP, XUDP); протоколы берёт из ядра с фичей `server` |
+| [`unbihex-server`](unbihex-server) | сервер: бинарник `unbihex` (VLESS / Vision / REALITY, UDP, XUDP, gRPC API как у Xray); протоколы берёт из ядра с фичей `server` |
 
 Клиент и сервер подключают ядро по относительному пути `../unbihex-engine`, поэтому папки лежат рядом.
 Сборка, тесты и готовые установщики описаны в [`unbihex-client/README.md`](unbihex-client/README.md),

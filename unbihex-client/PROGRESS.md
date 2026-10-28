@@ -80,10 +80,22 @@
   браузер по TLS и HTTP-запрос получают настоящий сайт; неверный short ID не проходит.
 - Пока нет: подгонки размеров наших handshake-записей под `dest` (Xray это делает), проверки версии клиента.
 
+## 28.10 — серверное ядро, шаг 3: статистика и gRPC API (готово)
+- Счётчики трафика с именами Xray: `user>>>email>>>traffic>>>uplink/downlink`, `inbound>>>тег>>>traffic>>>…`;
+  считается полезная нагрузка TCP, Mux и UDP, у Vision — снаружи, поэтому raw и padding считаются одинаково.
+- Пользователи VLESS добавляются и удаляются на лету: открытые соединения удалённого остаются, новые — отказ (как в Xray).
+- gRPC API на тех же путях, что у Xray (`proto/` — подмножество протоколов Xray с теми же номерами полей):
+  StatsService (GetStats, QueryStats, GetSysStats, GetUsersStats), HandlerService (AlterInbound с
+  AddUserOperation / RemoveUserOperation, GetInboundUsers, GetInboundUsersCount). Включается `"api": {"listen": …}`;
+  неизвестный сервис в `api.services` — ошибка запуска. Сборке не нужен protoc (`protox`).
+- `unbihex api`: stats, statsquery, sysstats, adu (один пользователь из флагов), rmu, inbounduser, inboundusercount.
+- Тесты `tests/api.rs`: трафик пользователя и inbound'а, сброс, добавление и удаление пользователя живым клиентом,
+  ошибки (дубликат, нет пользователя, чужая операция), команда `unbihex api` через бинарник.
+- Пока нет: онлайн-статистики (GetStatsOnline и др.), AddInbound / AddOutbound, аккаунтов кроме VLESS.
+
 ## Дальше
-1. Серверная часть: статистика по пользователям и gRPC API (HandlerService, StatsService), команда `api`.
-2. gRPC API как у Xray (HandlerService, StatsService), чтение Xray JSON со строгим разбором,
-   CLI `run -c` / `version` / `x25519` / `uuid` / `api` — для Marzban / 3x-ui / PasarGuard.
+1. Чтение Xray JSON со строгим разбором (подмножество, которое генерируют Marzban / 3x-ui / PasarGuard).
+2. Прогон с настоящими панелями: их конфиги, API, статистика, перезапуски.
 3. Fuzzing и бенчмарки, README ядра как SDK.
 4. Шаблоны Firefox и Safari для `fp=firefox` / `fp=safari` (сейчас они дают Chrome).
 

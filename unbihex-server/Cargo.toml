@@ -8,6 +8,10 @@ license = "MPL-2.0"
 authors = ["Crystalmasta (https://github.com/crystalmasta)"]
 homepage = "https://github.com/crystalmasta"
 
+[lib]
+name = "unbihex_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "unbihex"
 path = "src/main.rs"
@@ -16,8 +20,15 @@ path = "src/main.rs"
 # The protocols live in the engine (shared with the client); `server` adds the inbounds.
 unbihex-engine = { path = "../unbihex-engine", features = ["server"] }
 base64 = "0.22"
+# The Xray-compatible gRPC API (proto/, compiled by build.rs).
+prost = "0.14"
 rand = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14"
+tonic-prost = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v5"] }
@@ -27,8 +38,12 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 unbihex-engine = { path = "../unbihex-engine", features = ["server", "test-util"] }
 rcgen = "0.14"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+
+[build-dependencies]
+# protox compiles the protos in Rust, so building needs no protoc.
+protox = "0.9"
+tonic-prost-build = "0.14"
 
 [lints.rust]
 unsafe_code = "deny"
