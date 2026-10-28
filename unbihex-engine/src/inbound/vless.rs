@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -27,7 +28,7 @@ use super::ct_eq;
 use super::mux::{self, MuxContext};
 use super::reality::{Handshake, RealityServer};
 use crate::address::{Address, TargetAddr, normalize_domain};
-use crate::config::{FLOW_VISION, ServerTlsConfig, VlessInboundConfig};
+use crate::config::{FLOW_VISION, ServerTlsConfig, VlessInboundConfig, VlessUser};
 use crate::dispatcher::Dispatcher;
 use crate::error::{Error, Result};
 use crate::net::PendingOut;
@@ -36,16 +37,95 @@ use crate::outbound::tls_stream::TlsRecordStream;
 use crate::outbound::vision::{RawSwitch, VisionStream};
 use crate::outbound::vless::VlessUdp;
 use crate::outbound::{BoxStream, PacketStream};
+use crate::server::{Counted, CountedPackets, Meter, ServerStats, Traffic};
 use crate::session::{Network, Session};
 
 const CMD_TCP: u8 = 0x01;
 const CMD_UDP: u8 = 0x02;
 const CMD_MUX: u8 = 0x03;
 
+#[derive(Clone)]
 struct User {
     uuid: [u8; 16],
     email: String,
     vision: bool,
+    /// As configured, for the API.
+    config: VlessUser,
+}
+
+impl User {
+    fn parse(tag: &str, u: &VlessUser) -> Result<User> {
+        let id = uuid::Uuid::parse_str(u.id.expose())
+            .map_err(|_| Error::config(format!("inbound {tag}: invalid user id")))?;
+        if !(u.flow.is_empty() || u.flow == FLOW_VISION || u.flow == "xtls-rprx-vision-udp443") {
+            return Err(Error::config(format!("inbound {tag}: flow {:?}", u.flow)));
+        }
+        Ok(User {
+            uuid: *id.as_bytes(),
+            email: u.email.clone(),
+            vision: !u.flow.is_empty(),
+            config: u.clone(),
+        })
+    }
+}
+
+/// The users of one inbound. The API adds and removes them while connections are served:
+/// a connection looks the user up in the list as it was when its request came.
+pub struct UserList {
+    tag: String,
+    list: ArcSwap<Vec<User>>,
+    /// Serialises changes, so two of them never overwrite each other.
+    write: parking_lot::Mutex<()>,
+}
+
+impl UserList {
+    pub(crate) fn new(tag: &str, users: &[VlessUser]) -> Result<UserList> {
+        let list = users
+            .iter()
+            .map(|u| User::parse(tag, u))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(UserList {
+            tag: tag.to_string(),
+            list: ArcSwap::from_pointee(list),
+            write: parking_lot::Mutex::new(()),
+        })
+    }
+
+    fn snapshot(&self) -> Arc<Vec<User>> {
+        self.list.load_full()
+    }
+
+    pub(crate) fn add(&self, u: &VlessUser) -> Result<()> {
+        let user = User::parse(&self.tag, u)?;
+        let _w = self.write.lock();
+        let mut list = Vec::clone(&self.snapshot());
+        if !u.email.is_empty() && list.iter().any(|x| x.email == u.email) {
+            return Err(Error::config(format!("user {} already exists", u.email)));
+        }
+        list.push(user);
+        self.list.store(Arc::new(list));
+        Ok(())
+    }
+
+    pub(crate) fn remove(&self, email: &str) -> Result<()> {
+        let _w = self.write.lock();
+        let mut list = Vec::clone(&self.snapshot());
+        let before = list.len();
+        list.retain(|x| x.email != email);
+        if list.len() == before {
+            return Err(Error::config(format!("user {email} not found")));
+        }
+        self.list.store(Arc::new(list));
+        Ok(())
+    }
+
+    pub(crate) fn configs(&self) -> Vec<VlessUser> {
+        self.snapshot().iter().map(|u| u.config.clone()).collect()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.snapshot().len()
+    }
 }
 
 /// How the connection is secured.
@@ -57,12 +137,24 @@ enum Security {
 /// A configured VLESS server, ready to serve its listener.
 pub struct VlessServer {
     tag: String,
-    users: Vec<User>,
+    users: Arc<UserList>,
+    stats: Arc<ServerStats>,
+    traffic: Arc<Traffic>,
     security: Security,
 }
 
+impl VlessServer {
+    /// The users, for the API to change.
+    pub(crate) fn users(&self) -> Arc<UserList> {
+        self.users.clone()
+    }
+}
+
 /// Loads the certificate and binds the listening socket (fails fast on a busy port).
-pub async fn bind(cfg: &VlessInboundConfig) -> Result<(TcpListener, VlessServer)> {
+pub async fn bind(
+    cfg: &VlessInboundConfig,
+    stats: Arc<ServerStats>,
+) -> Result<(TcpListener, VlessServer)> {
     let security = match (&cfg.tls, &cfg.reality) {
         (Some(tls), _) => Security::Tls(server_tls(&cfg.tag, tls)?),
         (None, Some(r)) => Security::Reality(Box::new(
@@ -76,19 +168,11 @@ pub async fn bind(cfg: &VlessInboundConfig) -> Result<(TcpListener, VlessServer)
             )));
         }
     };
-    let users = cfg
-        .users
-        .iter()
-        .map(|u| {
-            let id = uuid::Uuid::parse_str(u.id.expose())
-                .map_err(|_| Error::config(format!("inbound {}: invalid user id", cfg.tag)))?;
-            Ok(User {
-                uuid: *id.as_bytes(),
-                email: u.email.clone(),
-                vision: !u.flow.is_empty(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let users = Arc::new(UserList::new(&cfg.tag, &cfg.users)?);
+    for u in &cfg.users {
+        stats.user(&u.email);
+    }
+    let traffic = stats.inbound(&cfg.tag);
     let listener = TcpListener::bind(cfg.listen).await.map_err(|e| {
         Error::config(format!(
             "vless inbound {}: cannot listen on {}: {e}",
@@ -100,6 +184,8 @@ pub async fn bind(cfg: &VlessInboundConfig) -> Result<(TcpListener, VlessServer)
         VlessServer {
             tag: cfg.tag.clone(),
             users,
+            stats,
+            traffic,
             security,
         },
     ))
@@ -222,8 +308,9 @@ async fn accept(
             Handshake::Fallback(tcp, prefix) => return Ok(Accepted::Fallback(tcp, prefix)),
         },
     };
-    let req = read_request(&mut tls, &server.users).await?;
-    let user = &server.users[req.user];
+    let users = server.users.snapshot();
+    let req = read_request(&mut tls, &users).await?;
+    let user = &users[req.user];
     if req.vision && !user.vision {
         return Err(Error::protocol(
             "vless: this user may not use flow xtls-rprx-vision",
@@ -249,6 +336,7 @@ async fn accept(
     } else {
         user.email.as_str()
     };
+    let meter = Meter::new(server.stats.user(&user.email), server.traffic.clone());
     let stream = ResponseFirst::new(tls);
     let session = |network| Session {
         network,
@@ -259,13 +347,21 @@ async fn accept(
     Ok(match req.command {
         CMD_UDP => {
             tracing::debug!("vless {peer}: {who} -> udp {}", req.target);
-            Accepted::Udp(Box::new(VlessUdp::new(stream)), session(Network::Udp))
+            let flow = Box::new(VlessUdp::new(stream));
+            Accepted::Udp(
+                Box::new(CountedPackets::new(flow, meter)),
+                session(Network::Udp),
+            )
         }
         cmd => {
+            // Counted outside Vision: the payload, whether it went padded or raw.
             let stream: BoxStream = if req.vision {
-                Box::new(VisionStream::new_server(stream, user.uuid))
+                Box::new(Counted::new(
+                    VisionStream::new_server(stream, user.uuid),
+                    meter,
+                ))
             } else {
-                Box::new(stream)
+                Box::new(Counted::new(stream, meter))
             };
             if cmd == CMD_MUX {
                 tracing::debug!("vless {peer}: {who} -> mux");
@@ -473,17 +569,27 @@ mod tests {
     use super::*;
     use crate::outbound::vless::encode_request_with_flow;
 
+    fn test_user(email: &str) -> VlessUser {
+        VlessUser {
+            id: crate::config::Secret(String::new()),
+            email: email.into(),
+            flow: String::new(),
+        }
+    }
+
     fn users() -> Vec<User> {
         vec![
             User {
                 uuid: [1; 16],
                 email: "a".into(),
                 vision: false,
+                config: test_user("a"),
             },
             User {
                 uuid: [2; 16],
                 email: "b".into(),
                 vision: true,
+                config: test_user("b"),
             },
         ]
     }
