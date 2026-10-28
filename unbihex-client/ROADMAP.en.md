@@ -11,7 +11,7 @@ then the server.
 
 ## Stage 0 — now: the client connects to real subscriptions
 1. Finish XTLS Vision + REALITY (done).
-2. TLS fingerprint (fp=chrome). The rustls ClientHello is easy to tell apart from a browser; Russia's TSPU
+2. TLS fingerprint (fp=chrome) — done 27.10: our own Chrome-template ClientHello on a patched rustls. The rustls ClientHello is easy to tell apart from a browser; Russia's TSPU
    can block by fingerprint. Options: our own ClientHello that mimics Chrome (like uTLS),
    or BoringSSL (the `boring` crate) instead of rustls for the outer TLS/REALITY.
    Without it REALITY may work worse than in Xray clients.
@@ -33,16 +33,18 @@ then the server.
 9. Subscriptions in Xray JSON and sing-box JSON (many panels serve these to Happ/v2rayN).
 
 ## Stage 2 — the server engine
-10. Inbounds: VLESS (+Vision), a REALITY server, Trojan, Shadowsocks (incl. 2022), fallbacks.
-11. Live management: users are added and removed without a restart (hot reload of keys).
+10. Inbounds: VLESS (+Vision), a REALITY server (done 27.10, with UDP and Mux/XUDP); Trojan, Shadowsocks (incl. 2022), fallbacks are ahead.
+11. Live management: users are added and removed without a restart (hot reload of keys) — done 28.10.
 12. An Xray-compatible gRPC API: HandlerService (AddUser/RemoveUser/AlterInbound),
     StatsService (QueryStats/GetStats, counters user>>>email>>>traffic>>>uplink/downlink).
-    Implemented with `tonic` from Xray's .proto files.
+    Implemented with `tonic` from Xray's .proto files — done 28.10 (plus GetSysStats and GetUsersStats; no online stats yet).
 13. A config compatibility layer: translate the subset of Xray JSON that panels actually generate
     into the internal config; anything unsupported is a loud error, not a silent skip.
+    Done 28.10: VLESS over TCP with TLS/REALITY, the API, freedom/blackhole, rules, policy, DNS.
 
 ## Stage 3 — a drop-in `xray` replacement for panels
 14. A compatible CLI: `run -c`, `version`, `x25519`, `uuid`, `api …` — panels call these directly.
+    Done 28.10: running without `run`, `-test`; `version` answers as Xray when named `xray*`, as Unbihex otherwise.
 15. Runs with real Marzban / 3x-ui / PasarGuard: their configs, API, statistics, restarts.
 16. Metrics (Prometheus), a connection log, server-side device limits (HWID).
 

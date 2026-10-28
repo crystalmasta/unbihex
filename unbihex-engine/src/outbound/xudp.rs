@@ -55,7 +55,7 @@ pub fn global_id(source: Option<SocketAddr>) -> [u8; 8] {
     id
 }
 
-fn write_addr(out: &mut Vec<u8>, t: &TargetAddr) -> Result<()> {
+pub(crate) fn write_addr(out: &mut Vec<u8>, t: &TargetAddr) -> Result<()> {
     out.extend_from_slice(&t.port.to_be_bytes());
     match &t.addr {
         Address::Ip(IpAddr::V4(v4)) => {

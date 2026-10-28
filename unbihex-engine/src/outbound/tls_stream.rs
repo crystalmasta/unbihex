@@ -1,8 +1,8 @@
-//! A rustls client stream that reads exactly one TLS record at a time.
+//! A rustls stream (client or server) that reads exactly one TLS record at a time.
 //!
-//! XTLS Vision may tell the client that the server stopped wrapping data in TLS
+//! XTLS Vision may tell the reader that the peer stopped wrapping data in TLS
 //! (`CommandPaddingDirect`). From that point the bytes on the socket are the inner
-//! traffic itself, so the client must not have buffered them inside the TLS layer.
+//! traffic itself, so the reader must not have buffered them inside the TLS layer.
 //! Feeding rustls record by record guarantees that: after the record with the
 //! command is decrypted, nothing more has been read from the socket.
 
@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use rustls::ClientConnection;
+use rustls::{ClientConnection, Connection, ServerConnection};
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -144,10 +144,10 @@ fn tls_err(e: rustls::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
-/// A TLS client stream with record-exact reads and a switch to raw reads.
+/// A TLS stream with record-exact reads and a switch to raw reads.
 pub struct TlsRecordStream {
     tcp: TcpStream,
-    conn: ClientConnection,
+    conn: Connection,
     rec: RecordReader,
     /// Reads bypass TLS (Vision direct copy).
     raw_read: bool,
@@ -166,11 +166,11 @@ impl std::fmt::Debug for TlsRecordStream {
 }
 
 impl TlsRecordStream {
-    /// Wraps a connection whose ClientHello has not been sent yet.
-    pub fn new(tcp: TcpStream, conn: ClientConnection) -> Self {
+    /// Wraps a connection whose handshake has not started on the wire yet.
+    pub fn new(tcp: TcpStream, conn: impl Into<Connection>) -> Self {
         TlsRecordStream {
             tcp,
-            conn,
+            conn: conn.into(),
             rec: RecordReader::new(),
             raw_read: false,
             eof: false,
@@ -198,6 +198,39 @@ impl TlsRecordStream {
         let mut s = TlsRecordStream::new(tcp, conn);
         s.handshake().await?;
         Ok(s)
+    }
+
+    /// Server side: answers the ClientHello arriving on `tcp` and completes the handshake.
+    pub async fn accept(tcp: TcpStream, config: Arc<rustls::ServerConfig>) -> Result<Self> {
+        let conn = ServerConnection::new(config).map_err(|e| Error::Tls(e.to_string()))?;
+        let mut s = TlsRecordStream::new(tcp, conn);
+        s.handshake().await?;
+        Ok(s)
+    }
+
+    /// Server side, when the first records were read already (REALITY reads the
+    /// ClientHello itself to check the client); `prefix` ends at a record boundary.
+    pub async fn accept_prefixed(
+        tcp: TcpStream,
+        mut conn: ServerConnection,
+        prefix: &[u8],
+    ) -> Result<Self> {
+        let mut rest = prefix;
+        while !rest.is_empty() {
+            if conn.read_tls(&mut rest)? == 0 {
+                break;
+            }
+            conn.process_new_packets()
+                .map_err(|e| Error::Tls(e.to_string()))?;
+        }
+        let mut s = TlsRecordStream::new(tcp, conn);
+        s.handshake().await?;
+        Ok(s)
+    }
+
+    /// The peer's address.
+    pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.tcp.peer_addr()
     }
 
     /// Drives the handshake to completion.
@@ -267,7 +300,7 @@ impl TlsRecordStream {
         if !self.rec.at_boundary() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "vision: server switched to direct copy in the middle of a TLS record",
+                "vision: the peer switched to direct copy in the middle of a TLS record",
             ));
         }
         self.raw_read = true;
@@ -329,9 +362,11 @@ impl AsyncRead for TlsRecordStream {
                     return Poll::Ready(Ok(()));
                 }
                 Ok(_) => {
+                    // A post-handshake answer (a KeyUpdate) goes out with the next write
+                    // or flush. Writing here would register this task's waker for socket
+                    // writability and lose the writer's wakeup when the halves are polled
+                    // from different tasks (tokio::io::split).
                     this.conn.process_new_packets().map_err(tls_err)?;
-                    // Post-handshake messages may need an answer; send it if we can.
-                    let _ = this.poll_flush_tls(cx);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
                 Err(e) => return Poll::Ready(Err(e)),

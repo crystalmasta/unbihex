@@ -15,6 +15,9 @@ pub mod relay;
 pub mod router;
 /// Large rule lists: geosite/geoip and sing-box rule-sets.
 pub mod rules;
+/// Server control: per-user traffic counters and live users of the VLESS inbounds.
+#[cfg(feature = "server")]
+pub mod server;
 /// Sessions passed from inbounds to the dispatcher.
 pub mod session;
 pub mod stats;
@@ -68,6 +71,8 @@ pub struct Instance {
     /// What a hot reload must not change (inbounds, DNS, limits).
     fixed: String,
     geo: parking_lot::Mutex<rules::GeoCache>,
+    #[cfg(feature = "server")]
+    server: Arc<server::ServerControl>,
 }
 
 /// The parts of a config that a hot reload cannot change.
@@ -168,6 +173,8 @@ impl Instance {
                 InboundConfig::Socks(c) | InboundConfig::Http(c) | InboundConfig::Mixed(c) => {
                     Some(c.listen)
                 }
+                #[cfg(feature = "server")]
+                InboundConfig::Vless(c) => Some(c.listen),
                 InboundConfig::Tun(_) => None,
             })
             .collect();
@@ -195,6 +202,8 @@ impl Instance {
             reload_ctx,
             fixed: fixed_part(&config),
             geo: parking_lot::Mutex::new(geo),
+            #[cfg(feature = "server")]
+            server: Arc::default(),
         };
 
         for ic in &config.inbounds {
@@ -229,6 +238,23 @@ impl Instance {
                         cancel.clone(),
                     ))
                 }),
+                #[cfg(feature = "server")]
+                InboundConfig::Vless(c) => {
+                    let control = instance.server.clone();
+                    inbound::vless::bind(c, control.stats().clone())
+                        .await
+                        .map(|(l, server)| {
+                            control.register(&c.tag, server.users());
+                            tokio::spawn(inbound::vless::serve(
+                                l,
+                                server,
+                                dispatcher.clone(),
+                                handshake,
+                                handshakes.clone(),
+                                cancel.clone(),
+                            ))
+                        })
+                }
                 InboundConfig::Tun(c) => {
                     // The fake-IP pool always exists when a tun inbound is configured.
                     let dns_server = match (c.dns_hijack, fakeip.clone()) {
@@ -297,6 +323,12 @@ impl Instance {
         *self.server_ips.lock() = server_ips;
         tracing::info!("configuration reloaded");
         Ok(())
+    }
+
+    /// Users and traffic counters of the server inbounds, for the management API.
+    #[cfg(feature = "server")]
+    pub fn server(&self) -> Arc<server::ServerControl> {
+        self.server.clone()
     }
 
     /// Live traffic counters.

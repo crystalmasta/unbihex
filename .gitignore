@@ -7,3 +7,6 @@ dist/
 *.aab
 *.jks
 *.keystore
+
+# Task file for the Gemini executor.
+.gemini-task.md

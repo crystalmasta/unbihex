@@ -329,6 +329,7 @@ async fn vision_and_reality_against_xray() {
         sni: Some("vless.test".into()),
         alpn: Vec::new(),
         pinned_sha256: Vec::new(),
+        fingerprint: None,
     };
     let tls = TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![outer.cert_der.clone()])
         .unwrap();
@@ -346,6 +347,7 @@ async fn vision_and_reality_against_xray() {
             public_key: public_key.clone(),
             short_id: short_id.into(),
             alpn: Vec::new(),
+            fingerprint: None,
         })
         .unwrap()
     };
@@ -394,6 +396,7 @@ async fn vision_and_reality_against_xray() {
         public_key: "wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE".into(),
         short_id: "0123abcd".into(),
         alpn: Vec::new(),
+        fingerprint: None,
     })
     .unwrap();
     let ob = VlessOutbound::from_parts("bad", uuid, endpoint(reality_port), None, sockets)
@@ -484,6 +487,7 @@ async fn xhttp_against_xray() {
         sni: Some("vless.test".into()),
         alpn: vec!["h2".into(), "http/1.1".into()],
         pinned_sha256: Vec::new(),
+        fingerprint: None,
     };
     let alpn = tls_cfg.alpn.clone();
     let tls = || TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![outer.cert_der.clone()]).unwrap();
@@ -492,6 +496,7 @@ async fn xhttp_against_xray() {
         public_key: public_key.clone(),
         short_id: "abcd".into(),
         alpn: Vec::new(),
+        fingerprint: None,
     })
     .unwrap();
 

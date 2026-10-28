@@ -23,6 +23,8 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   `http://` on the internet are refused. A subscription response is at most 8 MB, a database file at most 256 MB
   (written to disk as it downloads).
 - Adding `vless://`, `ss://` and `socks://` links by hand.
+- TLS and REALITY send a Chrome ClientHello (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768) instead of
+  rustls's recognisable one; `fp=none` in a link turns this off.
 - A choice of ping tests: through the proxy with GET or HEAD (the request goes through the engine itself to
   `cp.cloudflare.com/generate_204`, so the whole chain is checked), TCP (a connection to the server port only) or ICMP.
   TCP and ICMP also test servers whose protocol is not supported; in TUN mode the tests bypass the tunnel.
@@ -48,13 +50,22 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
 
 ### What the engine supports
 
-| Works | Listed, but not available yet |
-|---|---|
-| VLESS: TCP + TLS, REALITY, XTLS Vision (`xtls-rprx-vision`), XHTTP (packet-up, stream-up, stream-one), UDP over XUDP | ws / grpc / httpupgrade transports, XHTTP over HTTP/3, other `flow` kinds |
-| Shadowsocks AEAD (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305) | Shadowsocks 2022 and Shadowsocks plugins |
-| SOCKS5 | VMess, Trojan, Hysteria2, TUIC, WireGuard; VLESS without TLS (refused: the UUID and traffic go in the clear) |
+Works:
 
-Unsupported servers are shown greyed out with the reason. When the engine gains a protocol,
+- **VLESS** with TLS or REALITY, including XTLS Vision (`flow=xtls-rprx-vision`) and UDP over XUDP;
+  the TCP and XHTTP transports (packet-up, stream-up and stream-one over HTTP/2; packet-up also over HTTP/1.1).
+- **Shadowsocks** with the AEAD ciphers aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
+- **SOCKS5**.
+
+Not supported yet — such servers are listed, but greyed out:
+
+- the VMess, Trojan, Hysteria2, TUIC and WireGuard protocols;
+- for VLESS: the ws, grpc and httpupgrade transports, XHTTP over HTTP/3, and `flow` kinds other than Vision;
+- for Shadowsocks: Shadowsocks 2022 and plugins.
+
+The engine refuses VLESS without TLS or REALITY on purpose: the UUID and traffic would go in the clear.
+
+A greyed-out server shows the reason next to it. When the engine gains a protocol,
 it is enough to remove the matching check in `crates/client-core/src/links.rs`.
 
 ## Layout
@@ -82,7 +93,7 @@ The engine must sit next to it: `unbihex-client` and `unbihex-engine` are siblin
 Downloads are in the [GitHub releases](https://github.com/crystalmasta/unbihex/releases/latest).
 Local builds go to the `dist/` folder (it is not in the repository):
 
-- `dist/Unbihex-0.1.0-setup.exe` — installer for Windows 10/11 x64 (NSIS, `installer/build.sh`).
+- `dist/Unbihex-0.2.0-setup.exe` — installer for Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — portable version; `wintun.dll` must sit next to it.
   An MSVC build with a static CRT: no Visual C++ Redistributable needed, WebView2Loader is built into the exe.
 - `dist/android/Unbihex-android-arm64.apk` — Android 7+ (arm64, almost all phones).
@@ -108,7 +119,7 @@ device yet.
    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p unbihex-client --target x86_64-pc-windows-msvc
    MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe" sh installer/build.sh
    ```
-   Output: `installer\Unbihex-0.1.0-setup.exe`.
+   Output: `installer\Unbihex-0.2.0-setup.exe`.
 
 TUN mode needs administrator rights; the app has a "Restart as administrator" button. A known Windows limitation:
 the system may query the DNS of other adapters in parallel (Smart Multi-Homed Name Resolution), so for full

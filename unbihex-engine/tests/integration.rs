@@ -146,6 +146,7 @@ async fn vless_over_tls() {
         sni: Some("vless.test".into()),
         alpn: vec![],
         pinned_sha256: vec![],
+        fingerprint: None,
     };
     let tls =
         TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![cert.cert_der.clone()]).unwrap();

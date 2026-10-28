@@ -40,12 +40,84 @@
 - Первый релиз 0.1.0 на GitHub: установщик и portable-версия для Windows, APK для Android.
 - Windows-сборка проверена на живой системе: системный прокси и TUN.
 
+## 27.10 — отпечаток TLS как у Chrome (готово)
+- ClientHello Chrome для TLS и REALITY: GREASE, набор шифров и расширений Chrome, перемешивание расширений
+  на каждое соединение, GREASE ECH, ALPS, сжатие сертификатов brotli. JA4: `t13d1516h2_8daaf6152771_d8a2da3f94cd`
+  (проверено сервисом tls.peet.ws), до этого — `t13d1011_…` rustls.
+- Пост-квантовый обмен ключами X25519MLKEM768 на чистом Rust (`ml-kem`), отдельная доля X25519 как у Chrome.
+- rustls 0.23.46 вендорен в `unbihex-engine/vendor/rustls` с одним хуком (`UNBIHEX-PATCH.md`): ClientHello
+  переписывается до хеширования, так что транскрипт рукопожатия сходится с сервером.
+- Параметр `fp` ссылок и JSON-подписок: любой браузер пока даёт Chrome, `none` — ClientHello rustls.
+- Проверено на 15 живых серверах (14 TLS+Vision, 1 REALITY+Vision): все подключаются.
+
+## 27.10 — серверное ядро, шаг 1: VLESS+TLS+Vision (готово)
+- VLESS inbound (фича `server` ядра, клиент её не включает): TLS с сертификатом из PEM-файлов,
+  X25519MLKEM768 на стороне сервера, пользователи с `id` / `email` / `flow`, правила Vision как у Xray
+  (пользователь с Vision обязан его использовать, остальным он запрещён). Пока только TCP.
+- Бинарник `unbihex` (папка `unbihex-server`): `run -c <файл | stdin:>`, `version`, `uuid [-i текст]`, `x25519 [-i ключ]`;
+  остановка по Ctrl-C и SIGTERM. Конфиг пока в формате ядра, не Xray JSON.
+- Исправлена потеря пробуждения в TLS-потоке: чтение больше не отправляет данные само, из-за этого
+  при передаче больших объёмов в два направления соединение могло зависнуть.
+- Тесты `unbihex-server/tests/server.rs`: наш клиент ↔ наш сервер, TLS и Vision, до 1 МБ, отказ чужим и с неверным flow.
+
+## 27.10 — серверное ядро, шаг 1b: UDP и Mux.Cool / XUDP (готово)
+- VLESS-команда UDP (пакеты `длина | данные` к одному адресу) и Mux.Cool: много TCP- и UDP-сессий
+  в одном соединении, XUDP — адрес у каждого пакета, ответы помечены адресом источника.
+- Правила как у Xray: Vision не несёт команду UDP (UDP Vision-пользователей идёт как XUDP),
+  в Mux-соединении Vision-пользователя допускается только UDP.
+- Каждый UDP-адрес сессии — отдельный поток через маршрутизатор: правила применяются к каждому адресу,
+  но исходящий порт у разных адресов разный (полный Full Cone и переподключение по GlobalID — позже).
+- Тесты: UDP обычного пользователя, XUDP через Vision, Mux с TCP и двумя UDP-адресатами в одной сессии,
+  отказ TCP внутри Mux для Vision-пользователя.
+
+## 27.10 — серверное ядро, шаг 2: REALITY (готово)
+- Сервер в отдельной папке `unbihex-server` (бинарник, тесты, примеры конфигов); протоколы остались в ядре.
+- REALITY inbound: ClientHello читается целиком (в том числе фрагментированный), `session_id` проверяется
+  ключом сервера — short ID, имя сервера, по желанию часы клиента (`max_time_diff_ms`). Своему клиенту —
+  TLS 1.3 с одноразовым Ed25519-сертификатом, подписанным HMAC; всех остальных соединение уходит
+  на `dest` вместе с уже прочитанными байтами, и они говорят с настоящим сайтом.
+- Тесты: наш клиент через REALITY (Vision, отпечаток Chrome, XUDP, фрагментированный hello, пустой short ID);
+  браузер по TLS и HTTP-запрос получают настоящий сайт; неверный short ID не проходит.
+- Пока нет: подгонки размеров наших handshake-записей под `dest` (Xray это делает), проверки версии клиента.
+
+## 28.10 — серверное ядро, шаг 3: статистика и gRPC API (готово)
+- Счётчики трафика с именами Xray: `user>>>email>>>traffic>>>uplink/downlink`, `inbound>>>тег>>>traffic>>>…`;
+  считается полезная нагрузка TCP, Mux и UDP, у Vision — снаружи, поэтому raw и padding считаются одинаково.
+- Пользователи VLESS добавляются и удаляются на лету: открытые соединения удалённого остаются, новые — отказ (как в Xray).
+- gRPC API на тех же путях, что у Xray (`proto/` — подмножество протоколов Xray с теми же номерами полей):
+  StatsService (GetStats, QueryStats, GetSysStats, GetUsersStats), HandlerService (AlterInbound с
+  AddUserOperation / RemoveUserOperation, GetInboundUsers, GetInboundUsersCount). Включается `"api": {"listen": …}`;
+  неизвестный сервис в `api.services` — ошибка запуска. Сборке не нужен protoc (`protox`).
+- `unbihex api`: stats, statsquery, sysstats, adu (один пользователь из флагов), rmu, inbounduser, inboundusercount.
+- Тесты `tests/api.rs`: трафик пользователя и inbound'а, сброс, добавление и удаление пользователя живым клиентом,
+  ошибки (дубликат, нет пользователя, чужая операция), команда `unbihex api` через бинарник.
+- Пока нет: онлайн-статистики (GetStatsOnline и др.), AddInbound / AddOutbound, аккаунтов кроме VLESS.
+
+## 28.10 — серверное ядро, шаг 4: конфиги Xray JSON (готово)
+- `xray_config.rs`: Xray JSON переводится в конфиг ядра. Поддержано то, что генерируют панели: VLESS по TCP
+  с TLS (сертификат из файлов) или REALITY, клиенты с полями панелей (`enable: false` — пропускается),
+  API через `dokodemo-door` — по тегу или по правилу `inboundTag → api.tag` (как у Marzban), `freedom` / `blackhole`,
+  правила `field` (domain с префиксами `domain:` / `full:` / `keyword:` / `geosite:`, ip с CIDR и `geoip:`,
+  port, network, inboundTag), `policy.levels.0` (handshake, connIdle), DNS-серверы по IP.
+- Строго: неизвестное поле или то, что меняет обработку трафика (другие протоколы и транспорты, fallbacks,
+  xver, балансировщики, regexp, source и т. п.), — ошибка запуска. Предупреждения: файлы логов, sniffing,
+  правила по `protocol` (сервер не определяет протоколы — правило выпадает), LoggerService.
+- CLI как у Xray: `unbihex -c config.json` без `run` (так запускает 3x-ui), `-test` («Configuration OK.»),
+  `-format json`; `-confdir` и несколько `-c` — ошибка.
+- Тесты: конфиги в стиле Marzban и 3x-ui, что отклоняется; бинарник на таком конфиге — клиент проходит,
+  статистика видна через `unbihex api`.
+- `unbihex version`: `Unbihex 0.1.0 (os/arch)`; только если бинарник запущен под именем `xray*` (так его
+  запускают панели, работает и через symlink) — первая строка как у Xray, `Xray 26.10.21 (Unbihex 0.1.0) (os/arch)`; Marzban ищет
+  `^Xray (\d+\.\d+\.\d+)`, 3x-ui берёт второе слово. 26.10.21 — релиз Xray, по которому сверены конфиг и API.
+- Пока нет: транспорты кроме TCP, протоколы кроме VLESS.
+
+## 28.10 — клиент 0.2.0
+- Версия клиента 0.2.0 (установщик и portable для Windows, APK для Android); сервер `unbihex` — 0.1.0.
+
 ## Дальше
-1. Отпечаток TLS как у Chrome на чистом Rust (свой ClientHello: GREASE, порядок расширений).
-2. Серверная часть: VLESS / Vision / REALITY inbound.
-3. gRPC API как у Xray (HandlerService, StatsService), чтение Xray JSON со строгим разбором,
-   CLI `run -c` / `version` / `x25519` / `uuid` / `api` — для Marzban / 3x-ui / PasarGuard.
-4. Fuzzing и бенчмарки, README ядра как SDK.
+1. Прогон с настоящими панелями: их конфиги, API, статистика, перезапуски.
+3. Fuzzing и бенчмарки, README ядра как SDK.
+4. Шаблоны Firefox и Safari для `fp=firefox` / `fp=safari` (сейчас они дают Chrome).
 
 ## Проверить вручную
 1. APK на телефоне: подключение, пинг, Vision/REALITY-серверы, ICMP-пинг.

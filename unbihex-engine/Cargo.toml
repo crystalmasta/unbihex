@@ -13,6 +13,8 @@ homepage = "https://github.com/crystalmasta"
 default = []
 # Exposes test-only helpers (custom TLS roots) to integration tests.
 test-util = []
+# Server role: the VLESS inbound (the binary is ../unbihex-server). Client builds leave it off.
+server = []
 
 [dependencies]
 # src/adapter.rs (bridge to the old client, now in _archive\clean) is no longer compiled:
@@ -42,8 +44,9 @@ tracing = "0.1"
 tun-rs = { version = "2", features = ["async"] }
 url = "2"
 uuid = "1"
-# TLS: rustls with the ring provider (aws-lc-rs needs cmake and nasm).
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# TLS: rustls with the ring provider (aws-lc-rs needs cmake and nasm), patched (vendor/rustls,
+# see [patch.crates-io]) to send a browser ClientHello. brotli: certificate compression, as Chrome offers.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging", "brotli"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots = "1"
 # Shadowsocks AEAD primitives.
@@ -62,6 +65,7 @@ regex-lite = "0.1"
 # XHTTP transport: HTTP/2 client (and server, for tests and the server role).
 h2 = "0.4"
 http = "1"
+ml-kem = { version = "0.3.3", features = ["zeroize"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -86,3 +90,9 @@ tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [workspace]
+
+# rustls 0.23.46 with one hook: the encoded ClientHello can be rewritten before it is
+# hashed and sent (vendor/rustls/UNBIHEX-PATCH.md). Builds that use this engine
+# (unbihex-client) must carry the same patch.
+[patch.crates-io]
+rustls = { path = "vendor/rustls" }

@@ -11,7 +11,7 @@
 
 ## Этап 0 — сейчас: клиент подключается к реальным подпискам
 1. Доделать XTLS Vision + REALITY (готово).
-2. Отпечаток TLS (fp=chrome). ClientHello rustls легко отличить от браузера; ТСПУ в РФ
+2. Отпечаток TLS (fp=chrome) — готово 27.10: свой ClientHello по шаблону Chrome поверх патченного rustls. ClientHello rustls легко отличить от браузера; ТСПУ в РФ
    умеет блокировать по отпечатку. Варианты: собственная сборка ClientHello, повторяющая Chrome
    (как uTLS), или BoringSSL (крейт `boring`) на месте rustls для внешнего TLS/REALITY.
    Без этого REALITY может работать хуже, чем у Xray-клиентов.
@@ -33,16 +33,18 @@
 9. Подписки в формате Xray JSON и sing-box JSON (многие панели отдают их Happ/v2rayN).
 
 ## Этап 2 — серверное ядро
-10. Inbound-ы: VLESS (+Vision), REALITY-сервер, Trojan, Shadowsocks (вкл. 2022), fallbacks.
-11. Управление на лету: пользователи добавляются/удаляются без перезапуска (hot reload ключей).
+10. Inbound-ы: VLESS (+Vision), REALITY-сервер (готово 27.10, вместе с UDP и Mux/XUDP); Trojan, Shadowsocks (вкл. 2022), fallbacks — впереди.
+11. Управление на лету: пользователи добавляются/удаляются без перезапуска (hot reload ключей) — готово 28.10.
 12. gRPC API, совместимый с Xray: HandlerService (AddUser/RemoveUser/AlterInbound),
     StatsService (QueryStats/GetStats, счётчики user>>>email>>>traffic>>>uplink/downlink).
-    Реализация на `tonic` по .proto из Xray.
+    Реализация на `tonic` по .proto из Xray — готово 28.10 (плюс GetSysStats и GetUsersStats; онлайн-статистики пока нет).
 13. Слой совместимости конфигов: перевод подмножества Xray JSON, которое реально генерируют
     панели, во внутренний конфиг; на всё неподдерживаемое — громкая ошибка, а не молчаливый пропуск.
+    Готово 28.10: VLESS по TCP с TLS/REALITY, API, freedom/blackhole, правила, policy, DNS.
 
 ## Этап 3 — drop-in замена `xray` для панелей
 14. Совместимый CLI: `run -c`, `version`, `x25519`, `uuid`, `api …` — панели вызывают их напрямую.
+    Готово 28.10: запуск без `run`, `-test`; `version` под именем `xray*` отвечает как Xray, иначе — как Unbihex.
 15. Прогон с настоящими Marzban / 3x-ui / PasarGuard: их конфиги, API, статистика, перезапуски.
 16. Метрики (Prometheus), журнал подключений, лимиты устройств (HWID) на стороне сервера.
 
