@@ -21,6 +21,11 @@ use unbihex_engine::{Config, Instance, PlatformHooks};
 use unbihex_server::api::{self, ApiConfig};
 use unbihex_server::{cli_api, xray_config};
 
+/// The Xray release whose config format and API this build follows. Panels read it from
+/// `version` and refuse cores they do not know (Marzban: `^Xray (\d+\.\d+\.\d+)`,
+/// 3x-ui: the second word), so the first line is Xray's.
+const XRAY_COMPAT: &str = "26.10.21";
+
 const USAGE: &str = "usage:
   unbihex [run] -c <config.json | stdin:> [-test]
   unbihex version
@@ -40,12 +45,10 @@ fn main() -> ExitCode {
             run(&args)
         }
         Some("version" | "-version" | "--version") => {
-            println!(
-                "Unbihex {} ({}/{})",
-                unbihex_engine::VERSION,
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            );
+            let v = unbihex_engine::VERSION;
+            let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+            println!("Xray {XRAY_COMPAT} (Unbihex {v}) ({os}/{arch})");
+            println!("Unbihex {v}: a Rust engine that runs Xray {XRAY_COMPAT} configs and API.");
             Ok(())
         }
         Some("uuid") => uuid(rest),

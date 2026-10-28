@@ -28,7 +28,7 @@ process, the CLI and the tests.
 ```text
 unbihex run -c <config.json | stdin:>   run; stops on Ctrl-C and SIGTERM
 unbihex -c <config.json> [-test]         the same without `run`, as with Xray; -test only checks the config
-unbihex version
+unbihex version                          the first line is Xray's ("Xray 26.10.21 (Unbihex …)"): panels parse it
 unbihex uuid [-i text]                   a random UUID, or Xray's UUIDv5 of the text
 unbihex x25519 [-i key]                  a REALITY key pair (base64url), or the public key of a private one
 unbihex api <command> [-s address]       calls the gRPC API of a running server, like `xray api`:

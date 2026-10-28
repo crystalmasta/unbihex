@@ -106,10 +106,12 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   `-format json`; `-confdir` and several `-c` are errors.
 - Tests: Marzban- and 3x-ui-style configs, what is refused; the binary on such a config — a client gets through
   and the stats show in `unbihex api`.
-- Not yet: `xray version` in Xray's format (panels parse it), transports other than TCP, protocols other than VLESS.
+- `unbihex version`: the first line is Xray's — `Xray 26.10.21 (Unbihex 0.1.0) (os/arch)`; Marzban looks for
+  `^Xray (\d+\.\d+\.\d+)`, 3x-ui takes the second word. 26.10.21 is the Xray release the config and API were checked against.
+- Not yet: transports other than TCP, protocols other than VLESS.
 
 ## Next
-1. Runs with real panels: their configs, API, stats, restarts; the `version` output they parse.
+1. Runs with real panels: their configs, API, stats, restarts.
 3. Fuzzing and benchmarks, the engine README as an SDK.
 4. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).
 

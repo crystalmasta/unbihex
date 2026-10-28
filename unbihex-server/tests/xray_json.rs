@@ -168,3 +168,18 @@ fn unsupported_configs_fail_the_check() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("TCP only"));
 }
+
+#[test]
+fn version_reads_as_xray_for_panels() {
+    for arg in ["version", "-version"] {
+        let out = String::from_utf8(unbihex(&[arg]).stdout).unwrap();
+        let first = out.lines().next().unwrap();
+        // Marzban: re.match(r'^Xray (\d+\.\d+\.\d+)'); 3x-ui: the second word.
+        let words: Vec<&str> = first.split(' ').collect();
+        assert_eq!(words[0], "Xray", "{out}");
+        let parts: Vec<&str> = words[1].split('.').collect();
+        assert_eq!(parts.len(), 3, "{out}");
+        assert!(parts.iter().all(|p| p.parse::<u32>().is_ok()), "{out}");
+        assert!(first.contains("Unbihex"), "{out}");
+    }
+}

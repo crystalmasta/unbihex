@@ -27,7 +27,7 @@
 ```text
 unbihex run -c <config.json | stdin:>   запуск; останавливается по Ctrl-C и SIGTERM
 unbihex -c <config.json> [-test]         то же без `run`, как у Xray; -test только проверяет конфиг
-unbihex version
+unbihex version                          первая строка как у Xray («Xray 26.10.21 (Unbihex …)»): её разбирают панели
 unbihex uuid [-i текст]                  случайный UUID или UUIDv5 из текста, как у Xray
 unbihex x25519 [-i ключ]                 пара ключей REALITY (base64url) или публичный ключ к приватному
 unbihex api <команда> [-s адрес]         вызов gRPC API запущенного сервера, как `xray api`:
