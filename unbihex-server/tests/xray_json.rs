@@ -169,17 +169,38 @@ fn unsupported_configs_fail_the_check() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("TCP only"));
 }
 
+/// The first line of `version` from the binary started under `name`.
+fn version_line(name: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("unbihex-version-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(env!("CARGO_BIN_EXE_unbihex"), &exe).unwrap();
+    let out = Command::new(&exe).arg("version").output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
 #[test]
-fn version_reads_as_xray_for_panels() {
-    for arg in ["version", "-version"] {
-        let out = String::from_utf8(unbihex(&[arg]).stdout).unwrap();
-        let first = out.lines().next().unwrap();
-        // Marzban: re.match(r'^Xray (\d+\.\d+\.\d+)'); 3x-ui: the second word.
-        let words: Vec<&str> = first.split(' ').collect();
-        assert_eq!(words[0], "Xray", "{out}");
+fn version_reads_as_xray_only_in_xrays_place() {
+    // Marzban: re.match(r'^Xray (\d+\.\d+\.\d+)'); 3x-ui: the second word.
+    for name in ["xray", "xray-linux-amd64"] {
+        let line = version_line(name);
+        let words: Vec<&str> = line.split(' ').collect();
+        assert_eq!(words[0], "Xray", "{name}: {line}");
         let parts: Vec<&str> = words[1].split('.').collect();
-        assert_eq!(parts.len(), 3, "{out}");
-        assert!(parts.iter().all(|p| p.parse::<u32>().is_ok()), "{out}");
-        assert!(first.contains("Unbihex"), "{out}");
+        assert_eq!(parts.len(), 3, "{line}");
+        assert!(parts.iter().all(|p| p.parse::<u32>().is_ok()), "{line}");
+        assert!(line.contains("Unbihex"), "{line}");
     }
+    for name in ["unbihex", "my-xray"] {
+        let line = version_line(name);
+        assert!(line.starts_with("Unbihex "), "{name}: {line}");
+    }
+    let out = String::from_utf8(unbihex(&["-version"]).stdout).unwrap();
+    assert!(out.starts_with("Unbihex "), "{out}");
 }

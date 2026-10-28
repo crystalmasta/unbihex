@@ -21,9 +21,7 @@ use unbihex_engine::{Config, Instance, PlatformHooks};
 use unbihex_server::api::{self, ApiConfig};
 use unbihex_server::{cli_api, xray_config};
 
-/// The Xray release whose config format and API this build follows. Panels read it from
-/// `version` and refuse cores they do not know (Marzban: `^Xray (\d+\.\d+\.\d+)`,
-/// 3x-ui: the second word), so the first line is Xray's.
+/// The Xray release whose config format and API this build follows.
 const XRAY_COMPAT: &str = "26.10.21";
 
 const USAGE: &str = "usage:
@@ -47,7 +45,11 @@ fn main() -> ExitCode {
         Some("version" | "-version" | "--version") => {
             let v = unbihex_engine::VERSION;
             let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
-            println!("Xray {XRAY_COMPAT} (Unbihex {v}) ({os}/{arch})");
+            if installed_as_xray() {
+                println!("Xray {XRAY_COMPAT} (Unbihex {v}) ({os}/{arch})");
+            } else {
+                println!("Unbihex {v} ({os}/{arch})");
+            }
             println!("Unbihex {v}: a Rust engine that runs Xray {XRAY_COMPAT} configs and API.");
             Ok(())
         }
@@ -70,6 +72,22 @@ fn main() -> ExitCode {
 }
 
 /// The value of the first of `names` (`-c value` or `-c=value`).
+/// Whether we run in Xray's place. Panels start the core by Xray's file name (`xray`,
+/// `xray-linux-amd64`) and read its version from the first line of `version`
+/// (Marzban: `^Xray (\d+\.\d+\.\d+)`, 3x-ui: the second word), so only under that name
+/// does the line read as Xray's. The name we were started by, not the resolved file,
+/// so a `xray -> unbihex` symlink counts.
+fn installed_as_xray() -> bool {
+    std::env::args_os()
+        .next()
+        .map(std::path::PathBuf::from)
+        .and_then(|p| {
+            p.file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        })
+        .is_some_and(|name| name.starts_with("xray"))
+}
+
 fn flag(args: &[String], names: &[&str]) -> Result<Option<String>, String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
