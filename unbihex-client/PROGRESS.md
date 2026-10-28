@@ -93,9 +93,23 @@
   ошибки (дубликат, нет пользователя, чужая операция), команда `unbihex api` через бинарник.
 - Пока нет: онлайн-статистики (GetStatsOnline и др.), AddInbound / AddOutbound, аккаунтов кроме VLESS.
 
+## 28.10 — серверное ядро, шаг 4: конфиги Xray JSON (готово)
+- `xray_config.rs`: Xray JSON переводится в конфиг ядра. Поддержано то, что генерируют панели: VLESS по TCP
+  с TLS (сертификат из файлов) или REALITY, клиенты с полями панелей (`enable: false` — пропускается),
+  API через `dokodemo-door` — по тегу или по правилу `inboundTag → api.tag` (как у Marzban), `freedom` / `blackhole`,
+  правила `field` (domain с префиксами `domain:` / `full:` / `keyword:` / `geosite:`, ip с CIDR и `geoip:`,
+  port, network, inboundTag), `policy.levels.0` (handshake, connIdle), DNS-серверы по IP.
+- Строго: неизвестное поле или то, что меняет обработку трафика (другие протоколы и транспорты, fallbacks,
+  xver, балансировщики, regexp, source и т. п.), — ошибка запуска. Предупреждения: файлы логов, sniffing,
+  правила по `protocol` (сервер не определяет протоколы — правило выпадает), LoggerService.
+- CLI как у Xray: `unbihex -c config.json` без `run` (так запускает 3x-ui), `-test` («Configuration OK.»),
+  `-format json`; `-confdir` и несколько `-c` — ошибка.
+- Тесты: конфиги в стиле Marzban и 3x-ui, что отклоняется; бинарник на таком конфиге — клиент проходит,
+  статистика видна через `unbihex api`.
+- Пока нет: `xray version` в формате Xray (панели разбирают его вывод), транспорты кроме TCP, протоколы кроме VLESS.
+
 ## Дальше
-1. Чтение Xray JSON со строгим разбором (подмножество, которое генерируют Marzban / 3x-ui / PasarGuard).
-2. Прогон с настоящими панелями: их конфиги, API, статистика, перезапуски.
+1. Прогон с настоящими панелями: их конфиги, API, статистика, перезапуски; вывод `version`, который они разбирают.
 3. Fuzzing и бенчмарки, README ядра как SDK.
 4. Шаблоны Firefox и Safari для `fp=firefox` / `fp=safari` (сейчас они дают Chrome).
 

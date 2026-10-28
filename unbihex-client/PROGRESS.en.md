@@ -93,9 +93,23 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   errors (duplicate, missing user, a foreign operation), the `unbihex api` command through the binary.
 - Not yet: online stats (GetStatsOnline and the like), AddInbound / AddOutbound, accounts other than VLESS.
 
+## 28.10 — server engine, step 4: Xray JSON configs (done)
+- `xray_config.rs` translates Xray JSON into the engine's config. Supported is what panels generate: VLESS over TCP
+  with TLS (certificate files) or REALITY, clients with panel fields (`enable: false` is skipped), the API through
+  `dokodemo-door` — by tag or by an `inboundTag → api.tag` rule (Marzban's way), `freedom` / `blackhole`,
+  `field` rules (domain with `domain:` / `full:` / `keyword:` / `geosite:`, ip with CIDRs and `geoip:`, port, network,
+  inboundTag), `policy.levels.0` (handshake, connIdle), DNS servers by IP.
+- Strict: an unknown field, or anything that changes how traffic is handled (other protocols and transports,
+  fallbacks, xver, balancers, regexp, source and the like), fails the start. Warnings: log files, sniffing,
+  `protocol` rules (the server does not detect protocols, so the rule is dropped), LoggerService.
+- An Xray-like CLI: `unbihex -c config.json` without `run` (how 3x-ui starts it), `-test` ("Configuration OK."),
+  `-format json`; `-confdir` and several `-c` are errors.
+- Tests: Marzban- and 3x-ui-style configs, what is refused; the binary on such a config — a client gets through
+  and the stats show in `unbihex api`.
+- Not yet: `xray version` in Xray's format (panels parse it), transports other than TCP, protocols other than VLESS.
+
 ## Next
-1. Strict Xray JSON parsing (the subset Marzban / 3x-ui / PasarGuard generate).
-2. Runs with real panels: their configs, API, stats, restarts.
+1. Runs with real panels: their configs, API, stats, restarts; the `version` output they parse.
 3. Fuzzing and benchmarks, the engine README as an SDK.
 4. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).
 

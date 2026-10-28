@@ -1,7 +1,9 @@
-//! The server's own parts: the Xray-compatible management API and the `api` command.
+//! The server's own parts: the Xray-compatible management API, the `api` command and
+//! reading Xray JSON configs.
 
 pub mod api;
 pub mod cli_api;
+pub mod xray_config;
 
 /// Code generated from `proto/`: Xray's packages, nested the same way.
 #[allow(missing_docs, clippy::all, clippy::pedantic, clippy::unwrap_used)]
