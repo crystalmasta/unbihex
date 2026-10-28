@@ -1,0 +1,14 @@
+// A subset of the Xray-core API protos (https://github.com/XTLS/Xray-core, MPL-2.0):
+// same packages, services and field numbers, so Xray clients and panels talk to us unchanged.
+syntax = "proto3";
+package xray.proxy.vless;
+
+// Fields 7 and up (reverse, test*) are not used; prost skips them when decoding.
+message Account {
+  string id = 1;
+  string flow = 2;
+  string encryption = 3;
+  uint32 xorMode = 4;
+  uint32 seconds = 5;
+  string padding = 6;
+}

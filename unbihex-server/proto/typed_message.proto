@@ -1,0 +1,9 @@
+// A subset of the Xray-core API protos (https://github.com/XTLS/Xray-core, MPL-2.0):
+// same packages, services and field numbers, so Xray clients and panels talk to us unchanged.
+syntax = "proto3";
+package xray.common.serial;
+
+message TypedMessage {
+  string type = 1;
+  bytes value = 2;
+}

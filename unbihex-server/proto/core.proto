@@ -1,0 +1,8 @@
+// A subset of the Xray-core API protos (https://github.com/XTLS/Xray-core, MPL-2.0):
+// same packages, services and field numbers, so Xray clients and panels talk to us unchanged.
+syntax = "proto3";
+package xray.core;
+
+// Handler configs are not decoded: AddInbound and friends answer Unimplemented.
+message InboundHandlerConfig {}
+message OutboundHandlerConfig {}
