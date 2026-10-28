@@ -17,6 +17,8 @@ const ERR_NETWORK: i32 = -3;
 const ERR_RUNNING: i32 = -4;
 const ERR_HANDLE: i32 = -5;
 const ERR_PANIC: i32 = -99;
+/// Name of the engine runtime's threads.
+const ENGINE_THREAD: &str = "unbihex";
 
 /// The only handle value (one instance at a time).
 const HANDLE: i32 = 1;
@@ -98,7 +100,7 @@ fn start_inner(json: &str, tun_fd: i32, protect: ProtectCb, ctx: Ctx) -> i32 {
     init_logging(&config.log.level);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
-        .thread_name("unbihex")
+        .thread_name(ENGINE_THREAD)
         .enable_all()
         .build()
     {
@@ -168,6 +170,13 @@ pub extern "C" fn unbihex_stop(handle: i32) -> i32 {
             set_error("invalid handle");
             return ERR_HANDLE;
         }
+        // From an engine thread (a protect callback) block_on would panic after the
+        // engine was taken out of STATE, and dropping its runtime there aborts. The
+        // engine's runtime names its threads (see start_inner).
+        if std::thread::current().name() == Some(ENGINE_THREAD) {
+            set_error("unbihex_stop called from an engine thread");
+            return ERR_RUNNING;
+        }
         let running = match STATE.lock() {
             Ok(mut s) => s.take(),
             Err(p) => p.into_inner().take(),
@@ -198,10 +207,12 @@ pub unsafe extern "C" fn unbihex_stats(
     direct_up: *mut u64,
     direct_down: *mut u64,
 ) -> bool {
-    let snap = match STATE.lock() {
-        Ok(s) => s.as_ref().map(|r| r.instance.counters().snapshot()),
-        Err(_) => None,
-    };
+    let snap = catch_unwind(|| {
+        let s = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        s.as_ref().map(|r| r.instance.counters().snapshot())
+    })
+    .ok()
+    .flatten();
     let Some((pu, pd, du, dd)) = snap else {
         return false;
     };

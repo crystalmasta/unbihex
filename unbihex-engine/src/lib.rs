@@ -179,6 +179,15 @@ impl Instance {
             })
             .collect();
         let guard = LocalGuard::new(&listens, tun_cfg.as_ref().map(|t| t.tag.clone()));
+        // A server's users must not reach its LAN by name: no client-style exceptions.
+        #[cfg(feature = "server")]
+        let serves = config
+            .inbounds
+            .iter()
+            .any(|i| matches!(i, InboundConfig::Vless(_)));
+        #[cfg(not(feature = "server"))]
+        let serves = false;
+        let private_names = config.dns.private_answer_suffixes(!serves)?;
         let dispatcher = Arc::new(
             Dispatcher::new(
                 router,
@@ -187,7 +196,8 @@ impl Instance {
                 fakeip.clone(),
                 counters.clone(),
             )
-            .with_policy(ctx.resolver.clone(), guard),
+            .with_policy(ctx.resolver.clone(), guard)
+            .with_private_names(private_names, !serves),
         );
         let handshake = Duration::from_secs(config.limits.handshake_timeout_secs);
         let handshakes = Arc::new(tokio::sync::Semaphore::new(config.limits.max_connections));
@@ -256,6 +266,14 @@ impl Instance {
                         })
                 }
                 InboundConfig::Tun(c) => {
+                    if !c.dns_hijack {
+                        tracing::warn!(
+                            "tun {}: dns_hijack is off, so DNS goes to the system resolver as plain \
+                             UDP (to the ISP, when the resolver is the router) and domain rules see \
+                             no names",
+                            c.tag
+                        );
+                    }
                     // The fake-IP pool always exists when a tun inbound is configured.
                     let dns_server = match (c.dns_hijack, fakeip.clone()) {
                         (true, Some(pool)) => Some(Arc::new(

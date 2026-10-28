@@ -15,7 +15,7 @@ use crate::dns::fakeip::FakeIpPool;
 use crate::error::{Error, Result};
 use crate::outbound::{BoxStream, Outbound, PacketStream};
 use crate::relay::{relay_tcp, relay_udp};
-use crate::router::Router;
+use crate::router::{Router, is_private_ip};
 use crate::session::Session;
 use crate::stats::Counters;
 
@@ -138,6 +138,31 @@ pub struct Dispatcher {
     counters: Arc<Counters>,
     resolver: Option<Arc<Resolver>>,
     guard: Option<LocalGuard>,
+    /// Domain suffixes whose direct answers may be private (LAN names).
+    private_names: HashSet<String>,
+    /// Single-label names and `localhost` may resolve privately too (a client's LAN;
+    /// not on a server, where `metadata` can be the cloud's metadata service).
+    local_names: bool,
+}
+
+/// Whether a direct answer for `domain` may be private, loopback or link-local: for
+/// other names it is DNS rebinding (a public name pointing into the LAN, at the router
+/// or a cloud metadata service), whatever rule picked the session.
+fn may_be_private(names: &HashSet<String>, local_names: bool, domain: &str) -> bool {
+    let d = domain.trim_end_matches('.').to_ascii_lowercase();
+    if local_names && (!d.contains('.') || d == "localhost" || d.ends_with(".localhost")) {
+        return true;
+    }
+    let mut s = d.as_str();
+    loop {
+        if names.contains(s) {
+            return true;
+        }
+        match s.split_once('.') {
+            Some((_, rest)) => s = rest,
+            None => return false,
+        }
+    }
 }
 
 impl Dispatcher {
@@ -158,7 +183,17 @@ impl Dispatcher {
             counters,
             resolver: None,
             guard: None,
+            private_names: HashSet::new(),
+            local_names: true,
         }
+    }
+
+    /// Domain suffixes (with subdomains) that may resolve to private addresses for
+    /// direct sessions; with `local_names`, single-label names and `localhost` may too.
+    pub fn with_private_names(mut self, names: HashSet<String>, local_names: bool) -> Dispatcher {
+        self.private_names = names;
+        self.local_names = local_names;
+        self
     }
 
     /// Resolves names of direct sessions here (with the direct outbound's resolver) so
@@ -257,6 +292,16 @@ impl Dispatcher {
                 .filter(|(_, o)| o.is_direct())
                 .map(|(ip, _)| ip)
                 .collect();
+        }
+        if let Some(d) = sess.target.addr.as_domain()
+            && !may_be_private(&self.private_names, self.local_names, d)
+            && ips.iter().any(|ip| is_private_ip(*ip))
+        {
+            ips.retain(|ip| !is_private_ip(*ip));
+            if ips.is_empty() {
+                tracing::debug!("{d}: only private addresses (DNS rebinding?), blocked");
+                return Err(Error::Blocked);
+            }
         }
         if let Some(guard) = &self.guard {
             let mut refused = None;
@@ -450,6 +495,34 @@ mod tests {
         assert!(!check(&any, "127.0.0.1:5000", "127.0.0.1:1080", "socks"));
         assert!(!check(&any, "127.0.0.1:5000", "[::1]:1080", "socks"));
         assert!(check(&any, "127.0.0.1:5000", "8.8.8.8:1080", "socks"));
+    }
+
+    #[test]
+    fn private_answers_only_for_local_names() {
+        let names: HashSet<String> = ["lan".into(), "corp.example".into()].into();
+        for d in [
+            "router",
+            "localhost",
+            "a.localhost",
+            "nas.lan",
+            "x.corp.example",
+            "LAN.",
+        ] {
+            assert!(may_be_private(&names, true, d), "{d}");
+        }
+        for d in [
+            "example.com",
+            "evil.ru",
+            "lan.example.com",
+            "corp.example.org",
+        ] {
+            assert!(!may_be_private(&names, true, d), "{d}");
+        }
+        // A server: only the listed names.
+        for d in ["metadata", "localhost", "metadata.google.internal"] {
+            assert!(!may_be_private(&HashSet::new(), false, d), "{d}");
+        }
+        assert!(may_be_private(&names, false, "x.corp.example"));
     }
 
     #[tokio::test]

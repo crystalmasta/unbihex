@@ -169,7 +169,8 @@ pub struct ServerRealityConfig {
     /// Allowed short IDs, hex, up to 16 characters each; `""` is the all-zero ID.
     pub short_ids: Vec<String>,
     /// Largest allowed difference between the client's clock and ours, in
-    /// milliseconds; 0 turns the check off (as in Xray).
+    /// milliseconds. 0 (the default) means 120 s: unlike Xray, the check cannot be
+    /// turned off, since the window also bounds the replay cache.
     #[serde(default)]
     pub max_time_diff_ms: u64,
 }
@@ -731,6 +732,11 @@ pub struct DnsConfig {
     /// names, and LAN names only make sense with their real addresses.
     #[serde(default = "default_fakeip_exclude")]
     pub fakeip_exclude: Vec<String>,
+    /// More domain suffixes whose direct answers may be private addresses (besides
+    /// `fakeip_exclude`, single-label names and `localhost`): for any other name such
+    /// answers are dropped, as DNS rebinding.
+    #[serde(default)]
+    pub allow_private_answers: Vec<String>,
 }
 
 impl DnsConfig {
@@ -746,6 +752,25 @@ impl DnsConfig {
             })
             .collect()
     }
+
+    /// `allow_private_answers` suffixes, plus `fakeip_exclude` ones when `with_lan`
+    /// (a client; a server has no LAN names to allow), normalized.
+    pub fn private_answer_suffixes(&self, with_lan: bool) -> Result<HashSet<String>> {
+        let mut out = if with_lan {
+            self.fakeip_exclude_suffixes()?
+        } else {
+            HashSet::new()
+        };
+        for d in &self.allow_private_answers {
+            let d = d.trim();
+            let d = d.strip_prefix("*.").unwrap_or(d);
+            out.insert(
+                normalize_domain(d.strip_prefix('.').unwrap_or(d))
+                    .map_err(|e| Error::config(format!("dns.allow_private_answers: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
 }
 
 impl Default for DnsConfig {
@@ -755,6 +780,7 @@ impl Default for DnsConfig {
             upstream: default_upstream(),
             ttl: default_dns_ttl(),
             fakeip_exclude: default_fakeip_exclude(),
+            allow_private_answers: Vec::new(),
         }
     }
 }
@@ -834,6 +860,8 @@ fn default_handshake_timeout() -> u64 {
 impl Config {
     /// Parses and validates a JSON configuration.
     pub fn from_json(text: &str) -> Result<Config> {
+        // Windows PowerShell 5.1 writes files with a UTF-8 BOM.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let cfg: Config =
             serde_json::from_str(text).map_err(|e| Error::config(format!("invalid JSON: {e}")))?;
         cfg.validate()?;
@@ -906,6 +934,15 @@ impl Config {
             #[cfg(feature = "server")]
             if let InboundConfig::Vless(v) = i {
                 v.validate()?;
+            }
+            if let InboundConfig::Socks(c) | InboundConfig::Http(c) | InboundConfig::Mixed(c) = i
+                && c.users.is_empty()
+                && !c.listen.ip().is_loopback()
+            {
+                return Err(Error::config(format!(
+                    "inbound {}: {} without users is an open proxy; add users or listen on 127.0.0.1",
+                    c.tag, c.listen
+                )));
             }
         }
         let mut out_tags = HashSet::new();
@@ -1009,6 +1046,27 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_proxy_only_on_loopback() {
+        let cfg = |listen: &str, users: &str| {
+            Config::from_json(&format!(
+                r#"{{"inbounds":[{{"type":"socks","tag":"s","listen":"{listen}","users":[{users}]}}],
+                   "outbounds":[{{"type":"direct","tag":"d"}}]}}"#
+            ))
+        };
+        assert!(cfg("127.0.0.1:1080", "").is_ok());
+        assert!(cfg("[::1]:1080", "").is_ok());
+        assert!(cfg("0.0.0.0:1080", "").is_err());
+        assert!(cfg("192.168.1.2:1080", "").is_err());
+        assert!(cfg("0.0.0.0:1080", r#"{"username":"u","password":"p"}"#).is_ok());
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_skipped() {
+        let json = "\u{feff}{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"d\"}]}";
+        assert!(Config::from_json(json).is_ok());
+    }
 
     const FULL: &str = r#"{
       "log": { "level": "debug" },

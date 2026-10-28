@@ -13,7 +13,7 @@ use ipstack::{
     IpStack, IpStackConfig, IpStackStream, IpStackTcpStream, IpStackUdpStream, TcpConfig,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tun_rs::AsyncDevice;
@@ -263,6 +263,7 @@ fn run_stack(
     let mut stack = IpStack::new(stack_cfg, io);
 
     let (tun_net, tag, dns_hijack) = (cfg.ipv4, cfg.tag.clone(), cfg.dns_hijack);
+    let dns_tcp = Arc::new(Semaphore::new(MAX_DNS_TCP));
     Ok(async move {
         loop {
             let stream = tokio::select! {
@@ -278,6 +279,25 @@ fn run_stack(
             match stream {
                 IpStackStream::Tcp(tcp) => {
                     let dst = tcp.peer_addr();
+                    // DNS over TCP gets the same answers as over UDP: to the router it
+                    // would otherwise go direct, in the clear.
+                    if dns_hijack
+                        && dst.port() == 53
+                        && let Some(dns) = dns.clone()
+                    {
+                        match dns_tcp.clone().try_acquire_owned() {
+                            Ok(permit) => {
+                                tokio::spawn(async move {
+                                    serve_dns_tcp(TunTcp::new(tcp), dns).await;
+                                    drop(permit);
+                                });
+                            }
+                            Err(_) => tracing::debug!(
+                                "dns over tcp: {MAX_DNS_TCP} connections open, refusing another"
+                            ),
+                        }
+                        continue;
+                    }
                     if is_own(dst.ip(), tun_net) {
                         continue;
                     }
@@ -415,6 +435,43 @@ async fn serve_dns(mut udp: IpStackUdpStream, dns: Arc<DnsServer>) {
             return;
         }
     }
+}
+
+/// Idle DNS-over-TCP connections are closed after this long.
+const DNS_TCP_IDLE: Duration = Duration::from_secs(10);
+/// At most this many DNS-over-TCP connections at once; more are dropped (each holds
+/// a 64 KB buffer, and an app gone wild should not exhaust memory).
+const MAX_DNS_TCP: usize = 64;
+
+/// DNS over TCP (RFC 7766): two-byte length-prefixed messages, answered in order.
+async fn serve_dns_tcp<S: AsyncRead + AsyncWrite + Unpin>(mut tcp: S, dns: Arc<DnsServer>) {
+    let mut buf = vec![0u8; 65_535];
+    loop {
+        let mut len = [0u8; 2];
+        match tokio::time::timeout(DNS_TCP_IDLE, tcp.read_exact(&mut len)).await {
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+        let n = usize::from(u16::from_be_bytes(len));
+        let query = &mut buf[..n];
+        match tokio::time::timeout(DNS_TCP_IDLE, tcp.read_exact(query)).await {
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+        let Some(resp) = dns.handle(query).await else {
+            break;
+        };
+        let Ok(rlen) = u16::try_from(resp.len()) else {
+            break;
+        };
+        let mut out = Vec::with_capacity(2 + resp.len());
+        out.extend_from_slice(&rlen.to_be_bytes());
+        out.extend_from_slice(&resp);
+        if tcp.write_all(&out).await.is_err() || tcp.flush().await.is_err() {
+            break;
+        }
+    }
+    let _ = tcp.shutdown().await;
 }
 
 /// A UDP flow from the stack exposed as a PacketStream.
@@ -578,6 +635,38 @@ mod tests {
         assert!(h.pool.is_fake(a.0.into()));
         assert_eq!(h.pool.lookup(a.0.into()).as_deref(), Some("example.org"));
         h.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn dns_over_tcp_gets_fake_ips() {
+        let pool = Arc::new(FakeIpPool::new("198.18.0.0/15".parse().unwrap()));
+        let client = Arc::new(DnsClient::new(
+            vec!["127.0.0.1:9".parse().unwrap()],
+            Arc::default(),
+        ));
+        let dns = Arc::new(DnsServer::new(pool.clone(), client, 10));
+        let (mut app, stack) = tokio::io::duplex(4096);
+        tokio::spawn(serve_dns_tcp(stack, dns));
+        for (id, name) in [(1, "example.org."), (2, "example.net.")] {
+            let mut q = Message::query();
+            q.metadata.id = id;
+            q.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
+            let q = q.to_vec().unwrap();
+            app.write_all(&(q.len() as u16).to_be_bytes())
+                .await
+                .unwrap();
+            app.write_all(&q).await.unwrap();
+            let mut len = [0u8; 2];
+            app.read_exact(&mut len).await.unwrap();
+            let mut resp = vec![0u8; usize::from(u16::from_be_bytes(len))];
+            app.read_exact(&mut resp).await.unwrap();
+            let resp = Message::from_vec(&resp).unwrap();
+            assert_eq!(resp.metadata.id, id);
+            let RData::A(a) = &resp.answers[0].data else {
+                panic!("no A")
+            };
+            assert!(pool.is_fake(a.0.into()));
+        }
     }
 
     // ipstack blocks in Drop of TCP streams (block_in_place): multi-thread runtime only.

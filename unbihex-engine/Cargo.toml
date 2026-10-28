@@ -29,7 +29,7 @@ hickory-proto = { version = "0.26", default-features = false, features = ["std"]
 idna = "1"
 ipnet = { version = "2", features = ["serde"] }
 ipstack = "1"
-lru = "0.12"
+lru = "0.19"
 netdev = "0.46"
 parking_lot = "0.12"
 percent-encoding = "2"

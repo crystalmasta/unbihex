@@ -388,6 +388,7 @@ function fillSettings() {
   const s = S.data.settings;
   f.proxy_list.value = s.proxy_list.join("\n");
   f.direct_list.value = s.direct_list.join("\n");
+  f.private_names.value = (s.private_names || []).join("\n");
   f.block_list.value = s.block_list.join("\n");
   f.socks_port.value = s.socks_port;
   f.http_port.value = s.http_port;
@@ -435,6 +436,7 @@ function readSettings() {
     ...S.data.settings,
     proxy_list: lines(f.proxy_list.value),
     direct_list: lines(f.direct_list.value),
+    private_names: lines(f.private_names.value),
     block_list: lines(f.block_list.value),
     socks_port: port(f.socks_port.value, 10808),
     http_port: port(f.http_port.value, 10809),

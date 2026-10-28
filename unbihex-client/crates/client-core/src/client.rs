@@ -15,6 +15,8 @@ use crate::ping::{describe_error, measure};
 use crate::subscription::{FetchOptions, fallback_name, fetch};
 
 const STATE_FILE: &str = "state.json";
+/// Shortest LAN proxy password a user may set (generated ones are 32 characters).
+const MIN_LAN_PASSWORD: usize = 8;
 /// Delay tests running at the same time.
 const PING_PARALLEL: usize = 12;
 
@@ -314,6 +316,13 @@ impl Client {
 
     /// Replaces the settings (keeps the device id and the LAN password).
     pub fn set_settings(&self, mut s: Settings) -> Result<()> {
+        // The LAN proxy is open to the whole network: no guessable passwords.
+        let pass = s.lan_password.trim();
+        if !pass.is_empty() && pass.chars().count() < MIN_LAN_PASSWORD {
+            return Err(ClientError::Input(format!(
+                "пароль для доступа из сети — не короче {MIN_LAN_PASSWORD} символов"
+            )));
+        }
         self.mutate(|d| {
             if s.hwid.trim().is_empty() {
                 s.hwid = d.settings.hwid.clone();

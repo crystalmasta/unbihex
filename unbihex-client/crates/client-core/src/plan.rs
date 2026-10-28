@@ -190,6 +190,16 @@ fn push_list<'a>(
     Ok(())
 }
 
+/// The user's private-answer names, without blank lines.
+fn private_names(settings: &Settings) -> Vec<&str> {
+    settings
+        .private_names
+        .iter()
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
 fn routing_rules(
     settings: &Settings,
     geo: &Geo,
@@ -336,7 +346,7 @@ pub fn build_config_json(
             { "type": "block", "tag": "block" },
         ],
         "route": route,
-        "dns": { "upstream": upstream },
+        "dns": { "upstream": upstream, "allow_private_answers": private_names(settings) },
     });
     let text = serde_json::to_string(&config)?;
     Config::from_json(&text)?;
@@ -408,11 +418,15 @@ mod tests {
         let tags: Vec<&str> = cfg.route.rules.iter().map(|r| r.outbound.as_str()).collect();
         assert_eq!(tags, ["block", "direct", "proxy", "direct", "direct", "direct"]);
         assert_eq!(cfg.route.rules[0].domain, ["ads.example"]);
+        assert_eq!(cfg.route.rules[1].ip_private, Some(true));
         assert_eq!(cfg.route.rules[2].domain_suffix, ["youtube.com"]);
         assert_eq!(cfg.route.rules[2].domain_keyword, ["google"]);
         assert_eq!(cfg.route.rules[3].domain_suffix, ["www.example.org"]);
         assert!(cfg.route.rules[5].domain_suffix.contains(&"ru".to_string()));
         assert_eq!(cfg.final_outbound(), "proxy");
+        s.private_names = vec!["*.plex.direct".into(), " ".into()];
+        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopProxy).unwrap();
+        assert_eq!(cfg.dns.private_answer_suffixes(false).unwrap().len(), 1);
         s.routing = RoutingMode::OnlyListed;
         let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopTun).unwrap();
         assert_eq!(cfg.final_outbound(), "direct");

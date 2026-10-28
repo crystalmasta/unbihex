@@ -10,7 +10,9 @@
 //! suites, including TLS 1.2 CBC ones (servers we talk to never pick them; one that did
 //! would fail the handshake, not downgrade it); extensions shuffled per connection between
 //! a leading and a trailing GREASE extension; X25519MLKEM768 and X25519 key shares;
-//! GREASE ECH; ALPS. JA4: `t13d1516h2_8daaf6152771_…`.
+//! GREASE ECH; ALPS. signature_algorithms as Chrome 152: a GREASE value, ML-DSA, then
+//! the classical eight (rustls verifies only those, and servers with ML-DSA certificates
+//! are not ones we talk to). JA4: `t13d1516h2_8daaf6152771_806a8c22fdea`, as Chromium 152.
 //!
 //! The per-connection randomness is derived from the ClientHello random, so a retried
 //! hello and REALITY's second pass rebuild the same bytes.
@@ -74,8 +76,9 @@ const CHROME_SUITES: [u16; 15] = [
     0x009d, 0x002f, 0x0035,
 ];
 const CHROME_GROUPS: [u16; 4] = [0x11ec, 0x001d, 0x0017, 0x0018];
-const CHROME_SIGALGS: [u16; 8] = [
-    0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+/// After a GREASE value: ML-DSA-44/65/87, then the classical schemes.
+const CHROME_SIGALGS: [u16; 11] = [
+    0x0904, 0x0905, 0x0906, 0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
 ];
 
 const SERVER_NAME: u16 = 0;
@@ -339,7 +342,9 @@ fn chrome(h: &ParsedHello<'_>) -> Option<Vec<u8>> {
     }
     middle.push((STATUS_REQUEST, vec![1, 0, 0, 0, 0]));
     let mut sigalgs = Vec::new();
-    put_vec16(&mut sigalgs, &u16_list(&CHROME_SIGALGS));
+    let mut schemes = vec![rng.grease()];
+    schemes.extend_from_slice(&CHROME_SIGALGS);
+    put_vec16(&mut sigalgs, &u16_list(&schemes));
     middle.push((SIGNATURE_ALGORITHMS, sigalgs));
     middle.push((SCT, Vec::new()));
     middle.push((KEY_SHARE, key_share(rustls_key_share, grease_group)?));
@@ -438,7 +443,8 @@ mod tests {
         let mut sorted_exts: Vec<u16> = exts.into_iter().filter(|t| *t != SERVER_NAME && *t != ALPN).collect();
         sorted_exts.sort();
         let sigs = Reader(h.ext(SIGNATURE_ALGORITHMS).unwrap()).vec16().unwrap();
-        let sigs: Vec<u16> = sigs.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let sigs: Vec<u16> =
+            sigs.chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).filter(|s| !is_grease(*s)).collect();
         format!(
             "{a}_{}_{}",
             short(hex(&sorted_suites)),
@@ -470,7 +476,8 @@ mod tests {
     fn chrome_hello_has_chrome_shape() {
         let hello = first_hello(client_config(Fingerprint::Chrome, RootCertStore::empty()));
         let print = ja4(&hello);
-        assert!(print.starts_with("t13d1516h2_8daaf6152771_"), "{print}");
+        // Chromium 152.0.7977.167, recorded on the wire.
+        assert_eq!(print, "t13d1516h2_8daaf6152771_806a8c22fdea");
         let h = ParsedHello::parse(&hello).unwrap();
         assert!(is_grease(h.cipher_suites[0]));
         assert!(is_grease(h.extensions[0].0) && h.extensions[0].1.is_empty());

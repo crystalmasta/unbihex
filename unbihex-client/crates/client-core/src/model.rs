@@ -177,6 +177,10 @@ pub struct Settings {
     pub routing: RoutingMode,
     /// Always direct: domains (with subdomains) or CIDRs.
     pub direct_list: Vec<String>,
+    /// Public domains (with subdomains) that may resolve to LAN addresses, such as
+    /// `plex.direct` or a company's split-horizon names; for any other name such
+    /// answers are dropped (DNS rebinding).
+    pub private_names: Vec<String>,
     /// Always through the server: domains or CIDRs.
     pub proxy_list: Vec<String>,
     /// Always blocked: domains or CIDRs.
@@ -233,6 +237,7 @@ impl Default for Settings {
             mode: ProxyMode::default(),
             routing: RoutingMode::default(),
             direct_list: Vec::new(),
+            private_names: Vec::new(),
             proxy_list: Vec::new(),
             block_list: Vec::new(),
             socks_port: 10808,

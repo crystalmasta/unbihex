@@ -6,6 +6,8 @@ pub mod mixed;
 pub mod mux;
 #[cfg(feature = "server")]
 pub mod reality;
+#[cfg(feature = "server")]
+mod reality_shape;
 pub mod socks;
 pub mod tun;
 #[cfg(feature = "server")]

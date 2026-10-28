@@ -25,7 +25,8 @@ typedef bool (*unbihex_protect_cb)(int32_t fd, void *ctx);
  * tokio runtime with 2 worker threads. One instance at a time. */
 int32_t unbihex_start(const char *config_json, int32_t tun_fd, unbihex_protect_cb protect, void *ctx);
 
-/* Stops the engine (waits up to 5 s). 0 = ok. */
+/* Stops the engine (waits up to 5 s). 0 = ok. Not from an engine thread (such as the
+   protect callback): that returns UNBIHEX_ERR_RUNNING. */
 int32_t unbihex_stop(int32_t handle);
 
 /* Traffic counters of the running engine; returns false when nothing runs. */

@@ -254,6 +254,7 @@ If any step fails, undo what has been done and return the error.
 - All domains in the config are converted to ASCII lowercase through IDNA (`рф` → `xn--p1ai`).
 - If the target is an IP address, domain conditions are false. If the target is a domain, IP conditions are false on the first pick.
 - If `direct` is picked, the target is a domain and the decision was not made by a domain rule, the Dispatcher resolves the domain itself (with the same resolver as direct) and runs the rules again for each address (like IPIfNonMatch in Xray). If any address hits `block`, the session is blocked; if the first address leads to the proxy, the session goes to the proxy with the domain; otherwise direct connects only to the checked addresses (without resolving again, so that DNS rebinding cannot bypass the check). Sessions picked for the proxy are never resolved locally: that would leak the name to the local DNS.
+- DNS rebinding protection: when a direct session with a domain gets private addresses (`ip_private`), they are dropped, whatever rule picked the session. With no addresses left the session is blocked. Exceptions: single-label names, `localhost`, and the suffixes in `dns.fakeip_exclude` and `dns.allow_private_answers`. On a server (with a VLESS inbound) the only exceptions are `dns.allow_private_answers`: a server has no LAN of its own, and `metadata` or `metadata.google.internal` lead to the cloud's metadata service.
 - Direct does not connect to the engine's own listen addresses (a loop), nor to the host's loopback addresses (127/8, ::1, 0.0.0.0, ::) when the client is not on this host (the source is not loopback and the inbound is not TUN).
 - `ip_private` covers: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, 100.64/10, 224/4, 255.255.255.255/32, ::1/128, fc00::/7, fe80::/10, ff00::/8.
 - Performance: keep suffixes in a `HashSet` and check them label by label from the right; CIDRs in a sorted list. A test with 10,000 rules must perform 100,000 matches in under 1 s in release.
@@ -289,7 +290,7 @@ impl Dispatcher {
 
 ### 8.2 DNS server inside the TUN (`dns_hijack: true`)
 
-- **All** UDP datagrams to port 53 are captured, whatever the destination IP. DNS over TCP/53 goes through normal routing.
+- **All** UDP datagrams to port 53 are captured, whatever the destination IP. DNS over TCP/53 is captured the same way (RFC 7766: messages with a two-byte length), so queries to the router do not go direct in the clear; at most 64 such connections at once.
 - Parsing with `hickory-proto`. Behaviour:
   - A → a fake IP, TTL = `dns.ttl`, rcode NOERROR.
   - AAAA → NOERROR with no answers. This is deliberate: no IPv6 traffic appears that bypasses the fake IPs.
@@ -627,9 +628,16 @@ and contain none of this code.
   | `server_names` | allowed SNI values, not empty |
   | `private_key` | X25519, base64url (`unbihex x25519`) |
   | `short_ids` | hex, up to 16 characters; `""` is the all-zero ID; not empty |
-  | `max_time_diff_ms` | allowed client clock difference, 0 turns the check off |
+  | `max_time_diff_ms` | allowed client clock difference; 0 or absent means 120,000 (unlike Xray, the check cannot be turned off) |
 
   A client without the key (a scanner, a browser) is forwarded to `dest` untouched and sees the real site.
+- Replay: the `client_random` of accepted hellos is remembered for twice the `max_time_diff_ms` window. A replayed
+  hello (one a censor recorded) goes to `dest`, like a stranger's.
+- Handshake sizes like `dest`'s: for our client the server, as Xray, sends the same ClientHello to `dest` and reads
+  the answer. It answers with the same key exchange group and cipher suite, so the ServerHello has the same length.
+  It re-frames its EncryptedExtensions…Finished into records of `dest`'s lengths with TLS 1.3 padding
+  (RFC 8446 §5.4) (`inbound/reality_shape.rs`). `dest`'s answer ends at a pause, at a record boundary, of a quarter of its TCP connect time (2–15 ms); a record still arriving is always waited for.
+  If `dest` does not answer within 3 s, the records keep rustls's sizes. Clock skew and replays are logged at info.
 - Vision follows Xray's rules: a user whose `flow` is Vision must use it.
 - UDP: the VLESS UDP command and Mux.Cool / XUDP.
 - Accepted connections go to the same `Dispatcher` (§7): routing, DNS and outbounds are shared with the client.
@@ -651,7 +659,7 @@ and contain none of this code.
 
 Enabled by `"api": { "listen": "127.0.0.1:10085", "services": ["StatsService", "HandlerService"] }`;
 an empty `services` means both, and an unknown service fails the start. The API has no authentication, as in Xray,
-so it should listen on loopback only.
+so an address other than loopback fails the start.
 
 Paths, packages and field numbers match Xray: the proto files in `unbihex-server/proto/` are a trimmed copy of Xray-core's.
 `protox` compiles them, so the build needs no `protoc`.
@@ -684,6 +692,9 @@ with a `protocol` field. Such a config is translated into the engine's format (`
 - **Strictness.** Anything unsupported that would change how traffic is handled fails the start. That covers other protocols
   and transports, `fallbacks`, balancers and the like. Anything that only affects logs and accounting produces a warning:
   log files, `sniffing`.
+- An API inbound without `listen` gets 127.0.0.1 (Xray takes 0.0.0.0), with a warning.
+- No `geoip:private` → blackhole rule gives a warning: users would reach the server's network by IP.
+- `maxTimeDiff: 0` (the panels' default) means a 120 s window, not "no check" (§17.1).
 - **Difference from Xray:** rules that match on `protocol` (e.g. the bittorrent block in Marzban and 3x-ui) are dropped
   with a warning. The server does not detect protocols, so that traffic will pass.
 - `geoip.dat` and `geosite.dat` are looked up as in Xray: in `XRAY_LOCATION_ASSET`, otherwise next to the binary.
