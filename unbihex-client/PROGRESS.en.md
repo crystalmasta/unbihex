@@ -106,13 +106,21 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   `-format json`; `-confdir` and several `-c` are errors.
 - Tests: Marzban- and 3x-ui-style configs, what is refused; the binary on such a config — a client gets through
   and the stats show in `unbihex api`.
-- `unbihex version`: `Unbihex 0.1.0 (os/arch)`; only when the binary is started as `xray*` (how panels start it,
-  a symlink works too) is the first line Xray's — `Xray 26.10.21 (Unbihex 0.1.0) (os/arch)`; Marzban looks for
+- `unbihex version`: `Unbihex 0.1.1 (os/arch)`; only when the binary is started as `xray*` (how panels start it,
+  a symlink works too) is the first line Xray's — `Xray 26.10.21 (Unbihex 0.1.1) (os/arch)`; Marzban looks for
   `^Xray (\d+\.\d+\.\d+)`, 3x-ui takes the second word. 26.10.21 is the Xray release the config and API were checked against.
 - Not yet: transports other than TCP, protocols other than VLESS.
 
 ## 28.10 — client 0.2.0
 - Client version 0.2.0 (Windows installer and portable build, Android APK); the `unbihex` server is 0.1.0.
+
+## 29.10 — client 0.2.1, engine 0.1.1, server 0.1.1
+- Fixes from two security audits (reports in `audit/`):
+  - REALITY server: replay protection, a 120 s clock window, handshake records of `dest`'s sizes;
+  - `signature_algorithms` as Chrome 152;
+  - DNS rebinding protection; DNS over TCP/53 inside the TUN;
+  - gRPC API on loopback only; open proxies outside loopback refused;
+  - LAN password of at least 8 characters; tokio 1.54.1, lru 0.19.
 
 ## Next
 1. Runs with real panels: their configs, API, stats, restarts.

@@ -15,6 +15,8 @@ VLESS (TLS, REALITY, XTLS Vision, XHTTP), Shadowsocks, SOCKS5.
 | `Unbihex-<версия>-windows-setup.exe` | Windows 10/11 x64, установщик |
 | `Unbihex-<версия>-windows-portable.zip` | Windows 10/11 x64 без установки: распакуйте и запустите `Unbihex.exe` |
 | `Unbihex-<версия>-android-arm64.apk` | Android 7+ (arm64) |
+| `unbihex-cli-<версия>-linux-x86_64.tar.gz`, `…-aarch64` | консольный клиент для Linux (статический бинарник, любой дистрибутив) |
+| `unbihex-server-<версия>-linux-x86_64.tar.gz`, `…-aarch64` | сервер для Linux, замена ядра Xray под панелями |
 
 Windows SmartScreen может предупредить о неизвестном издателе: «Подробнее» → «Выполнить в любом случае».
 Контрольные суммы файлов — в `SHA256SUMS.txt` того же релиза.
@@ -23,7 +25,7 @@ Windows SmartScreen может предупредить о неизвестно�
 
 | Папка | Что это |
 |---|---|
-| [`unbihex-client`](unbihex-client) | приложение на Tauri 2: подписки, серверы, системный прокси, TUN, Android VpnService, iOS Packet Tunnel |
+| [`unbihex-client`](unbihex-client) | приложение на Tauri 2: подписки, серверы, системный прокси, TUN, Android VpnService, iOS Packet Tunnel; консольный клиент `unbihex-cli` |
 | [`unbihex-engine`](unbihex-engine) | ядро: TUN, маршрутизация, DNS с fake-IP, протоколы; описано в `SPEC.md` |
 | [`unbihex-server`](unbihex-server) | сервер: бинарник `unbihex` (VLESS / Vision / REALITY, UDP, XUDP, gRPC API как у Xray); протоколы берёт из ядра с фичей `server` |
 

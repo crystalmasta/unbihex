@@ -1,0 +1,28 @@
+[package]
+name = "unbihex-cli"
+description = "Unbihex console client: subscriptions, servers and the connection without a window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "unbihex-cli"
+path = "src/main.rs"
+
+[dependencies]
+unbihex-client-core.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"

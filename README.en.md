@@ -15,6 +15,8 @@ Ready-made builds are on the [latest release](https://github.com/crystalmasta/un
 | `Unbihex-<version>-windows-setup.exe` | Windows 10/11 x64, installer |
 | `Unbihex-<version>-windows-portable.zip` | Windows 10/11 x64 without installing: unzip and run `Unbihex.exe` |
 | `Unbihex-<version>-android-arm64.apk` | Android 7+ (arm64) |
+| `unbihex-cli-<version>-linux-x86_64.tar.gz`, `…-aarch64` | console client for Linux (a static binary, any distribution) |
+| `unbihex-server-<version>-linux-x86_64.tar.gz`, `…-aarch64` | server for Linux, a drop-in core for Xray panels |
 
 Windows SmartScreen may warn about an unknown publisher: "More info" → "Run anyway".
 File checksums are in `SHA256SUMS.txt` of the same release.
@@ -23,7 +25,7 @@ File checksums are in `SHA256SUMS.txt` of the same release.
 
 | Folder | What it is |
 |---|---|
-| [`unbihex-client`](unbihex-client) | the Tauri 2 app: subscriptions, servers, system proxy, TUN, Android VpnService, iOS Packet Tunnel |
+| [`unbihex-client`](unbihex-client) | the Tauri 2 app: subscriptions, servers, system proxy, TUN, Android VpnService, iOS Packet Tunnel; the `unbihex-cli` console client |
 | [`unbihex-engine`](unbihex-engine) | the engine: TUN, routing, fake-IP DNS, protocols; described in `SPEC.md` |
 | [`unbihex-server`](unbihex-server) | the server: the `unbihex` binary (VLESS / Vision / REALITY, UDP, XUDP, Xray's gRPC API); takes the protocols from the engine's `server` feature |
 

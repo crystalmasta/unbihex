@@ -4708,7 +4708,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-unbihex-vpn"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4944,6 +4944,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -5277,8 +5278,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "unbihex-cli"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "unbihex-client-core",
+ "uuid",
+]
+
+[[package]]
 name = "unbihex-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "parking_lot",
  "serde",
@@ -5296,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "unbihex-client-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "ipnet",
@@ -5318,7 +5332,7 @@ dependencies = [
 
 [[package]]
 name = "unbihex-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -5366,7 +5380,7 @@ dependencies = [
 
 [[package]]
 name = "unbihex-ffi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tokio",
  "tracing",

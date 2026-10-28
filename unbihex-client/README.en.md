@@ -93,7 +93,7 @@ The engine must sit next to it: `unbihex-client` and `unbihex-engine` are siblin
 Downloads are in the [GitHub releases](https://github.com/crystalmasta/unbihex/releases/latest).
 Local builds go to the `dist/` folder (it is not in the repository):
 
-- `dist/Unbihex-0.2.0-setup.exe` — installer for Windows 10/11 x64 (NSIS, `installer/build.sh`).
+- `dist/Unbihex-0.2.1-setup.exe` — installer for Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — portable version; `wintun.dll` must sit next to it.
   An MSVC build with a static CRT: no Visual C++ Redistributable needed, WebView2Loader is built into the exe.
 - `dist/android/Unbihex-android-arm64.apk` — Android 7+ (arm64, almost all phones).
@@ -103,6 +103,24 @@ Local builds go to the `dist/` folder (it is not in the repository):
 
 The Windows build has been tested on a live system (system proxy and TUN); the Android build has not been tested on a
 device yet.
+
+## Console client (Linux)
+
+`unbihex-cli` is the client without a window, for servers and machines without a desktop. Same data and engine as
+the app (`crates/client-core`): subscriptions, servers, ping, the connection.
+
+```text
+unbihex-cli add <subscription URL or vless://…>       add
+unbihex-cli list | ping | select <number>             servers
+unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-listed|blocked-only]
+```
+
+`connect` runs until Ctrl-C or SIGTERM. The `proxy` mode (the default) opens local SOCKS5 and HTTP ports, `tun`
+captures all traffic of the machine (needs root, `ip` and `resolvectl`), `system` is the proxy plus GNOME's settings.
+Data lives in `~/.config/unbihex-cli` (or `--dir`, `$UNBIHEX_DIR`).
+
+Building for Linux from Windows: `cargo zigbuild --release -p unbihex-cli --target x86_64-unknown-linux-musl`
+(needs [zig](https://ziglang.org) and `cargo install cargo-zigbuild`); on Linux itself, `cargo build --release -p unbihex-cli`.
 
 ## Building on Windows
 
@@ -119,7 +137,7 @@ device yet.
    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p unbihex-client --target x86_64-pc-windows-msvc
    MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe" sh installer/build.sh
    ```
-   Output: `installer\Unbihex-0.2.0-setup.exe`.
+   Output: `installer\Unbihex-0.2.1-setup.exe`.
 
 TUN mode needs administrator rights; the app has a "Restart as administrator" button. A known Windows limitation:
 the system may query the DNS of other adapters in parallel (Smart Multi-Homed Name Resolution), so for full

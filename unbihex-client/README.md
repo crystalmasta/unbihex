@@ -92,7 +92,7 @@ unbihex-client/
 Скачать — в [релизах на GitHub](https://github.com/crystalmasta/unbihex/releases/latest).
 Локально сборки складываются в папку `dist/` (её нет в репозитории):
 
-- `dist/Unbihex-0.2.0-setup.exe` — установщик для Windows 10/11 x64 (NSIS, `installer/build.sh`).
+- `dist/Unbihex-0.2.1-setup.exe` — установщик для Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — портативная версия; рядом должен лежать `wintun.dll`.
   Сборка MSVC со статическим CRT: Visual C++ Redistributable не нужен, WebView2Loader вшит в exe.
 - `dist/android/Unbihex-android-arm64.apk` — Android 7+ (arm64, почти все телефоны).
@@ -100,6 +100,24 @@ unbihex-client/
   Для публикации сделайте свой ключ: обновления APK должны подписываться тем же ключом, что и первая установка.
 
 Windows-сборка проверена на живой системе (системный прокси и TUN); Android-сборка на устройстве пока не проверялась.
+
+## Консольный клиент (Linux)
+
+`unbihex-cli` — клиент без окна, для серверов и машин без графики. Данные и ядро те же, что у приложения
+(`crates/client-core`): подписки, серверы, пинг, подключение.
+
+```text
+unbihex-cli add <ссылка на подписку или vless://…>   добавить
+unbihex-cli list | ping | select <номер>             серверы
+unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-listed|blocked-only]
+```
+
+`connect` работает до Ctrl-C или SIGTERM. Режим `proxy` (по умолчанию) открывает локальные SOCKS5 и HTTP,
+`tun` заворачивает весь трафик машины (нужен root, `ip` и `resolvectl`), `system` — прокси плюс настройки GNOME.
+Данные — в `~/.config/unbihex-cli` (или `--dir`, `$UNBIHEX_DIR`).
+
+Сборка под Linux из Windows: `cargo zigbuild --release -p unbihex-cli --target x86_64-unknown-linux-musl`
+(нужны [zig](https://ziglang.org) и `cargo install cargo-zigbuild`); на самом Linux — `cargo build --release -p unbihex-cli`.
 
 ## Сборка на Windows
 
@@ -116,7 +134,7 @@ Windows-сборка проверена на живой системе (сист
    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p unbihex-client --target x86_64-pc-windows-msvc
    MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe" sh installer/build.sh
    ```
-   Готовый файл: `installer\Unbihex-0.2.0-setup.exe`.
+   Готовый файл: `installer\Unbihex-0.2.1-setup.exe`.
 
 Режим TUN требует запуска от администратора — в приложении есть кнопка
 «Перезапустить от администратора». Известное ограничение Windows: система может параллельно

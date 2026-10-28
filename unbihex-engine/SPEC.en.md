@@ -604,7 +604,7 @@ On Android the recommended loop protection is `VpnService.Builder.addDisallowedA
 
 The protocol code lives in `unbihex-engine` behind the `server` feature: the VLESS inbound (`inbound/vless.rs`), server-side TLS
 and REALITY, and the counters and control (`server.rs`). The process, the CLI, the gRPC API and the Xray config translation
-live in the `unbihex-server` crate (binary `unbihex`, version 0.1.0). Client builds are compiled without the `server` feature
+live in the `unbihex-server` crate (binary `unbihex`, version 0.1.1). Client builds are compiled without the `server` feature
 and contain none of this code.
 
 ### 17.1 VLESS inbound
@@ -712,8 +712,8 @@ unbihex api <command> [-s addr] [-t s]  stats, statsquery, sysstats, adu, rmu, i
 
 - One `-c` and `-format json|auto` are accepted; `-confdir` and several `-c` are errors rather than a silent merge.
 - `unbihex api` talks to `127.0.0.1:8080` by default, as `xray api` does, and prints JSON without zero fields.
-- `version` prints `Unbihex 0.1.0 (os/arch)`. If the binary's name starts with `xray` (that is how panels run their core;
-  a symlink works too), the first line is `Xray 26.10.21 (Unbihex 0.1.0) (os/arch)`.
+- `version` prints `Unbihex 0.1.1 (os/arch)`. If the binary's name starts with `xray` (that is how panels run their core;
+  a symlink works too), the first line is `Xray 26.10.21 (Unbihex 0.1.1) (os/arch)`.
   Marzban (`^Xray (\d+\.\d+\.\d+)`) and 3x-ui (the second word) read the core version from it.
 
 ### 17.6 Tests
