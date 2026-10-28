@@ -4,6 +4,7 @@
 
 > Это исходная спецификация MVP (0.1). С тех пор ядро получило многое из перечисленного ниже как «нецели»:
 > REALITY, XTLS Vision, XHTTP, XUDP (mux), базы geosite/geoip и `.srs`, горячую перезагрузку, mixed-inbound.
+> Появился и серверный режим: он описан в §17.
 > Структура в §2 — первоначальный план; ядро сейчас один крейт `unbihex-engine`.
 > Что сделано — в [`../unbihex-client/PROGRESS.md`](../unbihex-client/PROGRESS.md).
 
@@ -592,3 +593,124 @@ const char *unbihex_version(void);                        // статическ�
 - `cargo test --workspace` зелёный на Windows/Linux/macOS;
 - `cargo clippy --workspace --all-targets -- -D warnings` без замечаний;
 - `unbihex run --link vless://...` на Windows/Linux/macOS направляет браузерный трафик через сервер, а после Ctrl-C маршруты и DNS восстановлены.
+
+---
+
+## 17. Серверный режим (feature `server`)
+
+> Раздел добавлен после MVP и описывает то, что уже сделано. Цель — заменить ядро Xray под панелями
+> (Marzban, 3x-ui, PasarGuard): панель продолжает генерировать свои конфиги, управлять пользователями и читать статистику.
+
+Код протоколов — в `unbihex-engine` за фичей `server`: VLESS inbound (`inbound/vless.rs`), серверный TLS и REALITY,
+счётчики и управление (`server.rs`). Процесс, CLI, gRPC API и перевод конфигов Xray — в крейте `unbihex-server`
+(бинарник `unbihex`, версия 0.1.0). Клиентские сборки собираются без фичи `server` и этого кода не содержат.
+
+### 17.1 VLESS inbound
+
+```json
+{ "type": "vless", "tag": "vless-in", "listen": "0.0.0.0:443",
+  "users": [ { "id": "6f1d7e2a-3b4c-4d5e-8f60-718293a4b5c6", "email": "alice", "flow": "xtls-rprx-vision" } ],
+  "tls": { "certificate_file": "/etc/unbihex/fullchain.pem", "key_file": "/etc/unbihex/privkey.pem" } }
+```
+
+- Задано ровно одно из `tls` и `reality`. VLESS без шифрования на сервере не поддерживается.
+- `users` не пустой; `id` — UUID, повторы запрещены; `flow` — `""`, `xtls-rprx-vision` или `xtls-rprx-vision-udp443`,
+  другое значение — ошибка `Unsupported`. `email` — имя пользователя в логах и статистике.
+- `tls`: цепочка сертификатов и ключ в PEM, `alpn` (по умолчанию `h2`, `http/1.1`, как у Xray). Сервер поддерживает обмен ключами X25519MLKEM768.
+- `reality` (аналог `realitySettings` Xray):
+
+  | Поле | Значение |
+  |---|---|
+  | `dest` | сайт, под который маскируется сервер, `host:port` |
+  | `server_names` | разрешённые SNI, не пустой |
+  | `private_key` | X25519, base64url (`unbihex x25519`) |
+  | `short_ids` | hex до 16 символов; `""` — нулевой ID; не пустой |
+  | `max_time_diff_ms` | допустимое расхождение часов клиента, 0 — без проверки |
+
+  Клиент без ключа (сканер, браузер) прозрачно пересылается на `dest` и видит настоящий сайт.
+- Vision — по правилам Xray: пользователь с `flow` Vision обязан его использовать.
+- UDP: команда UDP VLESS и Mux.Cool / XUDP.
+- Принятые соединения идут в тот же `Dispatcher` (§7): маршрутизация, DNS и outbound-ы — общие с клиентом.
+
+### 17.2 Пользователи на лету и счётчики
+
+`Instance::server()` возвращает `Arc<ServerControl>`: `stats()`, `add_user(tag, user)`, `remove_user(tag, email)`,
+`users(tag, email?)`, `user_count(tag)`, `inbound_tags()`.
+
+- Список пользователей inbound-а — неизменяемый снимок (`ArcSwap`), запись сериализуется мьютексом. Новое соединение
+  проверяется по текущему снимку. Открытые соединения удалённого пользователя доживают до закрытия, новые отклоняются.
+- Ошибки: `user <email> already exists`, `user <email> not found`.
+- Счётчики называются как у Xray: `user>>>email>>>traffic>>>uplink|downlink` и `inbound>>>tag>>>traffic>>>uplink|downlink`.
+  `uplink` — от клиента к серверу. Считаются данные внутри Vision, поэтому трафик с паддингом и без него учитывается одинаково.
+  UDP считается по полезной нагрузке пакетов. Пользователь с пустым `email` в пользовательские счётчики не попадает.
+- `ServerStats::get`, `query` (подстрока имени) и `users_traffic` умеют атомарно обнулять счётчики при чтении (`reset`).
+
+### 17.3 gRPC API (как у Xray)
+
+Включается полем `"api": { "listen": "127.0.0.1:10085", "services": ["StatsService", "HandlerService"] }`;
+пустой `services` — обе службы, неизвестная служба — ошибка запуска. API без аутентификации, как у Xray, поэтому
+слушать его следует только на loopback.
+
+Пути, пакеты и номера полей совпадают с Xray: proto-файлы в `unbihex-server/proto/` — урезанная копия Xray-core.
+Их компилирует `protox`, `protoc` для сборки не нужен.
+
+| Служба | Метод | Поведение |
+|---|---|---|
+| StatsService | `GetStats` | значение счётчика; нет такого — `Unknown`, «`<name> not found.`», как у Xray |
+| | `QueryStats` | счётчики, в имени которых есть `pattern` (подстрока), с `reset` |
+| | `GetSysStats` | только `Uptime` |
+| | `GetUsersStats` | трафик по пользователям |
+| HandlerService | `AlterInbound` | `AddUserOperation` / `RemoveUserOperation`; только VLESS-аккаунт, `encryption` пустой или `none` |
+| | `GetInboundUsers`, `GetInboundUsersCount` | пользователи inbound-а |
+
+Остальные методы (онлайн-статистика, `AddInbound`, `AddOutbound`, …) отвечают `Unimplemented`.
+
+### 17.4 Конфиги Xray
+
+Конфиг считается конфигом Xray, если в нём есть ключи только Xray (`routing`, `policy`, `stats`, …) или inbound-ы и outbound-ы
+с полем `protocol`. Такой конфиг переводится в формат ядра (`xray_config.rs`).
+
+- **Поддерживается** подмножество, которое генерируют панели:
+  - VLESS по TCP с TLS (сертификат из файлов) или REALITY;
+  - inbound API `dokodemo-door`. Он связывается с API правилом маршрутизации, как у Marzban (`API_INBOUND` → `API`);
+  - outbound-ы `freedom` и `blackhole`;
+  - правила `field` (inboundTag, domain с префиксами, ip/CIDR, geoip/geosite, port, network);
+  - `policy` уровня 0;
+  - DNS-серверы по IP.
+
+  Служебные поля клиентов, которые добавляют панели, допускаются; клиенты с `enable: false` пропускаются.
+- **Строгость.** Если неподдерживаемое меняет обработку трафика, запуск падает с ошибкой. Это другие протоколы и транспорты,
+  `fallbacks`, балансировщики и т. п. Если что-то влияет только на логи и учёт, выдаётся предупреждение: файлы логов, `sniffing`.
+- **Расхождение с Xray:** правила по `protocol` (например, блокировка bittorrent в Marzban и 3x-ui) отбрасываются
+  с предупреждением — сервер не определяет протоколы, и такой трафик пройдёт.
+- `geoip.dat` и `geosite.dat` ищутся, как у Xray: в `XRAY_LOCATION_ASSET`, иначе в папке бинарника.
+
+### 17.5 CLI сервера
+
+```text
+unbihex run -c <config.json | stdin:>   запуск до Ctrl-C / SIGTERM
+unbihex -c <config.json> [-test]        то же без `run`, как у Xray; -test только проверяет конфиг («Configuration OK.»)
+unbihex version                         версия (см. ниже)
+unbihex uuid [-i текст]                 случайный UUID или UUIDv5 из текста
+unbihex x25519 [-i ключ]                пара ключей REALITY или публичный ключ к приватному
+unbihex api <команда> [-s адрес] [-t с] stats, statsquery, sysstats, adu, rmu, inbounduser, inboundusercount
+```
+
+- Принимается один `-c` и `-format json|auto`; `-confdir` и несколько `-c` — ошибка, а не тихое слияние.
+- `unbihex api` по умолчанию обращается к `127.0.0.1:8080`, как `xray api`, и печатает JSON без нулевых полей.
+- `version` печатает `Unbihex 0.1.0 (os/arch)`. Если имя бинарника начинается с `xray` (так панели запускают ядро;
+  подходит и символическая ссылка), первая строка — `Xray 26.10.21 (Unbihex 0.1.0) (os/arch)`.
+  По ней Marzban (`^Xray (\d+\.\d+\.\d+)`) и 3x-ui (второе слово) определяют версию ядра.
+
+### 17.6 Тесты
+
+Всё на `127.0.0.1`, наш клиент против нашего сервера:
+- TLS и Vision, UDP, XUDP, Mux с несколькими сессиями, отказ чужим пользователям;
+- REALITY с Vision и отпечатком Chrome, фрагментированный ClientHello;
+- что видят чужие: настоящий сайт по TLS и HTTP;
+- gRPC API: счётчики, пользователи на лету, `unbihex api`;
+- бинарник на конфиге в стиле Marzban и 3x-ui;
+- неподдерживаемые конфиги Xray дают ошибку;
+- строка `version` под разными именами бинарника.
+
+Ещё не проверено с живыми панелями.
