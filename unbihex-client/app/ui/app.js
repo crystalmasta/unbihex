@@ -579,6 +579,22 @@ function bind() {
       toast("Буфер обмена недоступен — вставьте вручную (Ctrl+V)");
     }
   });
+  // A config file from another client (Xray / sing-box JSON) or a list of links.
+  $("#add-open").addEventListener("click", () => $("#add-file").click());
+  $("#add-file").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast("Файл больше 5 МБ — это не похоже на конфиг", "error");
+      return;
+    }
+    try {
+      $("#add-text").value = await file.text();
+    } catch (err) {
+      toast(`Не удалось прочитать файл: ${err}`, "error");
+    }
+  });
   $("#add-submit").addEventListener("click", async () => {
     const text = $("#add-text").value.trim();
     if (!text) return;
