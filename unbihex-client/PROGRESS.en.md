@@ -129,7 +129,7 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - `unbihex-cli`: `connect --no-routes / --tun-name / --interface / --mark`, `settings`,
   `run -c` and `check -c` for an engine config without subscriptions (SIGHUP reloads the file).
 
-## 29.10 — rules with AdGuard and DoH, Windows
+## 29.10 — client 0.2.2: rules with AdGuard and DoH, Windows
 - Engine: sniffing in the TUN. The name from the TLS SNI or HTTP `Host` of connections to real IPs, for rules only;
   the connection goes to the original IP. Before, with AdGuard, an antivirus or browser DoH, domain rules did not
   apply: in the "Only listed" and "Only blocked" modes those sites went direct (issue #2).
