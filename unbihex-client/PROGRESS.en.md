@@ -140,6 +140,12 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - Rule databases: a broken download (on phones, issue #4) no longer fails the update. Up to 4 attempts that
   resume with `Range`, and the error shows the real cause.
 
+## 29.10 — JSON import, NAS
+- "Add" and `unbihex-cli add` accept an Xray or sing-box JSON config (pasted or as a file): every server in its
+  outbounds becomes a server in the list (issue #12).
+- `unbihex-cli connect --lan` opens the proxy ports to the network and prints the login and password.
+  `docker/Dockerfile` and a guide for NAS devices: QNAP, Synology (issue #8).
+
 ## Next
 1. Runs with real panels: their configs, API, stats, restarts.
 3. Fuzzing and benchmarks, the engine README as an SDK.

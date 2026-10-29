@@ -122,6 +122,17 @@ impl Client {
     /// Adds subscription URLs and/or share links pasted by the user.
     pub async fn add_input(&self, text: &str) -> Result<AddReport> {
         let mut text = text.trim().to_string();
+        // A config pasted from another client: Xray or sing-box JSON (issue #12).
+        if text.starts_with('{') || text.starts_with('[') {
+            match crate::jsonsub::links_from_json(&text) {
+                Some(links) if !links.is_empty() => text = links.join("\n"),
+                _ => {
+                    return Err(ClientError::Input(
+                        "в JSON нет серверов: нужен конфиг Xray или sing-box с outbounds".into(),
+                    ));
+                }
+            }
+        }
         // A whole base64 subscription body pasted as is.
         if !text.contains("://")
             && let Some(decoded) = b64_decode(&text).and_then(|b| String::from_utf8(b).ok())
@@ -507,6 +518,25 @@ mod tests {
         let d = std::env::temp_dir().join(format!("unbihex-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[tokio::test]
+    async fn pasted_json_configs_become_servers() {
+        let c = Client::open(tmp());
+        // The example from issue #12: sing-box, no TLS block.
+        let sing_box = format!(
+            r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"uuid":"{UUID}"}}]}}"#
+        );
+        let r = c.add_input(&sing_box).await.unwrap();
+        assert_eq!(r.servers, 1);
+        let s = &c.snapshot().servers[0];
+        assert_eq!((s.name.as_str(), s.host.as_str(), s.port), ("proxy", "example.com", 443));
+        let xray = format!(
+            r#"{{"remarks":"DE","outbounds":[{{"tag":"proxy","protocol":"vless","settings":{{"vnext":[{{"address":"de.example","port":443,"users":[{{"id":"{UUID}","encryption":"none"}}]}}]}}}}]}}"#
+        );
+        assert_eq!(c.add_input(&xray).await.unwrap().servers, 1);
+        assert_eq!(c.snapshot().servers[1].name, "DE");
+        assert!(c.add_input(r#"{"log":{"level":"info"}}"#).await.is_err());
     }
 
     #[tokio::test]
