@@ -1,0 +1,7 @@
+{ "log": { "level": "warn" },
+  "inbounds": [{ "type": "vless", "tag": "dest", "listen": "127.0.0.1:9450",
+    "users": [{ "id": "11111111-2222-4333-8444-555555555555", "email": "x" }],
+    "tls": { "certificate_file": "dest.crt", "key_file": "dest.key" } }],
+  "outbounds": [{ "type": "block", "tag": "block" }],
+  "route": { "final": "block" },
+  "limits": { "max_connections": 30000 } }

@@ -1,0 +1,10 @@
+[package]
+name = "ubench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "sync"] }
+
+[profile.release]
+codegen-units = 1

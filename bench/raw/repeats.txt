@@ -1,0 +1,55 @@
+[engine ] tput 192.168.56.1:9700 down 1 6: gbit_s=7.232, errors=0 | client=100%/10MB sink=12%/6MB loadgen=66%/6MB
+[engine ] tput 192.168.56.1:9700 down 8 6: gbit_s=31.655, errors=0 | client=699%/10MB sink=104%/6MB loadgen=244%/6MB
+[engine ] tput 192.168.56.1:9701 up 1 6: gbit_s=5.883, errors=0 | client=99%/10MB sink=65%/6MB loadgen=11%/6MB
+[engine ] tput 192.168.56.1:9701 up 8 6: gbit_s=30.515, errors=0 | client=717%/10MB sink=227%/6MB loadgen=92%/6MB
+[reality] tput 192.168.56.1:9700 down 1 6: gbit_s=3.645, errors=0 | client=100%/12MB server=40%/11MB dest=0%/11MB sink=8%/6MB loadgen=44%/6MB
+[reality] tput 192.168.56.1:9700 down 8 6: gbit_s=14.218, errors=0 | client=580%/13MB server=277%/12MB dest=0%/12MB sink=55%/6MB loadgen=159%/6MB
+[reality] tput 192.168.56.1:9701 up 1 6: gbit_s=3.509, errors=0 | client=41%/13MB server=99%/12MB dest=0%/12MB sink=38%/6MB loadgen=7%/6MB
+[reality] tput 192.168.56.1:9701 up 8 6: gbit_s=15.177, errors=0 | client=301%/14MB server=597%/13MB dest=0%/12MB sink=158%/6MB loadgen=55%/6MB
+[vision ] tput 192.168.56.1:9700 down 1 6: gbit_s=3.819, errors=0 | client=100%/14MB server=42%/13MB dest=0%/12MB sink=8%/6MB loadgen=39%/6MB
+[vision ] tput 192.168.56.1:9700 down 8 6: gbit_s=15.049, errors=0 | client=590%/14MB server=307%/14MB dest=0%/12MB sink=54%/6MB loadgen=165%/6MB
+[vision ] tput 192.168.56.1:9701 up 1 6: gbit_s=3.507, errors=0 | client=43%/14MB server=101%/13MB dest=0%/12MB sink=42%/6MB loadgen=4%/6MB
+[vision ] tput 192.168.56.1:9701 up 8 6: gbit_s=15.284, errors=0 | client=292%/14MB server=615%/14MB dest=0%/12MB sink=164%/6MB loadgen=46%/6MB
+[engine ] tput 192.168.56.1:9700 down 1 6: gbit_s=6.576, errors=0 | client=100%/14MB sink=13%/6MB loadgen=63%/6MB
+[engine ] tput 192.168.56.1:9700 down 8 6: gbit_s=31.832, errors=0 | client=731%/14MB sink=97%/6MB loadgen=244%/6MB
+[engine ] tput 192.168.56.1:9701 up 1 6: gbit_s=5.845, errors=0 | client=100%/14MB sink=67%/6MB loadgen=9%/6MB
+[engine ] tput 192.168.56.1:9701 up 8 6: gbit_s=31.533, errors=0 | client=735%/14MB sink=243%/6MB loadgen=94%/6MB
+[reality] tput 192.168.56.1:9700 down 1 6: gbit_s=3.753, errors=0 | client=100%/14MB server=48%/14MB dest=0%/12MB sink=8%/6MB loadgen=39%/6MB
+[reality] tput 192.168.56.1:9700 down 8 6: gbit_s=15.121, errors=0 | client=602%/15MB server=292%/14MB dest=0%/12MB sink=51%/6MB loadgen=163%/6MB
+[reality] tput 192.168.56.1:9701 up 1 6: gbit_s=3.408, errors=0 | client=40%/14MB server=99%/14MB dest=0%/12MB sink=41%/6MB loadgen=6%/6MB
+[reality] tput 192.168.56.1:9701 up 8 6: gbit_s=15.355, errors=0 | client=300%/15MB server=600%/14MB dest=0%/12MB sink=165%/6MB loadgen=47%/6MB
+[vision ] tput 192.168.56.1:9700 down 1 6: gbit_s=3.602, errors=0 | client=100%/15MB server=42%/14MB dest=0%/12MB sink=7%/6MB loadgen=43%/6MB
+[vision ] tput 192.168.56.1:9700 down 8 6: gbit_s=15.376, errors=0 | client=609%/15MB server=302%/14MB dest=0%/12MB sink=48%/6MB loadgen=167%/6MB
+[vision ] tput 192.168.56.1:9701 up 1 6: gbit_s=3.504, errors=0 | client=40%/15MB server=100%/14MB dest=0%/12MB sink=43%/6MB loadgen=7%/6MB
+[vision ] tput 192.168.56.1:9701 up 8 6: gbit_s=15.298, errors=0 | client=311%/15MB server=602%/14MB dest=0%/13MB sink=156%/6MB loadgen=53%/6MB
+[engine ] tput 192.168.56.1:9700 down 1 6: gbit_s=6.604, errors=0 | client=100%/15MB sink=12%/6MB loadgen=63%/6MB
+[engine ] tput 192.168.56.1:9700 down 8 6: gbit_s=31.531, errors=0 | client=737%/15MB sink=94%/6MB loadgen=246%/6MB
+[engine ] tput 192.168.56.1:9701 up 1 6: gbit_s=5.843, errors=0 | client=100%/15MB sink=65%/6MB loadgen=11%/6MB
+[engine ] tput 192.168.56.1:9701 up 8 6: gbit_s=31.619, errors=0 | client=739%/15MB sink=229%/6MB loadgen=93%/6MB
+[reality] tput 192.168.56.1:9700 down 1 6: gbit_s=3.784, errors=0 | client=100%/15MB server=42%/14MB dest=0%/13MB sink=7%/6MB loadgen=44%/6MB
+[reality] tput 192.168.56.1:9700 down 8 6: gbit_s=15.204, errors=0 | client=603%/16MB server=302%/14MB dest=0%/13MB sink=49%/6MB loadgen=158%/6MB
+[reality] tput 192.168.56.1:9701 up 1 6: gbit_s=3.364, errors=0 | client=37%/15MB server=100%/14MB dest=0%/13MB sink=44%/6MB loadgen=8%/6MB
+[reality] tput 192.168.56.1:9701 up 8 6: gbit_s=15.545, errors=0 | client=321%/16MB server=597%/14MB dest=0%/13MB sink=163%/6MB loadgen=58%/6MB
+[vision ] tput 192.168.56.1:9700 down 1 6: gbit_s=3.701, errors=0 | client=101%/15MB server=40%/14MB dest=0%/13MB sink=5%/6MB loadgen=39%/6MB
+[vision ] tput 192.168.56.1:9700 down 8 6: gbit_s=15.334, errors=0 | client=602%/16MB server=309%/14MB dest=0%/13MB sink=54%/6MB loadgen=168%/6MB
+[vision ] tput 192.168.56.1:9701 up 1 6: gbit_s=3.17, errors=0 | client=40%/15MB server=101%/14MB dest=0%/13MB sink=43%/6MB loadgen=7%/6MB
+[vision ] tput 192.168.56.1:9701 up 8 6: gbit_s=15.238, errors=0 | client=302%/16MB server=610%/15MB dest=0%/13MB sink=167%/6MB loadgen=52%/6MB
+[base   ] conns 192.168.56.1:9702 1000 3: opened=1000, alive_after_hold=1000, setup_p99_ms=538.6, errors={} | sink=0%/7MB loadgen=0%/8MB
+[engine ] rate 192.168.56.1:9702 64 8: conn_per_s=2444, lat_p50_ms=24.7, lat_p99_ms=52.3, errors=0 | client=245%/19MB sink=40%/6MB loadgen=236%/7MB
+[reality] rate 192.168.56.1:9702 64 8: conn_per_s=554, lat_p50_ms=123.2, lat_p99_ms=246.7, errors=0 | client=191%/22MB server=189%/20MB dest=26%/14MB sink=11%/6MB loadgen=135%/6MB
+[vision ] rate 192.168.56.1:9702 64 8: conn_per_s=673, lat_p50_ms=94.0, lat_p99_ms=490.2, errors=0 | client=184%/23MB server=199%/21MB dest=39%/14MB sink=14%/6MB loadgen=128%/6MB
+[engine ] rate 192.168.56.1:9702 64 8: conn_per_s=1654, lat_p50_ms=24.1, lat_p99_ms=223.6, errors=0 | client=217%/24MB sink=31%/6MB loadgen=222%/7MB
+[reality] rate 192.168.56.1:9702 64 8: conn_per_s=544, lat_p50_ms=105.9, lat_p99_ms=292.5, errors=0 | client=168%/23MB server=188%/22MB dest=24%/15MB sink=14%/6MB loadgen=117%/6MB
+[vision ] rate 192.168.56.1:9702 64 8: conn_per_s=1034, lat_p50_ms=57.4, lat_p99_ms=193.3, errors=0 | client=239%/23MB server=244%/22MB dest=46%/15MB sink=21%/6MB loadgen=128%/7MB
+[reality] rate 192.168.56.1:9702 64 10: conn_per_s=530, lat_p50_ms=106.1, lat_p99_ms=408.5, errors=0 | client=170%/24MB server=169%/24MB dest=27%/15MB sink=11%/6MB loadgen=119%/6MB
+[leak round 1] private MB {'client': 15.4, 'server': 13.6, 'dest': 6.3}
+[reality] rate 192.168.56.1:9702 64 10: conn_per_s=1042, lat_p50_ms=41.5, lat_p99_ms=355.6, errors=0 | client=207%/25MB server=241%/26MB dest=56%/16MB sink=22%/6MB loadgen=120%/7MB
+[leak round 2] private MB {'client': 15.9, 'server': 17.8, 'dest': 6.3}
+[reality] rate 192.168.56.1:9702 64 10: conn_per_s=535, lat_p50_ms=112.2, lat_p99_ms=622.8, errors=0 | client=166%/23MB server=184%/25MB dest=26%/15MB sink=11%/6MB loadgen=128%/6MB
+[leak round 3] private MB {'client': 15.1, 'server': 15.4, 'dest': 6.2}
+[reality] rate 192.168.56.1:9702 64 10: conn_per_s=998, lat_p50_ms=56.3, lat_p99_ms=143.5, errors=0 | client=226%/25MB server=232%/26MB dest=52%/15MB sink=21%/6MB loadgen=118%/7MB
+[leak round 4] private MB {'client': 11.1, 'server': 17.1, 'dest': 6.1}
+[reality] rate 192.168.56.1:9702 64 10: conn_per_s=535, lat_p50_ms=97.9, lat_p99_ms=523.4, errors=0 | client=167%/23MB server=184%/27MB dest=26%/15MB sink=10%/6MB loadgen=115%/6MB
+[leak round 5] private MB {'client': 15.9, 'server': 19.6, 'dest': 5.9}
+[reality] rate 192.168.56.1:9702 64 10: conn_per_s=777, lat_p50_ms=92.8, lat_p99_ms=122.5, errors=0 | client=194%/24MB server=224%/28MB dest=36%/15MB sink=15%/6MB loadgen=131%/6MB
+[leak round 6] private MB {'client': 12.3, 'server': 20.0, 'dest': 6.4}

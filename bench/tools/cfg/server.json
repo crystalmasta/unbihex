@@ -1,0 +1,11 @@
+{ "log": { "level": "warn" },
+  "inbounds": [{ "type": "vless", "tag": "reality-in", "listen": "127.0.0.1:9444",
+    "users": [
+      { "id": "6908b95c-f9a9-40a4-ae6b-a1ef19d2b504", "email": "plain" },
+      { "id": "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9", "email": "vision", "flow": "xtls-rprx-vision" }
+    ],
+    "reality": { "dest": "127.0.0.1:9450", "server_names": ["bench.example"],
+      "private_key": "4J9OLFKOkqknzMfjhe6GM5UHwOiVbIcPiCmhl7Isnlg", "short_ids": ["0123abcd"] } }],
+  "outbounds": [{ "type": "direct", "tag": "direct" }],
+  "route": { "final": "direct" },
+  "limits": { "max_connections": 30000 } }

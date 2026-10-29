@@ -146,6 +146,14 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - `unbihex-cli connect --lan` opens the proxy ports to the network and prints the login and password.
   `docker/Dockerfile` and a guide for NAS devices: QNAP, Synology (issue #8).
 
+## 29.10 — load test (bench/load-test-2026-10-29.md)
+- The relay buffer grows from 16 to 64 KB during a bulk transfer: the unencrypted path went 6.8 → 13.1 Gbit/s on one
+  stream and 31 → 60 Gbit/s on eight at the same CPU; quiet connections stay at 16 KB.
+- Reading TLS one record at a time turned out not to be the bottleneck: the TLS layer alone does ~10 Gbit/s per
+  stream, and large socket reads did not speed it up, so that change was reverted; the Vision switch and record
+  splitting tests and the `tls_throughput` measurement remain. One REALITY stream on this machine runs at either
+  ~2.5 or ~5 Gbit/s (thread scheduling).
+
 ## Next
 1. Runs with real panels: their configs, API, stats, restarts.
 3. Fuzzing and benchmarks, the engine README as an SDK.

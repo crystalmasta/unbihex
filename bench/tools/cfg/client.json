@@ -1,0 +1,19 @@
+{ "log": { "level": "warn" },
+  "inbounds": [
+    { "type": "mixed", "tag": "eng", "listen": "127.0.0.1:1090" },
+    { "type": "mixed", "tag": "rl", "listen": "127.0.0.1:1091" },
+    { "type": "mixed", "tag": "rv", "listen": "127.0.0.1:1092" } ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" },
+    { "type": "vless", "tag": "reality", "server": "127.0.0.1", "port": 9444,
+      "uuid": "6908b95c-f9a9-40a4-ae6b-a1ef19d2b504",
+      "reality": { "server_name": "bench.example", "public_key": "SpnMBhDaK2zxe1QMBRb_QNux7jT5Wbm9Ty2ZWorkXSg", "short_id": "0123abcd" } },
+    { "type": "vless", "tag": "vision", "server": "127.0.0.1", "port": 9444,
+      "uuid": "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9", "flow": "xtls-rprx-vision",
+      "reality": { "server_name": "bench.example", "public_key": "SpnMBhDaK2zxe1QMBRb_QNux7jT5Wbm9Ty2ZWorkXSg", "short_id": "0123abcd" } } ],
+  "route": { "rules": [
+      { "inbound": ["eng"], "outbound": "direct" },
+      { "inbound": ["rl"], "outbound": "reality" },
+      { "inbound": ["rv"], "outbound": "vision" } ],
+    "final": "direct" },
+  "limits": { "max_connections": 30000 } }

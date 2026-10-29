@@ -273,7 +273,7 @@ impl Dispatcher {
 1. Acquire a permit from `Semaphore(max_connections)`. If the limit is reached, close the incoming connection and log at `warn` (at most once a second).
 2. `router.pick(&sess)` → outbound.
 3. Connect through `connect_*` with the `handshake_timeout_secs` timeout.
-4. TCP relay: bidirectional copy. When one side closes (EOF), `shutdown()` the write half of the other side and wait for the second side, but no longer than 10 s. If there is no traffic in either direction for `tcp_idle_secs`, close both ends.
+4. TCP relay: bidirectional copy. When one side closes (EOF), `shutdown()` the write half of the other side and wait for the second side, but no longer than 10 s. If there is no traffic in either direction for `tcp_idle_secs`, close both ends. The buffer of a direction is 16 KB; once a read fills it (a bulk transfer) it grows to 64 KB: that nearly doubles the throughput, while quiet connections stay at 16 KB.
 5. UDP relay: two tasks (up and down). If there are no packets for `udp_idle_secs`, close. The buffer is 65,535 bytes.
 6. `debug` logs per connection (at `info` they would build up a browsing history): `inbound_tag network source -> target via outbound_tag`. Connection errors are logged at `debug`, so that blocking does not flood the log.
 

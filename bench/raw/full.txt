@@ -1,0 +1,44 @@
+CPU threads: 12; cpu% below is of ONE thread (machine = 1200%)
+[idle start] client=0.0%/2.3MBpriv server=0.0%/2.3MBpriv dest=0.0%/2.4MBpriv sink=0.0%/1.5MBpriv
+[base   ] tput 192.168.56.1:9700 down 1 8: gbit_s=30.937, errors=0 | sink=93%/6MB loadgen=72%/6MB
+[base   ] tput 192.168.56.1:9700 down 8 8: gbit_s=110.544, errors=0 | sink=622%/6MB loadgen=334%/6MB
+[base   ] tput 192.168.56.1:9700 down 64 8: gbit_s=65.877, errors=0 | sink=491%/10MB loadgen=574%/10MB
+[base   ] tput 192.168.56.1:9701 up 1 8: gbit_s=31.962, errors=0 | sink=76%/6MB loadgen=96%/6MB
+[base   ] tput 192.168.56.1:9701 up 8 8: gbit_s=120.012, errors=0 | sink=357%/6MB loadgen=646%/6MB
+[base   ] tput 192.168.56.1:9701 up 64 8: gbit_s=69.179, errors=0 | sink=556%/10MB loadgen=526%/10MB
+[engine ] tput 192.168.56.1:9700 down 1 8: gbit_s=8.804, errors=0 | client=100%/10MB sink=15%/6MB loadgen=68%/6MB
+[engine ] tput 192.168.56.1:9700 down 8 8: gbit_s=26.548, errors=0 | client=704%/10MB sink=92%/6MB loadgen=230%/6MB
+[engine ] tput 192.168.56.1:9700 down 64 8: gbit_s=28.466, errors=0 | client=767%/13MB sink=109%/10MB loadgen=225%/10MB
+[engine ] tput 192.168.56.1:9701 up 1 8: gbit_s=4.62, errors=0 | client=99%/11MB sink=67%/6MB loadgen=8%/6MB
+[engine ] tput 192.168.56.1:9701 up 8 8: gbit_s=28.234, errors=0 | client=708%/11MB sink=226%/6MB loadgen=89%/6MB
+[engine ] tput 192.168.56.1:9701 up 64 8: gbit_s=26.994, errors=0 | client=745%/13MB sink=218%/10MB loadgen=114%/10MB
+[reality] tput 192.168.56.1:9700 down 1 8: gbit_s=2.643, errors=0 | client=98%/14MB server=38%/11MB dest=0%/11MB sink=5%/6MB loadgen=36%/6MB
+[reality] tput 192.168.56.1:9700 down 8 8: gbit_s=12.517, errors=0 | client=542%/14MB server=277%/12MB dest=0%/12MB sink=44%/6MB loadgen=169%/6MB
+[reality] tput 192.168.56.1:9700 down 64 8: gbit_s=12.539, errors=0 | client=592%/19MB server=303%/18MB dest=0%/13MB sink=47%/10MB loadgen=143%/10MB
+[reality] tput 192.168.56.1:9701 up 1 8: gbit_s=2.902, errors=0 | client=38%/15MB server=99%/13MB dest=0%/13MB sink=37%/6MB loadgen=5%/6MB
+[reality] tput 192.168.56.1:9701 up 8 8: gbit_s=14.793, errors=0 | client=306%/15MB server=588%/14MB dest=0%/13MB sink=147%/6MB loadgen=52%/6MB
+[reality] tput 192.168.56.1:9701 up 64 8: gbit_s=14.049, errors=0 | client=332%/20MB server=605%/18MB dest=0%/13MB sink=111%/10MB loadgen=61%/10MB
+[vision ] tput 192.168.56.1:9700 down 1 8: gbit_s=5.33, errors=0 | client=99%/15MB server=51%/15MB dest=0%/13MB sink=7%/6MB loadgen=47%/6MB
+[vision ] tput 192.168.56.1:9700 down 8 8: gbit_s=13.954, errors=0 | client=591%/16MB server=300%/16MB dest=0%/13MB sink=52%/6MB loadgen=126%/6MB
+[vision ] tput 192.168.56.1:9700 down 64 8: gbit_s=11.454, errors=0 | client=560%/22MB server=287%/20MB dest=0%/14MB sink=46%/10MB loadgen=117%/10MB
+[vision ] tput 192.168.56.1:9701 up 1 8: gbit_s=3.394, errors=0 | client=38%/17MB server=100%/17MB dest=0%/14MB sink=42%/6MB loadgen=5%/6MB
+[vision ] tput 192.168.56.1:9701 up 8 8: gbit_s=14.349, errors=0 | client=310%/17MB server=592%/17MB dest=0%/13MB sink=154%/6MB loadgen=50%/6MB
+[vision ] tput 192.168.56.1:9701 up 64 8: gbit_s=13.348, errors=0 | client=311%/21MB server=603%/21MB dest=0%/14MB sink=115%/10MB loadgen=54%/10MB
+[reality] tput 192.168.56.1:9700 down 256 15: gbit_s=9.223, errors=0 | client=619%/36MB server=216%/36MB dest=0%/14MB sink=38%/22MB loadgen=168%/22MB
+[vision ] tput 192.168.56.1:9700 down 256 15: gbit_s=9.535, errors=0 | client=641%/40MB server=228%/36MB dest=0%/14MB sink=36%/22MB loadgen=162%/22MB
+[idle after-tput] client=0.0%/12.4MBpriv server=0.0%/13.0MBpriv dest=0.0%/5.4MBpriv sink=0.0%/3.5MBpriv
+[engine ] conns 192.168.56.1:9702 1000 10: opened=1000, alive_after_hold=1000, setup_p99_ms=524.6, errors={} | client=1%/56MB sink=0%/7MB loadgen=0%/8MB
+[engine ] conns 192.168.56.1:9702 5000 10: opened=5000, alive_after_hold=5000, setup_p99_ms=1078.4, errors={} | client=41%/213MB sink=6%/13MB loadgen=29%/16MB
+[engine ] conns 192.168.56.1:9702 10000 10: opened=10000, alive_after_hold=10000, setup_p99_ms=651.2, errors={} | client=80%/410MB sink=11%/20MB loadgen=59%/22MB
+[reality] conns 192.168.56.1:9702 1000 10: opened=1000, alive_after_hold=1000, setup_p99_ms=1137.1, errors={} | client=23%/71MB server=31%/64MB dest=5%/15MB sink=4%/8MB loadgen=9%/8MB
+[reality] conns 192.168.56.1:9702 5000 10: opened=5000, alive_after_hold=5000, setup_p99_ms=1748.2, errors={} | client=65%/279MB server=93%/265MB dest=9%/15MB sink=8%/13MB loadgen=37%/15MB
+[reality] conns 192.168.56.1:9702 10000 10: opened=9981, alive_after_hold=9981, setup_p99_ms=9075.7, errors={'Подключение не установлено, т.к. конечный компьютер отверг запрос на подключение. (os error 10061)': 19} | client=92%/529MB server=132%/504MB dest=18%/16MB sink=8%/20MB loadgen=57%/25MB
+[vision ] conns 192.168.56.1:9702 1000 10: opened=1000, alive_after_hold=1000, setup_p99_ms=1131.7, errors={} | client=18%/76MB server=21%/73MB dest=3%/15MB sink=2%/8MB loadgen=6%/8MB
+[vision ] conns 192.168.56.1:9702 5000 10: opened=5000, alive_after_hold=5000, setup_p99_ms=1322.0, errors={} | client=57%/284MB server=72%/273MB dest=12%/16MB sink=6%/13MB loadgen=31%/14MB
+[vision ] conns 192.168.56.1:9702 10000 10: opened=9729, alive_after_hold=9729, setup_p99_ms=7292.5, errors={'Удаленный хост принудительно разорвал существующее подключение. (os error 10054)': 271} | client=99%/521MB server=134%/499MB dest=16%/16MB sink=7%/19MB loadgen=60%/24MB
+[idle after-conns] client=0.0%/21.9MBpriv server=0.0%/27.5MBpriv dest=0.0%/6.4MBpriv sink=0.0%/2.7MBpriv
+[base   ] rate 192.168.56.1:9702 64 10: conn_per_s=14524, lat_p50_ms=4.3, lat_p99_ms=6.3, errors=0 | sink=198%/7MB loadgen=562%/10MB
+[engine ] rate 192.168.56.1:9702 64 10: conn_per_s=2101, lat_p50_ms=30.1, lat_p99_ms=56.7, errors=0 | client=228%/30MB sink=34%/7MB loadgen=256%/7MB
+[reality] rate 192.168.56.1:9702 64 10: conn_per_s=483, lat_p50_ms=132.0, lat_p99_ms=176.9, errors=0 | client=163%/30MB server=189%/30MB dest=27%/15MB sink=9%/7MB loadgen=135%/6MB
+[vision ] rate 192.168.56.1:9702 64 10: conn_per_s=1064, lat_p50_ms=49.8, lat_p99_ms=122.9, errors=0 | client=234%/33MB server=261%/30MB dest=52%/15MB sink=18%/7MB loadgen=141%/7MB
+[idle end] client=0.0%/64.6MBpriv server=0.0%/32.5MBpriv dest=0.0%/6.6MBpriv sink=0.0%/2.9MBpriv
