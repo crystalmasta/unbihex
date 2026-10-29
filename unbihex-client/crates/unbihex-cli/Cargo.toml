@@ -12,6 +12,11 @@ homepage.workspace = true
 name = "unbihex-cli"
 path = "src/main.rs"
 
+[features]
+# The full-screen menu (`unbihex-cli` in a terminal, `unbihex-cli tui`), released as
+# unbihex-cli-tui. Off by default: router builds stay smaller.
+tui = ["dep:ratatui"]
+
 [dependencies]
 unbihex-client-core.workspace = true
 unbihex-engine.workspace = true
@@ -21,8 +26,8 @@ serde_json.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
-# The full-screen menu (`unbihex-cli` in a terminal, `unbihex-cli tui`).
-ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+# The full-screen menu (feature `tui`).
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"], optional = true }
 
 [lints.rust]
 unsafe_code = "deny"

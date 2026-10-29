@@ -15,7 +15,8 @@ VLESS (TLS, REALITY, XTLS Vision, XHTTP), Shadowsocks, SOCKS5.
 | `Unbihex-<версия>-windows-setup.exe` | Windows 10/11 x64, установщик |
 | `Unbihex-<версия>-windows-portable.zip` | Windows 10/11 x64 без установки: распакуйте и запустите `Unbihex.exe` |
 | `Unbihex-<версия>-android-arm64.apk` | Android 7+ (arm64) |
-| `unbihex-cli-<версия>-linux-x86_64.tar.gz`, `…-aarch64` | консольный клиент для Linux (статический бинарник, любой дистрибутив) |
+| `unbihex-cli-<версия>-linux-x86_64.tar.gz`, `…-aarch64`, `…-armv7` | консольный клиент для Linux без меню: роутеры, NAS, скрипты (статический бинарник, любой дистрибутив) |
+| `unbihex-cli-tui-<версия>-linux-x86_64.tar.gz`, `…-aarch64`, `…-armv7` | тот же клиент с меню на весь экран, как у btop: серверы и работа в консоли |
 
 Windows SmartScreen может предупредить о неизвестном издателе: «Подробнее» → «Выполнить в любом случае».
 Контрольные суммы файлов — в `SHA256SUMS.txt` того же релиза.

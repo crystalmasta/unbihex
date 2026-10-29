@@ -106,6 +106,7 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   speed graphs, traffic through the VPN and direct, the log (engine logs go there instead of the screen).
 - Links and subscriptions are added in a popup line; pasting works over SSH too.
 - TUN over SSH: the first Enter only warns that the session may drop.
+- Two console client builds: `unbihex-cli` without the menu (routers, NAS, scripts) and `unbihex-cli-tui` with it (feature `tui`).
 
 ## Next
 1. Fuzzing and benchmarks, the engine README as an SDK.

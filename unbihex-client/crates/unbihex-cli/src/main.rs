@@ -5,6 +5,7 @@
 //! config instead, for routers and servers: no subscriptions, no system changes.
 //! Started in a terminal without a command, it opens a full-screen menu (`tui.rs`).
 
+#[cfg(feature = "tui")]
 mod tui;
 
 use std::io::IsTerminal;
@@ -18,7 +19,8 @@ const USAGE: &str = "\
 usage: unbihex-cli [--dir <folder>] [<command>]
 
   tui                      full-screen menu: servers, ping, connect, speed, log
-                           (also what a terminal gets without a command)
+                           (also what a terminal gets without a command; only in
+                           the unbihex-cli-tui build, router builds have no menu)
   add <url | link | file>... add subscription URLs, share links (vless://, ss://, …)
                            or a file: links, or an Xray / sing-box JSON config
   update                   refresh all subscriptions
@@ -411,6 +413,43 @@ fn fail(e: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// `tui`: the full-screen menu. Only builds with the `tui` feature have it
+/// (released as `unbihex-cli-tui`); router builds stay smaller without it.
+#[cfg(feature = "tui")]
+fn run_menu(dir: Option<String>, interactive: bool) -> ExitCode {
+    if !interactive {
+        return fail("tui needs a terminal");
+    }
+    // The menu owns the screen: its logs go to the log pane, not stderr.
+    let logs = tui::LogBuffer::default();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .with_target(false)
+        .without_time()
+        .init();
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    match tui::run(&runtime, Client::open(data_dir(dir)), logs) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(e),
+    }
+}
+
+#[cfg(not(feature = "tui"))]
+fn run_menu(_dir: Option<String>, _interactive: bool) -> ExitCode {
+    fail("this build has no menu: it is in unbihex-cli-tui")
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = None;
@@ -423,13 +462,17 @@ fn main() -> ExitCode {
         args.remove(0);
     }
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let Some(cmd) = args.first().cloned().or_else(|| interactive.then(|| "tui".into())) else {
+    let menu = cfg!(feature = "tui") && interactive;
+    let Some(cmd) = args.first().cloned().or_else(|| menu.then(|| "tui".into())) else {
         println!("{USAGE}");
         return ExitCode::from(2);
     };
     if matches!(cmd.as_str(), "-h" | "--help" | "help") {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
+    }
+    if cmd == "tui" {
+        return run_menu(dir, interactive);
     }
     // `run` and `check` need neither the data folder nor client-core.
     let engine_config = match cmd.as_str() {
@@ -443,25 +486,11 @@ fn main() -> ExitCode {
         println!("configuration OK");
         return ExitCode::SUCCESS;
     }
-    // The menu owns the screen: its logs go to the log pane, not stderr.
-    let tui_logs = (cmd == "tui").then(tui::LogBuffer::default);
-    match &tui_logs {
-        Some(logs) => tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-            )
-            .with_writer(logs.clone())
-            .with_ansi(false)
-            .with_target(false)
-            .without_time()
-            .init(),
-        None => init_logs(
-            engine_config
-                .as_ref()
-                .map_or("warn", |(_, c)| c.log.level.as_str()),
-        ),
-    }
+    init_logs(
+        engine_config
+            .as_ref()
+            .map_or("warn", |(_, c)| c.log.level.as_str()),
+    );
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -469,15 +498,6 @@ fn main() -> ExitCode {
         Ok(r) => r,
         Err(e) => return fail(e),
     };
-    if let Some(logs) = tui_logs {
-        if !interactive {
-            return fail("tui needs a terminal");
-        }
-        return match tui::run(&runtime, Client::open(data_dir(dir)), logs) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(e),
-        };
-    }
     let result = match engine_config {
         Some((path, config)) => runtime.block_on(run_config(&path, config)),
         None => {

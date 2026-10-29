@@ -15,7 +15,8 @@ Ready-made builds are on the [latest release](https://github.com/crystalmasta/un
 | `Unbihex-<version>-windows-setup.exe` | Windows 10/11 x64, installer |
 | `Unbihex-<version>-windows-portable.zip` | Windows 10/11 x64 without installing: unzip and run `Unbihex.exe` |
 | `Unbihex-<version>-android-arm64.apk` | Android 7+ (arm64) |
-| `unbihex-cli-<version>-linux-x86_64.tar.gz`, `…-aarch64` | console client for Linux (a static binary, any distribution) |
+| `unbihex-cli-<version>-linux-x86_64.tar.gz`, `…-aarch64`, `…-armv7` | console client for Linux without the menu: routers, NAS, scripts (a static binary, any distribution) |
+| `unbihex-cli-tui-<version>-linux-x86_64.tar.gz`, `…-aarch64`, `…-armv7` | the same client with a btop-like full-screen menu: servers and hands-on console use |
 
 Windows SmartScreen may warn about an unknown publisher: "More info" → "Run anyway".
 File checksums are in `SHA256SUMS.txt` of the same release.
