@@ -126,7 +126,10 @@ impl AsyncRead for TunIo {
                 buf.put_slice(&pkt[..n]);
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(None) => Poll::Ready(Ok(())),
+            // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
+            // EOF as "0 bytes, ready" is a trap: ipstack's run loop treats a successful
+            // read as an event and spins at 100% CPU once the device is gone.
+            Poll::Ready(None) => Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into())),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -197,6 +200,10 @@ pub async fn start(
                         Ok(n) => n,
                         Err(e) => {
                             tracing::error!("tun read: {e}");
+                            // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
+                            // The stack never sees this error itself; stop it explicitly
+                            // so its accept loop returns and drops the stack.
+                            cancel.cancel();
                             return;
                         }
                     },
@@ -241,6 +248,27 @@ pub async fn start(
     Ok((info, handle))
 }
 
+/// TCP settings for the userspace stack: a window that is not the bottleneck on
+/// a long path, and an MSS the peer will actually use.
+///
+/// By Pavel Shakhmin (github.com/pshakhmin), PR #18.
+fn tcp_config(mtu: u16, idle: Duration) -> TcpConfig {
+    let mut cfg = TcpConfig::default();
+    // ipstack resets a TCP flow idle for its own 60 s default; use the engine's limit.
+    cfg.timeout = idle;
+    // ipstack caps both directions at these values: 16 KiB (its default) limits a
+    // connection to `window / RTT`, i.e. ~1.3 Mbit/s at 100 ms. The buffers are
+    // byte budgets (ipstack tracks lengths), not preallocated memory.
+    cfg.read_buffer_size = 256 * 1024;
+    cfg.max_unacked_bytes = 256 * 1024;
+    // One MSS for both families: mtu - 60 is right for IPv6 and 20 bytes
+    // conservative for IPv4 (1340 instead of 1360 at MTU 1400).
+    cfg.options = Some(vec![ipstack::TcpOptions::MaximumSegmentSize(
+        mtu.saturating_sub(60),
+    )]);
+    cfg
+}
+
 /// Runs the userspace stack over a packet-per-read/write `io` and dispatches its flows.
 fn run_stack(
     io: TunIo,
@@ -256,10 +284,7 @@ fn run_stack(
         .mtu(cfg.mtu)
         .map_err(|e| Error::Tun(format!("mtu {}: {e}", cfg.mtu)))?;
     stack_cfg.udp_timeout(udp_idle);
-    // ipstack resets a TCP flow idle for its own 60 s default; use the engine's limit.
-    let mut tcp_cfg = TcpConfig::default();
-    tcp_cfg.timeout = tcp_idle;
-    stack_cfg.with_tcp_config(tcp_cfg);
+    stack_cfg.with_tcp_config(tcp_config(cfg.mtu, tcp_idle));
     let mut stack = IpStack::new(stack_cfg, io);
 
     let (tun_net, tag, dns_hijack, sniff) = (cfg.ipv4, cfg.tag.clone(), cfg.dns_hijack, cfg.sniff);
@@ -958,5 +983,47 @@ mod tests {
         .await;
         assert!(fin.is_ok(), "no FIN within 3 s of the ACK");
         h.cancel.cancel();
+    }
+
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
+    #[test]
+    fn tcp_config_sets_windows_and_mss() {
+        let idle = Duration::from_secs(123);
+        for mtu in [1280u16, 1400, 9000] {
+            let cfg = tcp_config(mtu, idle);
+            assert_eq!(cfg.read_buffer_size, 256 * 1024, "mtu {mtu}");
+            assert_eq!(cfg.max_unacked_bytes, 256 * 1024, "mtu {mtu}");
+            assert_eq!(cfg.timeout, idle, "mtu {mtu}");
+            let opts = cfg.options.as_deref().expect("options set");
+            assert_eq!(opts.len(), 1, "mtu {mtu}");
+            let [ipstack::TcpOptions::MaximumSegmentSize(mss)] = opts else {
+                panic!("unexpected options for mtu {mtu}: {opts:?}")
+            };
+            assert_eq!(*mss, mtu - 60, "mtu {mtu}");
+        }
+        let cfg = tcp_config(9000, idle);
+        assert!(
+            matches!(
+                cfg.options.as_deref(),
+                Some([ipstack::TcpOptions::MaximumSegmentSize(8940)])
+            ),
+            "9000 has a 60-byte header allowance"
+        );
+    }
+
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
+    #[test]
+    fn tun_io_reports_eof_as_error() {
+        let (tx, _out_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (in_tx, rx) = mpsc::channel::<Vec<u8>>(1);
+        drop(in_tx);
+        let mut io = TunIo { rx, tx };
+        let mut buf = [0u8; 16];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        match Pin::new(&mut io).poll_read(&mut cx, &mut read_buf) {
+            Poll::Ready(Err(e)) => assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe),
+            other => panic!("expected BrokenPipe, got {other:?}"),
+        }
     }
 }
