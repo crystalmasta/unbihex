@@ -37,3 +37,4 @@ Windows SmartScreen может предупредить о неизвестно�
 
 © 2026 Crystalmasta — https://github.com/crystalmasta.
 Лицензия — Mozilla Public License 2.0, текст в файлах `LICENSE` обоих проектов.
+Об уязвимостях сообщайте приватно, как описано в [`SECURITY.md`](SECURITY.md).
