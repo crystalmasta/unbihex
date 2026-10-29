@@ -12,7 +12,6 @@
 |---|---|
 | Клиент Unbihex (Windows, Android, `unbihex-cli`) | 0.2.x |
 | Ядро `unbihex-engine` | 0.1.x |
-| Сервер `unbihex` | 0.1.x |
 
 Более старые версии не исправляются: обновитесь до последнего [релиза](https://github.com/crystalmasta/unbihex/releases/latest).
 
@@ -21,7 +20,7 @@
 **Не открывайте публичный issue.** Напишите в личные сообщения в Telegram, указанный в
 [профиле автора](https://github.com/crystalmasta): https://t.me/tamerlansakhibgareev
 
-Опишите, что затронуто (клиент, ядро или сервер, версия, ОС), как воспроизвести и к чему это приводит.
+Опишите, что затронуто (клиент или ядро, версия, ОС), как воспроизвести и к чему это приводит.
 Подойдут, например, обход проверки TLS или REALITY, утечка трафика или DNS мимо туннеля, раскрытие ключей
 и UUID, удалённое выполнение кода или падение от присланных по сети данных, доступ к API или прокси без пароля.
 
@@ -38,7 +37,6 @@ Security fixes are released for the latest versions:
 |---|---|
 | Unbihex client (Windows, Android, `unbihex-cli`) | 0.2.x |
 | `unbihex-engine` | 0.1.x |
-| `unbihex` server | 0.1.x |
 
 Older versions are not patched: please update to the latest [release](https://github.com/crystalmasta/unbihex/releases/latest).
 
@@ -47,7 +45,7 @@ Older versions are not patched: please update to the latest [release](https://gi
 **Please do not open a public issue.** Send a direct message on Telegram, as listed in the
 [author's profile](https://github.com/crystalmasta): https://t.me/tamerlansakhibgareev
 
-Describe what is affected (client, engine or server, version, OS), how to reproduce it and what it leads to.
+Describe what is affected (client or engine, version, OS), how to reproduce it and what it leads to.
 Examples: bypassing TLS or REALITY verification, traffic or DNS leaking past the tunnel, exposure of keys or
 UUIDs, remote code execution or crashes from data received over the network, access to the API or proxy
 without a password.

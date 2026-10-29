@@ -4,7 +4,6 @@
 
 > This is the original MVP specification (0.1). Since then the engine has gained much of what is listed below as
 > "non-goals": REALITY, XTLS Vision, XHTTP, XUDP (mux), geosite/geoip and `.srs` databases, hot reload, a mixed inbound.
-> It has also gained a server mode, described in §17.
 > The layout in §2 is the original plan; the engine is now a single `unbihex-engine` crate.
 > What has been done is in [`../unbihex-client/PROGRESS.en.md`](../unbihex-client/PROGRESS.en.md).
 
@@ -27,7 +26,7 @@ Target platforms:
 | Android 7+ | the `libunbihex.so` library (JNI) inside a `VpnService` | the app, through `VpnService.Builder` |
 | iOS 15+ | the `libunbihex.a` static library (C ABI) inside an `NEPacketTunnelProvider` | the app, through `NEPacketTunnelNetworkSettings` |
 
-Non-goals of the MVP: server mode, REALITY, XTLS Vision, WebSocket, gRPC, XHTTP, mux, Shadowsocks 2022, geoip/geosite databases, GUI. The architecture must not prevent adding them later.
+Non-goals of the MVP: REALITY, XTLS Vision, WebSocket, gRPC, XHTTP, mux, Shadowsocks 2022, geoip/geosite databases, GUI. The architecture must not prevent adding them later.
 
 ---
 
@@ -254,7 +253,7 @@ If any step fails, undo what has been done and return the error.
 - All domains in the config are converted to ASCII lowercase through IDNA (`рф` → `xn--p1ai`).
 - If the target is an IP address, domain conditions are false. If the target is a domain, IP conditions are false on the first pick.
 - If `direct` is picked, the target is a domain and the decision was not made by a domain rule, the Dispatcher resolves the domain itself (with the same resolver as direct) and runs the rules again for each address (like IPIfNonMatch in Xray). If any address hits `block`, the session is blocked; if the first address leads to the proxy, the session goes to the proxy with the domain; otherwise direct connects only to the checked addresses (without resolving again, so that DNS rebinding cannot bypass the check). Sessions picked for the proxy are never resolved locally: that would leak the name to the local DNS.
-- DNS rebinding protection: when a direct session with a domain gets private addresses (`ip_private`), they are dropped, whatever rule picked the session. With no addresses left the session is blocked. Exceptions: single-label names, `localhost`, and the suffixes in `dns.fakeip_exclude` and `dns.allow_private_answers`. On a server (with a VLESS inbound) the only exceptions are `dns.allow_private_answers`: a server has no LAN of its own, and `metadata` or `metadata.google.internal` lead to the cloud's metadata service.
+- DNS rebinding protection: when a direct session with a domain gets private addresses (`ip_private`), they are dropped, whatever rule picked the session. With no addresses left the session is blocked. Exceptions: single-label names, `localhost`, and the suffixes in `dns.fakeip_exclude` and `dns.allow_private_answers`.
 - Direct does not connect to the engine's own listen addresses (a loop), nor to the host's loopback addresses (127/8, ::1, 0.0.0.0, ::) when the client is not on this host (the source is not loopback and the inbound is not TUN).
 - `ip_private` covers: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, 100.64/10, 224/4, 255.255.255.255/32, ::1/128, fc00::/7, fe80::/10, ff00::/8.
 - Performance: keep suffixes in a `HashSet` and check them label by label from the right; CIDRs in a sorted list. A test with 10,000 rules must perform 100,000 matches in under 1 s in release.
@@ -609,137 +608,3 @@ On Android the recommended loop protection is `VpnService.Builder.addDisallowedA
 - `cargo test --workspace` green on Windows/Linux/macOS;
 - `cargo clippy --workspace --all-targets -- -D warnings` clean;
 - `unbihex run --link vless://...` on Windows/Linux/macOS sends browser traffic through the server, and after Ctrl-C the routes and DNS are restored.
-
----
-
-## 17. Server mode (feature `server`)
-
-> This section was added after the MVP and describes what is already done. The goal is to replace the Xray core behind panels
-> (Marzban, 3x-ui, PasarGuard): the panel keeps generating its configs, managing users and reading statistics.
-
-The protocol code lives in `unbihex-engine` behind the `server` feature: the VLESS inbound (`inbound/vless.rs`), server-side TLS
-and REALITY, and the counters and control (`server.rs`). The process, the CLI, the gRPC API and the Xray config translation
-live in the `unbihex-server` crate (binary `unbihex`, version 0.1.1). Client builds are compiled without the `server` feature
-and contain none of this code.
-
-### 17.1 VLESS inbound
-
-```json
-{ "type": "vless", "tag": "vless-in", "listen": "0.0.0.0:443",
-  "users": [ { "id": "6f1d7e2a-3b4c-4d5e-8f60-718293a4b5c6", "email": "alice", "flow": "xtls-rprx-vision" } ],
-  "tls": { "certificate_file": "/etc/unbihex/fullchain.pem", "key_file": "/etc/unbihex/privkey.pem" } }
-```
-
-- Exactly one of `tls` and `reality` is set. VLESS without encryption is not supported on the server.
-- `users` is not empty; `id` is a UUID and may not repeat; `flow` is `""`, `xtls-rprx-vision` or `xtls-rprx-vision-udp443`,
-  and any other value is an `Unsupported` error. `email` names the user in logs and statistics.
-- `tls`: the certificate chain and key in PEM, plus `alpn` (default `h2`, `http/1.1`, as in Xray). The server supports
-  the X25519MLKEM768 key exchange.
-- `reality` (the counterpart of Xray's `realitySettings`):
-
-  | Field | Meaning |
-  |---|---|
-  | `dest` | the site the server impersonates, `host:port` |
-  | `server_names` | allowed SNI values, not empty |
-  | `private_key` | X25519, base64url (`unbihex x25519`) |
-  | `short_ids` | hex, up to 16 characters; `""` is the all-zero ID; not empty |
-  | `max_time_diff_ms` | allowed client clock difference; 0 or absent means 120,000 (unlike Xray, the check cannot be turned off) |
-
-  A client without the key (a scanner, a browser) is forwarded to `dest` untouched and sees the real site.
-- Replay: the `client_random` of accepted hellos is remembered for twice the `max_time_diff_ms` window. A replayed
-  hello (one a censor recorded) goes to `dest`, like a stranger's.
-- Handshake sizes like `dest`'s: for our client the server, as Xray, sends the same ClientHello to `dest` and reads
-  the answer. It answers with the same key exchange group and cipher suite, so the ServerHello has the same length.
-  It re-frames its EncryptedExtensions…Finished into records of `dest`'s lengths with TLS 1.3 padding
-  (RFC 8446 §5.4) (`inbound/reality_shape.rs`). `dest`'s answer ends at a pause, at a record boundary, of a quarter of its TCP connect time (2–15 ms); a record still arriving is always waited for.
-  If `dest` does not answer within 3 s, the records keep rustls's sizes. Clock skew and replays are logged at info.
-- Vision follows Xray's rules: a user whose `flow` is Vision must use it.
-- UDP: the VLESS UDP command and Mux.Cool / XUDP.
-- Accepted connections go to the same `Dispatcher` (§7): routing, DNS and outbounds are shared with the client.
-
-### 17.2 Live users and counters
-
-`Instance::server()` returns an `Arc<ServerControl>`: `stats()`, `add_user(tag, user)`, `remove_user(tag, email)`,
-`users(tag, email?)`, `user_count(tag)`, `inbound_tags()`.
-
-- An inbound's user list is an immutable snapshot (`ArcSwap`); writes are serialised by a mutex. A new connection is checked
-  against the current snapshot. Open connections of a removed user live until they close; new ones are refused.
-- Errors: `user <email> already exists`, `user <email> not found`.
-- Counters use Xray's names: `user>>>email>>>traffic>>>uplink|downlink` and `inbound>>>tag>>>traffic>>>uplink|downlink`.
-  `uplink` is client to server. Data is counted inside Vision, so traffic with and without padding counts the same.
-  UDP counts the packet payload. A user with an empty `email` gets no per-user counters.
-- `ServerStats::get`, `query` (a substring of the name) and `users_traffic` can atomically reset the counters they read (`reset`).
-
-### 17.3 gRPC API (as in Xray)
-
-Enabled by `"api": { "listen": "127.0.0.1:10085", "services": ["StatsService", "HandlerService"] }`;
-an empty `services` means both, and an unknown service fails the start. The API has no authentication, as in Xray,
-so an address other than loopback fails the start.
-
-Paths, packages and field numbers match Xray: the proto files in `unbihex-server/proto/` are a trimmed copy of Xray-core's.
-`protox` compiles them, so the build needs no `protoc`.
-
-| Service | Method | Behaviour |
-|---|---|---|
-| StatsService | `GetStats` | the counter's value; a missing one gives `Unknown`, "`<name> not found.`", as in Xray |
-| | `QueryStats` | counters whose name contains `pattern` (a substring), with `reset` |
-| | `GetSysStats` | `Uptime` only |
-| | `GetUsersStats` | traffic per user |
-| HandlerService | `AlterInbound` | `AddUserOperation` / `RemoveUserOperation`; VLESS accounts only, `encryption` empty or `none` |
-| | `GetInboundUsers`, `GetInboundUsersCount` | the inbound's users |
-
-All other methods (online statistics, `AddInbound`, `AddOutbound`, …) answer `Unimplemented`.
-
-### 17.4 Xray configs
-
-A config counts as an Xray config if it has keys only Xray uses (`routing`, `policy`, `stats`, …) or inbounds and outbounds
-with a `protocol` field. Such a config is translated into the engine's format (`xray_config.rs`).
-
-- **Supported** is the subset panels generate:
-  - VLESS over TCP with TLS (certificate from files) or REALITY;
-  - the API's `dokodemo-door` inbound. It is tied to the API by a routing rule, as in Marzban (`API_INBOUND` → `API`);
-  - `freedom` and `blackhole` outbounds;
-  - `field` rules (inboundTag, domain with prefixes, ip/CIDR, geoip/geosite, port, network);
-  - `policy` level 0;
-  - DNS servers given by IP.
-
-  The bookkeeping fields panels add to clients are accepted; clients with `enable: false` are skipped.
-- **Strictness.** Anything unsupported that would change how traffic is handled fails the start. That covers other protocols
-  and transports, `fallbacks`, balancers and the like. Anything that only affects logs and accounting produces a warning:
-  log files, `sniffing`.
-- An API inbound without `listen` gets 127.0.0.1 (Xray takes 0.0.0.0), with a warning.
-- No `geoip:private` → blackhole rule gives a warning: users would reach the server's network by IP.
-- `maxTimeDiff: 0` (the panels' default) means a 120 s window, not "no check" (§17.1).
-- **Difference from Xray:** rules that match on `protocol` (e.g. the bittorrent block in Marzban and 3x-ui) are dropped
-  with a warning. The server does not detect protocols, so that traffic will pass.
-- `geoip.dat` and `geosite.dat` are looked up as in Xray: in `XRAY_LOCATION_ASSET`, otherwise next to the binary.
-
-### 17.5 Server CLI
-
-```text
-unbihex run -c <config.json | stdin:>   run until Ctrl-C / SIGTERM
-unbihex -c <config.json> [-test]        the same without `run`, as in Xray; -test only checks the config ("Configuration OK.")
-unbihex version                         the version (see below)
-unbihex uuid [-i text]                  a random UUID, or a UUIDv5 from text
-unbihex x25519 [-i key]                 a REALITY key pair, or the public key for a private one
-unbihex api <command> [-s addr] [-t s]  stats, statsquery, sysstats, adu, rmu, inbounduser, inboundusercount
-```
-
-- One `-c` and `-format json|auto` are accepted; `-confdir` and several `-c` are errors rather than a silent merge.
-- `unbihex api` talks to `127.0.0.1:8080` by default, as `xray api` does, and prints JSON without zero fields.
-- `version` prints `Unbihex 0.1.1 (os/arch)`. If the binary's name starts with `xray` (that is how panels run their core;
-  a symlink works too), the first line is `Xray 26.10.21 (Unbihex 0.1.1) (os/arch)`.
-  Marzban (`^Xray (\d+\.\d+\.\d+)`) and 3x-ui (the second word) read the core version from it.
-
-### 17.6 Tests
-
-All on `127.0.0.1`, our client against our server:
-- TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users;
-- REALITY with Vision and Chrome's fingerprint, a fragmented ClientHello;
-- what strangers see: the real site over TLS and HTTP;
-- gRPC API: counters, live users, `unbihex api`;
-- the binary on a Marzban- and 3x-ui-style config;
-- unsupported Xray configs fail;
-- the `version` line under different binary names.
-
-Not yet tested with live panels.

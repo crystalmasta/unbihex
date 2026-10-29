@@ -2,16 +2,8 @@
 
 pub mod http;
 pub mod mixed;
-#[cfg(feature = "server")]
-pub mod mux;
-#[cfg(feature = "server")]
-pub mod reality;
-#[cfg(feature = "server")]
-mod reality_shape;
 pub mod socks;
 pub mod tun;
-#[cfg(feature = "server")]
-pub mod vless;
 
 use std::net::SocketAddr;
 

@@ -92,7 +92,7 @@ unbihex-client/
 Скачать — в [релизах на GitHub](https://github.com/crystalmasta/unbihex/releases/latest).
 Локально сборки складываются в папку `dist/` (её нет в репозитории):
 
-- `dist/Unbihex-0.2.2-setup.exe` — установщик для Windows 10/11 x64 (NSIS, `installer/build.sh`).
+- `dist/Unbihex-0.2.3-setup.exe` — установщик для Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — портативная версия; рядом должен лежать `wintun.dll`.
   Сборка MSVC со статическим CRT: Visual C++ Redistributable не нужен, WebView2Loader вшит в exe.
 - `dist/android/Unbihex-android-arm64.apk` — Android 7+ (arm64, почти все телефоны).
@@ -175,7 +175,7 @@ sysctl -w net.ipv4.ip_forward=1
    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p unbihex-client --target x86_64-pc-windows-msvc
    MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe" sh installer/build.sh
    ```
-   Готовый файл: `installer\Unbihex-0.2.2-setup.exe`.
+   Готовый файл: `installer\Unbihex-0.2.3-setup.exe`.
 
 Режим TUN требует запуска от администратора — в приложении есть кнопка
 «Перезапустить от администратора». Известное ограничение Windows: система может параллельно

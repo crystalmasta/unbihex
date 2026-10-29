@@ -1,13 +1,9 @@
-# Unbihex strategy (draft, 23.10.2026)
+# Unbihex plans (draft, 23.10.2026)
 
 [Русский](ROADMAP.md) · **English**
 
-The main decision: Unbihex is two products on one engine.
-- **The client** (desktop/Android/iOS) brings users and feedback faster.
-- **A server engine that replaces Xray for panels** (Marzban, 3x-ui, PasarGuard) opens a B2B market,
-  but it means moving from "client only" to a full server (the SPEC listed server mode as a "non-goal of the MVP").
-Do them one after the other: first a client that really connects to popular subscriptions,
-then the server.
+Unbihex is a client for desktop, Android and iOS on its own engine.
+
 
 ## Stage 0 — now: the client connects to real subscriptions
 1. Finish XTLS Vision + REALITY (done).
@@ -32,22 +28,6 @@ then the server.
 8. DPI evasion: TLS ClientHello fragmentation, UDP "noise" (the old client already had these settings).
 9. Subscriptions in Xray JSON and sing-box JSON (many panels serve these to Happ/v2rayN).
 
-## Stage 2 — the server engine
-10. Inbounds: VLESS (+Vision), a REALITY server (done 27.10, with UDP and Mux/XUDP); Trojan, Shadowsocks (incl. 2022), fallbacks are ahead.
-11. Live management: users are added and removed without a restart (hot reload of keys) — done 28.10.
-12. An Xray-compatible gRPC API: HandlerService (AddUser/RemoveUser/AlterInbound),
-    StatsService (QueryStats/GetStats, counters user>>>email>>>traffic>>>uplink/downlink).
-    Implemented with `tonic` from Xray's .proto files — done 28.10 (plus GetSysStats and GetUsersStats; no online stats yet).
-13. A config compatibility layer: translate the subset of Xray JSON that panels actually generate
-    into the internal config; anything unsupported is a loud error, not a silent skip.
-    Done 28.10: VLESS over TCP with TLS/REALITY, the API, freedom/blackhole, rules, policy, DNS.
-
-## Stage 3 — a drop-in `xray` replacement for panels
-14. A compatible CLI: `run -c`, `version`, `x25519`, `uuid`, `api …` — panels call these directly.
-    Done 28.10: running without `run`, `-test`; `version` answers as Xray when named `xray*`, as Unbihex otherwise.
-15. Runs with real Marzban / 3x-ui / PasarGuard: their configs, API, statistics, restarts.
-16. Metrics (Prometheus), a connection log, server-side device limits (HWID).
-
 ## Always
 - Fuzzing the parsers (cargo-fuzz): links, VLESS/SS headers, DNS, HTTP.
 - Benchmarks against Xray and sing-box: throughput, latency, memory
@@ -55,10 +35,7 @@ then the server.
 - Compatibility is a moving target: Xray updates often, tests must run regularly against new versions.
 
 ## Risks
-- Scope: full Xray JSON compatibility is unrealistic — only the subset panels use.
 - TLS fingerprints and active probing are the main cause of blocking, more important than the number of protocols.
-- Distribution: VPN apps get removed from the Russian App Store, and advertising tools for bypassing blocks
-  is restricted by law in Russia. That is a question for a lawyer, not for the code.
 
 ## Technical decisions (discussion of 23.10.2026)
 - **TLS fingerprint:** pure Rust, no BoringSSL (CMake/NASM break builds for iOS/Android/routers).
@@ -76,14 +53,3 @@ then the server.
 - **XUDP:** the 8-byte GlobalID is a keyed hash (blake3) of the UDP socket's source address with a
   per-process random key, as in Xray; without it Full Cone NAT does not work on the server
   (games, Discord, Telegram calls).
-- **Xray JSON:** strict parsing. An unknown field that affects routing or camouflage is an error
-  with its exact name; explicitly listed "safe" fields (tag, sniffing, policy and so on) are allowed.
-  Silent skipping is forbidden: it leads to traffic leaking past the tunnel.
-
-## Positioning and distribution
-- The engine is public as a high-performance network transport / SDK (SD-WAN, Zero-Trust,
-  diagnostics); the README and documentation do not talk about censorship or blocking.
-- The client is an "empty" universal network client with no built-in servers and no subscription sales:
-  users load their own URI/JSON config (like Happ, Streisand, v2box).
-- The main growth channel is B2B: panel owners and GUI shell authors who need a light engine that
-  does not crash on iOS and does not load cheap VPSes.

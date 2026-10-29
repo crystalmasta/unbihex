@@ -15,9 +15,6 @@ pub mod relay;
 pub mod router;
 /// Large rule lists: geosite/geoip and sing-box rule-sets.
 pub mod rules;
-/// Server control: per-user traffic counters and live users of the VLESS inbounds.
-#[cfg(feature = "server")]
-pub mod server;
 /// Sessions passed from inbounds to the dispatcher.
 pub mod session;
 pub mod sniff;
@@ -72,8 +69,6 @@ pub struct Instance {
     /// What a hot reload must not change (inbounds, DNS, limits).
     fixed: String,
     geo: parking_lot::Mutex<rules::GeoCache>,
-    #[cfg(feature = "server")]
-    server: Arc<server::ServerControl>,
 }
 
 /// The parts of a config that a hot reload cannot change.
@@ -180,21 +175,11 @@ impl Instance {
                 InboundConfig::Socks(c) | InboundConfig::Http(c) | InboundConfig::Mixed(c) => {
                     Some(c.listen)
                 }
-                #[cfg(feature = "server")]
-                InboundConfig::Vless(c) => Some(c.listen),
                 InboundConfig::Tun(_) => None,
             })
             .collect();
         let guard = LocalGuard::new(&listens, tun_cfg.as_ref().map(|t| t.tag.clone()));
-        // A server's users must not reach its LAN by name: no client-style exceptions.
-        #[cfg(feature = "server")]
-        let serves = config
-            .inbounds
-            .iter()
-            .any(|i| matches!(i, InboundConfig::Vless(_)));
-        #[cfg(not(feature = "server"))]
-        let serves = false;
-        let private_names = config.dns.private_answer_suffixes(!serves)?;
+        let private_names = config.dns.private_answer_suffixes(true)?;
         let dispatcher = Arc::new(
             Dispatcher::new(
                 router,
@@ -204,7 +189,7 @@ impl Instance {
                 counters.clone(),
             )
             .with_policy(ctx.resolver.clone(), guard)
-            .with_private_names(private_names, !serves),
+            .with_private_names(private_names, true),
         );
         let handshake = Duration::from_secs(config.limits.handshake_timeout_secs);
         let handshakes = Arc::new(tokio::sync::Semaphore::new(config.limits.max_connections));
@@ -219,8 +204,6 @@ impl Instance {
             reload_ctx,
             fixed: fixed_part(&config),
             geo: parking_lot::Mutex::new(geo),
-            #[cfg(feature = "server")]
-            server: Arc::default(),
         };
 
         for ic in &config.inbounds {
@@ -255,23 +238,6 @@ impl Instance {
                         cancel.clone(),
                     ))
                 }),
-                #[cfg(feature = "server")]
-                InboundConfig::Vless(c) => {
-                    let control = instance.server.clone();
-                    inbound::vless::bind(c, control.stats().clone())
-                        .await
-                        .map(|(l, server)| {
-                            control.register(&c.tag, server.users());
-                            tokio::spawn(inbound::vless::serve(
-                                l,
-                                server,
-                                dispatcher.clone(),
-                                handshake,
-                                handshakes.clone(),
-                                cancel.clone(),
-                            ))
-                        })
-                }
                 InboundConfig::Tun(c) => {
                     if !c.dns_hijack {
                         tracing::warn!(
@@ -348,12 +314,6 @@ impl Instance {
         *self.server_ips.lock() = server_ips;
         tracing::info!("configuration reloaded");
         Ok(())
-    }
-
-    /// Users and traffic counters of the server inbounds, for the management API.
-    #[cfg(feature = "server")]
-    pub fn server(&self) -> Arc<server::ServerControl> {
-        self.server.clone()
     }
 
     /// Live traffic counters.
