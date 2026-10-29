@@ -18,9 +18,10 @@
 //! copies its key exchange group, cipher suite and handshake record sizes
 //! (`reality_shape.rs`), so the handshake looks like `dest`'s on the wire.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -54,6 +55,14 @@ const FALLBACK_IDLE: Duration = Duration::from_secs(300);
 const DEFAULT_TIME_DIFF: Duration = Duration::from_secs(120);
 /// At most this many remembered randoms; only authenticated hellos are remembered.
 const REPLAY_CAP: usize = 1 << 20;
+/// How long a `dest` answer stays usable for hellos with the same stable shape.
+const SHAPE_TTL: Duration = Duration::from_secs(600);
+/// How long the resolved `dest` addresses are reused.
+const DEST_TTL: Duration = Duration::from_secs(300);
+/// At most this many cached shapes; the oldest insertion is evicted.
+const SHAPE_CAP: usize = 8;
+/// Timeout of the `dest` host lookup.
+const DEST_LOOKUP: Duration = Duration::from_secs(3);
 
 /// A configured REALITY server.
 pub struct RealityServer {
@@ -63,6 +72,8 @@ pub struct RealityServer {
     max_time_diff: Duration,
     seen: Mutex<Seen>,
     dest: String,
+    /// Answers of `dest` to hello shapes, and the resolved `dest` addresses.
+    shapes: tokio::sync::Mutex<ShapeCache>,
     key: Arc<dyn SigningKey>,
     public: [u8; 32],
     /// The certificate with a zero signature; the last 64 bytes get the HMAC.
@@ -122,6 +133,7 @@ impl RealityServer {
             },
             seen: Mutex::new(Seen::default()),
             dest: cfg.dest.clone(),
+            shapes: tokio::sync::Mutex::new(ShapeCache::default()),
             cert: template_cert(&public),
             key: Arc::new(Ed25519Always(key)),
             public,
@@ -137,7 +149,7 @@ impl RealityServer {
         let hello = tokio::time::timeout(hello_wait, read_hello(&mut tcp, &mut prefix))
             .await
             .unwrap_or(Ok(None))?;
-        let auth_key = match hello.as_deref().map(|h| self.authenticate(h)) {
+        let (auth_key, shape_key) = match hello.as_deref().map(|h| self.authenticate(h)) {
             Some(Ok(k)) => k,
             Some(Err(why)) => {
                 tracing::debug!("reality: {why}, forwarding to {}", self.dest);
@@ -145,7 +157,7 @@ impl RealityServer {
             }
             None => return Ok(Handshake::Fallback(tcp, prefix)),
         };
-        let shape = reality_shape::probe(&self.dest, &prefix).await;
+        let shape = self.shape_for(shape_key, &prefix).await;
         if shape.is_none() {
             tracing::debug!(
                 "reality: no answer from {}, handshake sizes are ours",
@@ -153,7 +165,7 @@ impl RealityServer {
             );
         }
         let log = Arc::new(SecretLog::default());
-        let config = self.config_for(&auth_key, shape.as_ref(), log.clone())?;
+        let config = self.config_for(&auth_key, shape.as_deref(), log.clone())?;
         let mut conn = ServerConnection::new(config).map_err(|e| Error::Tls(e.to_string()))?;
         let mut rest = &prefix[..];
         while !rest.is_empty() && conn.read_tls(&mut rest)? > 0 {
@@ -195,13 +207,18 @@ impl RealityServer {
         }
     }
 
-    /// The auth key of a ClientHello from our client, or why it is not one.
-    fn authenticate(&self, hs: &[u8]) -> std::result::Result<[u8; 32], &'static str> {
+    /// The auth key of a ClientHello from our client and its stable shape key, or why
+    /// it is not one.
+    fn authenticate(&self, hs: &[u8]) -> std::result::Result<([u8; 32], [u8; 32]), &'static str> {
         let h = parse_hello(hs).ok_or("not a TLS 1.3 ClientHello with a 32-byte session_id")?;
         if !h.tls13 {
             return Err("no TLS 1.3 in the ClientHello");
         }
-        let name = h.server_name.unwrap_or_default().to_ascii_lowercase();
+        let name = h
+            .server_name
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if !self.server_names.contains(&name) {
             return Err("server name not in server_names");
         }
@@ -258,7 +275,50 @@ impl RealityServer {
             tracing::info!("reality: a replayed ClientHello; sending it to dest");
             return Err("replayed ClientHello");
         }
-        Ok(auth_key)
+        Ok((auth_key, shape_key(&h)))
+    }
+
+    /// The answer of `dest` to this hello shape, from the cache or from a fresh probe.
+    async fn shape_for(&self, key: [u8; 32], hello: &[u8]) -> Option<Arc<DestShape>> {
+        // Fast path and cached address under a short lock.
+        let cached_addr = {
+            let cache = self.shapes.lock().await;
+            if let Some(shape) = cache.get(&key) {
+                return Some(shape);
+            }
+            cache.fresh_dest_addr()
+        };
+        let addr = match cached_addr {
+            Some(addr) => addr,
+            None => self.resolve_dest().await?,
+        };
+        // The probe runs without the lock: on a dead dest concurrent misses may probe
+        // in parallel, which is cheaper than serializing every handshake behind one.
+        let probed = reality_shape::probe(addr, hello).await;
+        let shape = match probed {
+            Some(shape) => Arc::new(shape),
+            None => {
+                // A failed probe is not cached; a stale address is the likely reason,
+                // so make the next handshake resolve `dest` again.
+                self.shapes.lock().await.clear_dest_addrs();
+                return None;
+            }
+        };
+        // Last writer wins; entries for the same key are equivalent.
+        self.shapes.lock().await.insert(key, shape.clone());
+        Some(shape)
+    }
+
+    /// Resolves `dest` and remembers the addresses for [`DEST_TTL`].
+    async fn resolve_dest(&self) -> Option<SocketAddr> {
+        let found = tokio::time::timeout(DEST_LOOKUP, tokio::net::lookup_host(&self.dest))
+            .await
+            .ok()?
+            .ok()?
+            .collect::<Vec<_>>();
+        let addr = *found.first()?;
+        self.shapes.lock().await.set_dest_addrs(found);
+        Some(addr)
     }
 
     /// A TLS config whose certificate proves `auth_key`, answering with `dest`'s
@@ -288,6 +348,36 @@ impl RealityServer {
 
 /// TLS 1.3 server settings, limited to `group` and `suite` when we support them.
 fn tls_config(group: Option<u16>, suite: Option<u16>) -> Result<ServerConfig> {
+    let mut cfg = ServerConfig::builder_with_provider(provider(group, suite))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| Error::config(format!("reality: {e}")))?
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(OneCert(None)));
+    // As Xray's REALITY: no tickets, no ALPN, an uncompressed certificate.
+    cfg.send_tls13_tickets = 0;
+    cfg.cert_compressors = Vec::new();
+    Ok(cfg)
+}
+
+/// Crypto providers by `(group, suite)`, where `u16::MAX` means None.
+type ProviderCache = Mutex<HashMap<(u16, u16), Arc<rustls::crypto::CryptoProvider>>>;
+
+/// The crypto provider for `group` and `suite`, built once per combination.
+fn provider(group: Option<u16>, suite: Option<u16>) -> Arc<rustls::crypto::CryptoProvider> {
+    static CACHE: OnceLock<ProviderCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (group.unwrap_or(u16::MAX), suite.unwrap_or(u16::MAX));
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(provider) = cache.get(&key) {
+        return provider.clone();
+    }
+    let built = Arc::new(build_provider(group, suite));
+    cache.insert(key, built.clone());
+    built
+}
+
+/// Builds a provider like Xray's REALITY: our groups and suites, narrowed to `dest`'s.
+fn build_provider(group: Option<u16>, suite: Option<u16>) -> rustls::crypto::CryptoProvider {
     let mut provider = rustls::crypto::ring::default_provider();
     provider.kx_groups.insert(0, &X25519_MLKEM768);
     if let Some(g) = group.filter(|&g| provider.kx_groups.iter().any(|k| u16::from(k.name()) == g))
@@ -305,15 +395,7 @@ fn tls_config(group: Option<u16>, suite: Option<u16>) -> Result<ServerConfig> {
             .cipher_suites
             .retain(|cs| u16::from(cs.suite()) == s);
     }
-    let mut cfg = ServerConfig::builder_with_provider(Arc::new(provider))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| Error::config(format!("reality: {e}")))?
-        .with_no_client_auth()
-        .with_cert_resolver(Arc::new(OneCert(None)));
-    // As Xray's REALITY: no tickets, no ALPN, an uncompressed certificate.
-    cfg.send_tls13_tickets = 0;
-    cfg.cert_compressors = Vec::new();
-    Ok(cfg)
+    provider
 }
 
 /// Client randoms of accepted hellos, oldest first.
@@ -339,6 +421,63 @@ impl Seen {
         }
         self.order.push_back((now, random));
         true
+    }
+}
+
+/// Cached answers of `dest` per stable ClientHello shape, and its resolved addresses.
+#[derive(Default)]
+struct ShapeCache {
+    shapes: HashMap<[u8; 32], (Instant, Arc<DestShape>)>,
+    dest_addrs: Option<(Instant, Vec<SocketAddr>)>,
+}
+
+impl ShapeCache {
+    /// The cached shape for `key`, if it is still fresh.
+    fn get(&self, key: &[u8; 32]) -> Option<Arc<DestShape>> {
+        let (at, shape) = self.shapes.get(key)?;
+        (at.elapsed() < SHAPE_TTL).then(|| shape.clone())
+    }
+
+    /// The first cached `dest` address, while it is younger than [`DEST_TTL`].
+    fn fresh_dest_addr(&self) -> Option<SocketAddr> {
+        let (at, addrs) = self.dest_addrs.as_ref()?;
+        if at.elapsed() >= DEST_TTL {
+            return None;
+        }
+        addrs.first().copied()
+    }
+
+    /// Remembers resolved `dest` addresses from now.
+    fn set_dest_addrs(&mut self, addrs: Vec<SocketAddr>) {
+        self.set_dest_addrs_at(Instant::now(), addrs);
+    }
+
+    fn set_dest_addrs_at(&mut self, at: Instant, addrs: Vec<SocketAddr>) {
+        self.dest_addrs = Some((at, addrs));
+    }
+
+    /// Forgets the resolved addresses; the next handshake resolves `dest` again.
+    fn clear_dest_addrs(&mut self) {
+        self.dest_addrs = None;
+    }
+
+    /// Stores `shape`, evicting the oldest insertion when the cache is full.
+    fn insert(&mut self, key: [u8; 32], shape: Arc<DestShape>) {
+        self.insert_at(key, Instant::now(), shape);
+    }
+
+    fn insert_at(&mut self, key: [u8; 32], at: Instant, shape: Arc<DestShape>) {
+        if !self.shapes.contains_key(&key) && self.shapes.len() >= SHAPE_CAP {
+            let oldest = self
+                .shapes
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| *k);
+            if let Some(oldest) = oldest {
+                self.shapes.remove(&oldest);
+            }
+        }
+        self.shapes.insert(key, (at, shape));
     }
 }
 
@@ -482,6 +621,59 @@ struct Hello {
     server_name: Option<String>,
     x25519: Option<[u8; 32]>,
     tls13: bool,
+    /// Offered cipher suites, as sent (2 bytes each).
+    suites: Vec<u8>,
+    /// Payload of `supported_groups` (0x000a).
+    groups: Vec<u8>,
+    /// Payload of `ALPN` (0x0010).
+    alpn: Vec<u8>,
+    /// Group ids in `key_share` (0x0033), in order.
+    share_groups: Vec<u16>,
+}
+
+/// A key over the stable fields of a ClientHello: the ones that decide how `dest`
+/// answers. Volatile bytes (random, session id, key shares) are not part of it.
+fn shape_key(h: &Hello) -> [u8; 32] {
+    fn feed(hash: &mut Sha256, bytes: &[u8]) {
+        sha2::Digest::update(hash, (bytes.len() as u16).to_be_bytes());
+        sha2::Digest::update(hash, bytes);
+    }
+    /// Feeds a list of u16 codes (cipher suites, groups) without its GREASE entries.
+    fn feed_pairs(hash: &mut Sha256, bytes: &[u8]) {
+        let kept: Vec<u8> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter(|c| !is_grease(u16::from_be_bytes(**c)))
+            .flatten()
+            .copied()
+            .collect();
+        feed(hash, &kept);
+    }
+    let mut hash = Sha256::default();
+    let name = h
+        .server_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    feed(&mut hash, name.as_bytes());
+    sha2::Digest::update(&mut hash, [u8::from(h.tls13)]);
+    feed_pairs(&mut hash, &h.suites);
+    feed_pairs(&mut hash, &h.groups);
+    feed(&mut hash, &h.alpn);
+    let mut shares = Vec::with_capacity(h.share_groups.len() * 2);
+    for group in &h.share_groups {
+        shares.extend_from_slice(&group.to_be_bytes());
+    }
+    feed_pairs(&mut hash, &shares);
+    sha2::Digest::finalize(hash).into()
+}
+
+/// RFC 8701 GREASE values (`0x?a?a`): a browser sends one at random in every
+/// ClientHello and peers ignore it, so it must not change the cache key.
+fn is_grease(v: u16) -> bool {
+    let (hi, lo) = ((v >> 8) as u8, v as u8);
+    hi == lo && (hi & 0x0f) == 0x0a
 }
 
 struct Reader<'a>(&'a [u8]);
@@ -510,7 +702,7 @@ fn parse_hello(hs: &[u8]) -> Option<Hello> {
     }
     let session_id = r.take(32)?.try_into().ok()?;
     let n = r.u16()?;
-    r.take(n)?; // cipher suites
+    let suites = r.take(n)?.to_vec(); // cipher suites
     let n = usize::from(r.u8()?);
     r.take(n)?; // compression methods
     let n = r.u16()?;
@@ -521,6 +713,10 @@ fn parse_hello(hs: &[u8]) -> Option<Hello> {
         server_name: None,
         x25519: None,
         tls13: false,
+        suites,
+        groups: Vec::new(),
+        alpn: Vec::new(),
+        share_groups: Vec::new(),
     };
     while !ext.0.is_empty() {
         let kind = ext.u16()?;
@@ -534,6 +730,8 @@ fn parse_hello(hs: &[u8]) -> Option<Hello> {
                     hello.server_name = std::str::from_utf8(d.take(n)?).ok().map(String::from);
                 }
             }
+            0x000a => hello.groups = d.take(n)?.to_vec(),
+            0x0010 => hello.alpn = d.take(n)?.to_vec(),
             0x002b => {
                 let n = usize::from(d.u8()?);
                 hello.tls13 = d.take(n)?.chunks(2).any(|v| v == [3, 4]);
@@ -542,9 +740,10 @@ fn parse_hello(hs: &[u8]) -> Option<Hello> {
                 let n = d.u16()?;
                 let mut shares = Reader(d.take(n)?);
                 while !shares.0.is_empty() {
-                    let group = shares.u16()?;
+                    let group = u16::try_from(shares.u16()?).ok()?;
                     let n = shares.u16()?;
                     let key = shares.take(n)?;
+                    hello.share_groups.push(group);
                     if group == 0x001d && n == 32 {
                         hello.x25519 = key.try_into().ok();
                     }
@@ -565,6 +764,144 @@ mod tests {
         r.extend_from_slice(&(body.len() as u16).to_be_bytes());
         r.extend_from_slice(body);
         r
+    }
+
+    /// A TLS 1.3 ClientHello handshake message with the fields REALITY reads.
+    fn client_hello(
+        name: &str,
+        suites: &[u8],
+        random: [u8; 32],
+        session_id: [u8; 32],
+        share: [u8; 32],
+    ) -> Vec<u8> {
+        let name = name.as_bytes();
+        let entry_len = name.len() + 3;
+        let mut ext = Vec::new();
+        // server_name
+        ext.extend_from_slice(&[0x00, 0x00]);
+        ext.extend_from_slice(&((entry_len + 2) as u16).to_be_bytes());
+        ext.extend_from_slice(&(entry_len as u16).to_be_bytes());
+        ext.push(0);
+        ext.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        ext.extend_from_slice(name);
+        // supported_groups: x25519
+        ext.extend_from_slice(&[0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d]);
+        // ALPN: h2
+        ext.extend_from_slice(&[0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, b'h', b'2']);
+        // supported_versions: TLS 1.3
+        ext.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
+        // key_share: x25519
+        ext.extend_from_slice(&[0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20]);
+        ext.extend_from_slice(&share);
+
+        let mut hs = vec![0x01, 0, 0, 0, 0x03, 0x03];
+        hs.extend_from_slice(&random);
+        hs.push(32);
+        hs.extend_from_slice(&session_id);
+        hs.extend_from_slice(&(suites.len() as u16).to_be_bytes());
+        hs.extend_from_slice(suites);
+        hs.extend_from_slice(&[1, 0]);
+        hs.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        hs.extend_from_slice(&ext);
+        let body_len = hs.len() - 4;
+        hs[1..4].copy_from_slice(&(body_len as u32).to_be_bytes()[1..]);
+        hs
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn shape_key_ignores_volatile_bytes() {
+        let suites = [0x13, 0x01, 0x13, 0x02];
+        let a = client_hello("Example.COM", &suites, [1; 32], [2; 32], [3; 32]);
+        let b = client_hello("example.com", &suites, [9; 32], [8; 32], [7; 32]);
+        let a = shape_key(&parse_hello(&a).unwrap());
+        let b = shape_key(&parse_hello(&b).unwrap());
+        // Client random, session id and key share bytes do not matter; the SNI is
+        // compared case-insensitively.
+        assert_eq!(a, b);
+
+        // A different stable field does change the key.
+        let order = [0x13, 0x02, 0x13, 0x01];
+        let c = client_hello("example.com", &order, [1; 32], [2; 32], [3; 32]);
+        assert_ne!(a, shape_key(&parse_hello(&c).unwrap()));
+        let sni = client_hello("other.example", &suites, [1; 32], [2; 32], [3; 32]);
+        assert_ne!(a, shape_key(&parse_hello(&sni).unwrap()));
+
+        // A browser sends a random GREASE code in every hello; peers ignore it, so
+        // it must not invalidate the cache (measured: Xray/uTLS sends 0xFAFA, 0x5A5A…).
+        let grease = |g: [u8; 2]| {
+            let suites = [g[0], g[1], 0x13, 0x01, 0x13, 0x02];
+            shape_key(&parse_hello(&client_hello("example.com", &suites, [1; 32], [2; 32], [3; 32])).unwrap())
+        };
+        assert_eq!(grease([0xfa, 0xfa]), grease([0x0a, 0x0a]));
+        assert_eq!(grease([0xfa, 0xfa]), a);
+    }
+
+    #[test]
+    fn grease_values() {
+        for g in [0x0a0a, 0x1a1a, 0x2a2a, 0x5a5a, 0xfafa] {
+            assert!(is_grease(g), "{g:#06x}");
+        }
+        for v in [0x1301, 0x001d, 0x11ec, 0x1d1d, 0x0a1a] {
+            assert!(!is_grease(v), "{v:#06x}");
+        }
+    }
+
+    #[test]
+    fn shape_cache_ttl_and_cap() {
+        let shape = || {
+            Arc::new(DestShape {
+                group: 0x001d,
+                suite: 0x1301,
+                records: vec![42],
+            })
+        };
+
+        let mut cache = ShapeCache::default();
+        cache.insert_at([1; 32], Instant::now(), shape());
+        assert!(cache.get(&[1; 32]).is_some());
+        // An entry older than the TTL is not fresh.
+        cache.insert_at(
+            [2; 32],
+            Instant::now() - SHAPE_TTL - Duration::from_secs(1),
+            shape(),
+        );
+        assert!(cache.get(&[2; 32]).is_none());
+
+        let mut cache = ShapeCache::default();
+        let base = Instant::now() - Duration::from_secs(100);
+        for i in 0..SHAPE_CAP as u8 {
+            cache.insert_at([i; 32], base + Duration::from_secs(u64::from(i)), shape());
+        }
+        assert_eq!(cache.shapes.len(), SHAPE_CAP);
+        let newest = [SHAPE_CAP as u8; 32];
+        cache.insert_at(newest, base + Duration::from_secs(100), shape());
+        assert_eq!(cache.shapes.len(), SHAPE_CAP);
+        // The oldest insertion went, the new one stayed.
+        assert!(!cache.shapes.contains_key(&[0; 32]));
+        assert!(cache.shapes.contains_key(&newest));
+    }
+
+    #[test]
+    fn dest_addr_ttl() {
+        let mut cache = ShapeCache::default();
+        assert!(cache.fresh_dest_addr().is_none());
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 443));
+        cache.set_dest_addrs_at(Instant::now(), vec![addr]);
+        assert_eq!(cache.fresh_dest_addr(), Some(addr));
+
+        // Older than the TTL: not used, the next handshake resolves again.
+        cache.set_dest_addrs_at(
+            Instant::now() - DEST_TTL - Duration::from_secs(1),
+            vec![addr],
+        );
+        assert!(cache.fresh_dest_addr().is_none());
+
+        cache.set_dest_addrs(vec![addr]);
+        assert_eq!(cache.fresh_dest_addr(), Some(addr));
+        cache.clear_dest_addrs();
+        assert!(cache.fresh_dest_addr().is_none());
     }
 
     #[test]

@@ -53,14 +53,9 @@ pub struct DestShape {
     pub records: Vec<usize>,
 }
 
-/// Sends `hello` (whole TLS records) to `dest` and reads its first flight; None when
+/// Sends `hello` (whole TLS records) to `addr` and reads its first flight; None when
 /// it cannot be reached, asks for a retry or does not answer in time.
-pub async fn probe(dest: &str, hello: &[u8]) -> Option<DestShape> {
-    let addr = tokio::time::timeout(CONNECT, tokio::net::lookup_host(dest))
-        .await
-        .ok()?
-        .ok()?
-        .next()?;
+pub async fn probe(addr: std::net::SocketAddr, hello: &[u8]) -> Option<DestShape> {
     let dialed = Instant::now();
     let mut tcp = tokio::time::timeout(CONNECT, TcpStream::connect(addr))
         .await
