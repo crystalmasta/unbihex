@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 unbihex-client-core.workspace = true
+unbihex-engine.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 serde.workspace = true
 serde_json.workspace = true

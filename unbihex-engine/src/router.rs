@@ -225,8 +225,8 @@ impl Rule {
             return false;
         }
         if self.has_domain_conditions() {
-            match &s.target.addr {
-                Address::Domain(d)
+            match s.domain() {
+                Some(d)
                     if (!self.domains.is_empty() && self.domains.matches(d))
                         || self.sites.as_ref().is_some_and(|l| l.matches(d)) => {}
                 _ => return false,
@@ -337,6 +337,7 @@ mod tests {
             source: None,
             target: target.parse::<TargetAddr>().unwrap(),
             inbound_tag: inbound.into(),
+            sniffed: None,
         }
     }
 
@@ -407,6 +408,22 @@ mod tests {
             ("direct", true)
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sniffed_names_match_domain_rules() {
+        let r = router(
+            r#"[{"domain_suffix":["youtube.com"],"outbound":"direct"},
+                {"ip_cidr":["10.0.0.0/8"],"outbound":"block"}]"#,
+        );
+        let mut s = sess("142.250.1.1:443", Network::Tcp, "in");
+        assert_eq!(r.pick(&s), "proxy");
+        s.sniffed = Some("www.youtube.com".into());
+        assert_eq!(r.pick(&s), "direct");
+        // IP rules still see the real address.
+        let mut s = sess("10.1.2.3:443", Network::Tcp, "in");
+        s.sniffed = Some("intranet.example".into());
+        assert_eq!(r.pick(&s), "block");
     }
 
     #[test]

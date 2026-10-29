@@ -3,7 +3,8 @@
 //! Every socket Unbihex opens to the outside world (proxy servers, direct
 //! connections, DNS upstreams) is created here and pinned to the physical
 //! interface (desktop) or passed to `VpnService.protect` (Android) before
-//! `connect`/`bind`.
+//! `connect`/`bind`. On Linux the socket can also carry a mark (`SO_MARK`)
+//! for policy routing.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -32,6 +33,7 @@ pub struct InterfaceBinding {
 pub struct SocketFactory {
     binding: Option<InterfaceBinding>,
     protect: Option<ProtectFn>,
+    mark: Option<u32>,
 }
 
 impl std::fmt::Debug for SocketFactory {
@@ -39,6 +41,7 @@ impl std::fmt::Debug for SocketFactory {
         f.debug_struct("SocketFactory")
             .field("binding", &self.binding)
             .field("protect", &self.protect.is_some())
+            .field("mark", &self.mark)
             .finish()
     }
 }
@@ -46,7 +49,17 @@ impl std::fmt::Debug for SocketFactory {
 impl SocketFactory {
     /// Creates a factory; both arguments are optional.
     pub fn new(binding: Option<InterfaceBinding>, protect: Option<ProtectFn>) -> Self {
-        SocketFactory { binding, protect }
+        SocketFactory {
+            binding,
+            protect,
+            mark: None,
+        }
+    }
+
+    /// Linux: marks every socket with `SO_MARK` (needs `CAP_NET_ADMIN`).
+    pub fn with_mark(mut self, mark: Option<u32>) -> Self {
+        self.mark = mark;
+        self
     }
 
     /// The interface sockets are bound to.
@@ -124,8 +137,37 @@ impl SocketFactory {
                 Error::Platform(format!("cannot bind socket to interface {}: {e}", b.name))
             })?;
         }
+        if let Some(mark) = self.mark {
+            set_mark(sock, mark)
+                .map_err(|e| Error::Platform(format!("cannot set socket mark {mark}: {e}")))?;
+        }
         Ok(())
     }
+}
+
+/// Looks up an interface by name (on Windows also by its friendly name).
+pub fn find_interface(name: &str) -> Result<InterfaceBinding> {
+    netdev::get_interfaces()
+        .into_iter()
+        .find(|i| i.name == name || i.friendly_name.as_deref() == Some(name))
+        .map(|i| InterfaceBinding {
+            name: i.name,
+            index: i.index,
+        })
+        .ok_or_else(|| Error::config(format!("no network interface {name:?}")))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn set_mark(sock: &Socket, mark: u32) -> io::Result<()> {
+    sock.set_mark(mark)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn set_mark(_sock: &Socket, _mark: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "socket marks are supported on Linux only",
+    ))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

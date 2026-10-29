@@ -29,7 +29,7 @@ netdev = "0.46"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-windows-sys = { version = "0.61", features = ["Win32_Networking_WinInet", "Win32_UI_Shell", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_NetworkManagement_IpHelper", "Win32_System_IO"] }
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinInet", "Win32_UI_Shell", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_NetworkManagement_IpHelper", "Win32_System_IO", "Win32_NetworkManagement_WindowsFirewall", "Win32_Security"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }

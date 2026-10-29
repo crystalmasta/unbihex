@@ -72,14 +72,16 @@ impl DefaultRule {
             return false;
         }
         if self.has_destination() {
-            let hit = match &s.target.addr {
-                Address::Domain(d) => {
-                    self.domains.as_ref().is_some_and(|m| m.matches(d))
-                        || self.keywords.iter().any(|k| d.contains(k.as_str()))
-                        || self.regexes.iter().any(|r| r.is_match(d))
-                }
-                Address::Ip(ip) => self.ips.as_ref().is_some_and(|set| set.contains(*ip)),
-            };
+            let by_name = s.domain().is_some_and(|d| {
+                self.domains.as_ref().is_some_and(|m| m.matches(d))
+                    || self.keywords.iter().any(|k| d.contains(k.as_str()))
+                    || self.regexes.iter().any(|r| r.is_match(d))
+            });
+            let hit = by_name
+                || match &s.target.addr {
+                    Address::Ip(ip) => self.ips.as_ref().is_some_and(|set| set.contains(*ip)),
+                    Address::Domain(_) => false,
+                };
             if !hit {
                 return false;
             }
@@ -420,6 +422,7 @@ pub(crate) mod tests {
             source: None,
             target: target.parse().unwrap(),
             inbound_tag: "t".into(),
+            sniffed: None,
         }
     }
 

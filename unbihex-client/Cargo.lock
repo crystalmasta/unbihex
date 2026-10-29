@@ -5287,6 +5287,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unbihex-client-core",
+ "unbihex-engine",
  "uuid",
 ]
 

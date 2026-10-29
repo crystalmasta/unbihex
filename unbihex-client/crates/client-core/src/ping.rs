@@ -94,6 +94,7 @@ async fn http_delay(server: &Server, env: &PingEnv, method: &str) -> Result<Dura
         source: None,
         target,
         inbound_tag: "ping".into(),
+        sniffed: None,
     };
     // The first test also pays for DNS of the server; measure from here.
     let start = Instant::now();

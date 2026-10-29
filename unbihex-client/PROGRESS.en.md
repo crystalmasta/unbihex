@@ -122,6 +122,22 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   - gRPC API on loopback only; open proxies outside loopback refused;
   - LAN password of at least 8 characters; tokio 1.54.1, lru 0.19.
 
+## 29.10 — a clean tunnel for routers and servers
+- Engine: `route.default_interface` and `route.default_mark` (`SO_MARK`, Linux only) for every outgoing socket, as in sing-box.
+- Client: a "TUN without routes" setting (`tun_routes`), the TUN name, the interface and the mark; without routes
+  the client changes neither the system's routes nor its DNS.
+- `unbihex-cli`: `connect --no-routes / --tun-name / --interface / --mark`, `settings`,
+  `run -c` and `check -c` for an engine config without subscriptions (SIGHUP reloads the file).
+
+## 29.10 — rules with AdGuard and DoH, Windows
+- Engine: sniffing in the TUN. The name from the TLS SNI or HTTP `Host` of connections to real IPs, for rules only;
+  the connection goes to the original IP. Before, with AdGuard, an antivirus or browser DoH, domain rules did not
+  apply: in the "Only listed" and "Only blocked" modes those sites went direct (issue #2).
+- Windows: an "Allow the proxy to Microsoft Store apps" button (loopback exemptions through the firewall API; undo
+  removes only ours). A log warning when, after connecting, Windows still sends traffic past the TUN.
+- A window closed to the tray is destroyed together with WebView2: ~6 MB in the background instead of ~210 MB.
+- JSON subscriptions: all servers of a balancer (`routing.balancers`, prefix selectors) are listed, not just `proxy`.
+
 ## Next
 1. Runs with real panels: their configs, API, stats, restarts.
 3. Fuzzing and benchmarks, the engine README as an SDK.

@@ -147,6 +147,7 @@ function renderHome() {
   $("#mode-hint").textContent = MODE_HINTS[set.mode] || "";
   $("#admin-warn").hidden = !(set.mode === "tun" && !S.is_admin && !S.mobile);
   $("#relaunch-admin").hidden = S.platform !== "windows";
+  $("#store-apps").hidden = !(S.platform === "windows" && set.mode === "system_proxy");
   $$("#routing-seg button").forEach((b) => b.classList.toggle("active", b.dataset.routing === set.routing));
   $("#routing-hint").textContent = ROUTING_HINTS[set.routing] || "";
 
@@ -501,6 +502,17 @@ function bind() {
     }),
   );
   $("#relaunch-admin").addEventListener("click", () => call("relaunch_admin").catch(() => {}));
+  // Needs administrator rights; without them the error explains it.
+  $("#store-allow").addEventListener("click", () =>
+    call("store_apps_loopback", { allow: true })
+      .then((n) => toast(n ? `Прокси разрешён приложениям из Store: ${n}` : "Всем приложениям из Store прокси уже разрешён", "ok"))
+      .catch(() => {}),
+  );
+  $("#store-undo").addEventListener("click", () =>
+    call("store_apps_loopback", { allow: false })
+      .then((n) => toast(`Отменено для приложений: ${n}`, "ok"))
+      .catch(() => {}),
+  );
 
   document.addEventListener("click", (e) => {
     const t = e.target.closest("[data-open],[data-goto],[data-server],[data-del-server],[data-toggle-group],[data-update-sub],[data-edit-sub],[data-href]");

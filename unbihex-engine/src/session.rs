@@ -32,4 +32,15 @@ pub struct Session {
     pub target: TargetAddr,
     /// Tag of the inbound that accepted the session.
     pub inbound_tag: String,
+    /// TUN: the name read from the first bytes (TLS SNI or HTTP `Host`) of a
+    /// connection to a real IP. Only rules see it; the connection still goes to
+    /// the IP in `target` (like Xray's `routeOnly`).
+    pub sniffed: Option<String>,
+}
+
+impl Session {
+    /// The destination name for domain rules: the target's own, else the sniffed one.
+    pub fn domain(&self) -> Option<&str> {
+        self.target.addr.as_domain().or(self.sniffed.as_deref())
+    }
 }

@@ -199,6 +199,15 @@ pub struct Settings {
     pub dns_upstream: Vec<String>,
     /// TUN MTU.
     pub mtu: u16,
+    /// TUN mode: route all traffic of the machine into the TUN and point the system
+    /// DNS at it. Off: only the interface comes up, routing is the admin's (routers, servers).
+    pub tun_routes: bool,
+    /// Desktop TUN interface name.
+    pub tun_name: String,
+    /// Interface the engine's own connections are bound to; `None` picks the uplink in TUN mode.
+    pub default_interface: Option<String>,
+    /// Linux: `SO_MARK` of the engine's own connections, for `ip rule fwmark` policy routing.
+    pub default_mark: Option<u32>,
     /// User-Agent for subscription requests.
     pub user_agent: String,
     /// Send `x-hwid` and device headers (needed by panels with device limits).
@@ -247,6 +256,10 @@ impl Default for Settings {
             lan_password: Uuid::new_v4().simple().to_string(),
             dns_upstream: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             mtu: 1500,
+            tun_routes: true,
+            tun_name: crate::plan::TUN_NAME.into(),
+            default_interface: None,
+            default_mark: None,
             user_agent: DEFAULT_USER_AGENT.into(),
             send_hwid: true,
             hwid: Uuid::new_v4().simple().to_string(),

@@ -163,6 +163,7 @@ impl DnsServer {
                 source: None,
                 target: (*server).into(),
                 inbound_tag: tag.to_string(),
+                sniffed: None,
             };
             match tokio::time::timeout(ROUTED_TIMEOUT, routed_exchange(d, sess, msg, &wire)).await {
                 Ok(Ok(r)) => return Ok(with_id(&r, msg.metadata.id)),

@@ -119,6 +119,28 @@ unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-l
 captures all traffic of the machine (needs root, `ip` and `resolvectl`), `system` is the proxy plus GNOME's settings.
 Data lives in `~/.config/unbihex-cli` (or `--dir`, `$UNBIHEX_DIR`).
 
+### A router or a server: a clean tunnel
+
+`connect --mode tun --no-routes` brings up `unbihex0` and changes nothing else: routes, `ip rule` and DNS stay
+yours. More options: `--tun-name`, `--interface <name>` (the interface the engine's own connections are bound to),
+`--mark <n>` (`SO_MARK` on them, for `ip rule fwmark`). The options are saved, `--routes` brings back the usual
+mode, and `unbihex-cli settings` shows them.
+
+A router example: LAN traffic goes into the tunnel, the router itself works as before.
+
+```text
+sudo unbihex-cli connect --mode tun --no-routes --mark 255
+ip route add default dev unbihex0 table 100
+ip rule add iif br-lan lookup 100        # or "not fwmark 255 lookup 100": everything but the engine
+sysctl -w net.ipv4.ip_forward=1
+```
+
+For domain rules to work, send DNS into the tunnel: `server=10.199.233.2` in dnsmasq.
+
+`unbihex-cli run -c config.json` runs an engine config as it is (the format is in `unbihex-engine/SPEC.en.md`, §5),
+without subscriptions and the data folder. This mode never touches routes or DNS; SIGHUP reloads the file, and
+`check -c` validates a config.
+
 Building for Linux from Windows: `cargo zigbuild --release -p unbihex-cli --target x86_64-unknown-linux-musl`
 (needs [zig](https://ziglang.org) and `cargo install cargo-zigbuild`); on Linux itself, `cargo build --release -p unbihex-cli`.
 
@@ -142,6 +164,13 @@ Building for Linux from Windows: `cargo zigbuild --release -p unbihex-cli --targ
 TUN mode needs administrator rights; the app has a "Restart as administrator" button. A known Windows limitation:
 the system may query the DNS of other adapters in parallel (Smart Multi-Homed Name Resolution), so for full
 protection against DNS leaks use TUN rather than the system proxy.
+
+Windows does not let Microsoft Store apps (WhatsApp, Mail, Xbox and others) reach a proxy on `127.0.0.1`. The
+"System proxy" mode has an "Allow them the proxy" button (needs administrator rights); "Undo" removes only what
+Unbihex added. TUN mode does not need it.
+
+When AdGuard (not its VPN), an antivirus or browser DoH handles DNS, apps connect to real IPs. The engine then
+takes the site name from TLS (SNI) or HTTP (`Host`), so domain rules keep working.
 
 Checks:
 ```

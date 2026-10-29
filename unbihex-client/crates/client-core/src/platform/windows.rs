@@ -1,6 +1,7 @@
 //! Windows: `netsh`/`route` for the TUN, registry Internet Settings for the system proxy.
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
 
 use ipnet::Ipv4Net;
 use unbihex_engine::TunInfo;
@@ -181,7 +182,33 @@ pub(super) fn apply_routes(
     })?;
     // Flush cached real answers so apps ask the fake DNS.
     let _ = Cmd::new("ipconfig", ["/flushdns"]).run();
+    check_best_interface(tun.index);
     Ok(())
+}
+
+/// Warns when Windows would still send Internet traffic past the TUN: another
+/// VPN's half routes (OpenVPN's `def1`) or a lower metric win over ours, and then
+/// neither the tunnel nor the rules apply.
+#[allow(unsafe_code)]
+fn check_best_interface(tun_index: u32) {
+    use windows_sys::Win32::NetworkManagement::IpHelper::GetBestInterface;
+    // A documentation address (TEST-NET-2): routed like any public IP, never a proxy server.
+    let probe = u32::from_ne_bytes([198, 51, 100, 1]);
+    let mut best = 0u32;
+    // SAFETY: `best` is a valid out-pointer; the address is in network byte order.
+    let rc = unsafe { GetBestInterface(probe, &mut best) };
+    if rc != 0 || best == tun_index {
+        return;
+    }
+    let name = netdev::get_interfaces()
+        .into_iter()
+        .find(|i| i.index == best)
+        .map(|i| i.friendly_name.unwrap_or(i.name))
+        .unwrap_or_else(|| best.to_string());
+    tracing::warn!(
+        "Windows routes Internet traffic through {name}, not the TUN: another VPN's routes \
+         or metrics take precedence; turn it off"
+    );
 }
 
 /// Writes the NRPT rule for the root namespace. The key is volatile, so a rule
@@ -292,4 +319,101 @@ fn notify_settings_changed() {
         InternetSetOptionW(std::ptr::null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, std::ptr::null(), 0);
         InternetSetOptionW(std::ptr::null_mut(), INTERNET_OPTION_REFRESH, std::ptr::null(), 0);
     }
+}
+
+/// SIDs of the app containers this client exempted, so undoing touches no others.
+const LOOPBACK_JOURNAL: &str = "loopback-exempt.json";
+
+/// Microsoft Store (UWP) apps may not connect to 127.0.0.1, so the system proxy
+/// does not work for them. `allow`: exempts every app container from loopback
+/// isolation (what `CheckNetIsolation LoopbackExempt -a` does one app at a time);
+/// otherwise removes only the exemptions added here. Needs administrator rights.
+/// Returns how many apps changed.
+#[allow(unsafe_code)]
+pub(super) fn store_apps_loopback(dir: &Path, allow: bool) -> Result<usize> {
+    use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
+        INET_FIREWALL_APP_CONTAINER, NetworkIsolationEnumAppContainers, NetworkIsolationFreeAppContainers,
+        NetworkIsolationGetAppContainerConfig, NetworkIsolationSetAppContainerConfig,
+    };
+    use windows_sys::Win32::Security::{GetLengthSid, SID_AND_ATTRIBUTES};
+
+    /// Copies a SID out of memory owned by the system.
+    ///
+    /// SAFETY: `sid` must point to a valid SID.
+    unsafe fn sid_bytes(sid: *mut core::ffi::c_void) -> Vec<u8> {
+        // SAFETY: a valid SID is GetLengthSid bytes long.
+        unsafe {
+            let n = GetLengthSid(sid) as usize;
+            std::slice::from_raw_parts(sid.cast::<u8>(), n).to_vec()
+        }
+    }
+    let fail = |what: &str, rc: u32| {
+        if rc == 5 {
+            ClientError::platform("нужны права администратора: «Перезапустить от администратора»")
+        } else {
+            ClientError::platform(format!("{what}: ошибка {rc}"))
+        }
+    };
+
+    let mut count = 0u32;
+    let mut current: *mut SID_AND_ATTRIBUTES = std::ptr::null_mut();
+    // SAFETY: both out-pointers are valid; the array is read below and, as its owner
+    // is not documented, left alone (a few hundred bytes per call).
+    let rc = unsafe { NetworkIsolationGetAppContainerConfig(&mut count, &mut current) };
+    if rc != 0 {
+        return Err(fail("NetworkIsolationGetAppContainerConfig", rc));
+    }
+    let mut exempt: Vec<Vec<u8>> = (0..count as usize)
+        // SAFETY: the system returned `count` entries, each with a valid SID.
+        .map(|i| unsafe { sid_bytes((*current.add(i)).Sid) })
+        .collect();
+
+    let journal = dir.join(LOOPBACK_JOURNAL);
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let mut ours: Vec<String> = std::fs::read(&journal)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let changed = if allow {
+        let mut n = 0u32;
+        let mut apps: *mut INET_FIREWALL_APP_CONTAINER = std::ptr::null_mut();
+        // SAFETY: both out-pointers are valid; the array is freed below.
+        let rc = unsafe { NetworkIsolationEnumAppContainers(0, &mut n, &mut apps) };
+        if rc != 0 {
+            return Err(fail("NetworkIsolationEnumAppContainers", rc));
+        }
+        let all: Vec<Vec<u8>> = (0..n as usize)
+            // SAFETY: the system returned `n` entries, each with a valid SID.
+            .map(|i| unsafe { sid_bytes((*apps.add(i)).appContainerSid.cast()) })
+            .collect();
+        // SAFETY: `apps` came from NetworkIsolationEnumAppContainers.
+        unsafe { NetworkIsolationFreeAppContainers(apps) };
+        let added: Vec<Vec<u8>> = all.into_iter().filter(|s| !exempt.contains(s)).collect();
+        ours.extend(added.iter().map(|s| hex(s)));
+        let k = added.len();
+        exempt.extend(added);
+        k
+    } else {
+        let before = exempt.len();
+        exempt.retain(|s| !ours.contains(&hex(s)));
+        ours.clear();
+        before - exempt.len()
+    };
+    if changed > 0 {
+        let list: Vec<SID_AND_ATTRIBUTES> = exempt
+            .iter()
+            .map(|s| SID_AND_ATTRIBUTES {
+                Sid: s.as_ptr().cast_mut().cast(),
+                Attributes: 0,
+            })
+            .collect();
+        let len = u32::try_from(list.len()).unwrap_or(u32::MAX);
+        // SAFETY: `list` and the SID buffers it points to outlive the call.
+        let rc = unsafe { NetworkIsolationSetAppContainerConfig(len, list.as_ptr()) };
+        if rc != 0 {
+            return Err(fail("NetworkIsolationSetAppContainerConfig", rc));
+        }
+    }
+    std::fs::write(&journal, serde_json::to_vec(&ours)?)?;
+    Ok(changed)
 }

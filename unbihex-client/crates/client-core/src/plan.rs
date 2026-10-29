@@ -284,11 +284,12 @@ pub fn build_config_json(
             "mtu": settings.mtu.clamp(1280, 9000),
             "ipv4": format!("{TUN_ADDRESS}/{TUN_PREFIX}"),
             "ipv6": format!("{TUN_ADDRESS6}/{TUN_PREFIX6}"),
-            "auto_route": target == Target::DesktopTun,
+            "auto_route": target == Target::DesktopTun && settings.tun_routes,
             "dns_hijack": true,
         });
         if target == Target::DesktopTun {
-            tun["name"] = json!(TUN_NAME);
+            let name = settings.tun_name.trim();
+            tun["name"] = json!(if name.is_empty() { TUN_NAME } else { name });
         }
         inbounds.push(tun);
     }
@@ -314,6 +315,15 @@ pub fn build_config_json(
     let (rules, final_outbound) = routing_rules(settings, geo, target)?;
     let uses = |field: &str| rules.iter().any(|r| r.get(field).is_some());
     let mut route = json!({ "rules": rules, "final": final_outbound });
+    // Android protects its sockets through the VPN service instead.
+    if target != Target::Mobile {
+        if let Some(i) = settings.default_interface.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+            route["default_interface"] = json!(i);
+        }
+        if let Some(m) = settings.default_mark {
+            route["default_mark"] = json!(m);
+        }
+    }
     if uses("geosite")
         && let Some(p) = &geo.geosite
     {
@@ -386,6 +396,26 @@ mod tests {
         assert_eq!(cfg.inbounds[0].tag(), "socks-in");
         assert!(matches!(&cfg.inbounds[1], InboundConfig::Http(h) if h.listen.port() == 10809));
         assert_eq!(cfg.dns.upstream[0].to_string(), "1.1.1.1:53");
+    }
+
+    #[test]
+    fn a_clean_tunnel_leaves_routing_alone() {
+        let s = Settings {
+            tun_routes: false,
+            tun_name: "utun-vpn".into(),
+            default_interface: Some("eth1".into()),
+            ..Settings::default()
+        };
+        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopTun).unwrap();
+        let tun = cfg.tun().unwrap();
+        assert!(!tun.auto_route);
+        assert_eq!(tun.name.as_deref(), Some("utun-vpn"));
+        assert_eq!(cfg.route.default_interface.as_deref(), Some("eth1"));
+        let cfg = build_config(&server(), &s, &Geo::default(), Target::Mobile).unwrap();
+        assert_eq!(cfg.route.default_interface, None);
+        let cfg = build_config(&server(), &Settings::default(), &Geo::default(), Target::DesktopTun).unwrap();
+        assert!(cfg.tun().unwrap().auto_route);
+        assert_eq!(cfg.route.default_interface, None);
     }
 
     #[test]

@@ -214,6 +214,7 @@ pub(super) async fn handshake(
         source: Some(peer),
         target,
         inbound_tag: cfg.tag.clone(),
+        sniffed: None,
     };
 
     if head.method.eq_ignore_ascii_case("CONNECT") {

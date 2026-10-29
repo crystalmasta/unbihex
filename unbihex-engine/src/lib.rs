@@ -20,6 +20,7 @@ pub mod rules;
 pub mod server;
 /// Sessions passed from inbounds to the dispatcher.
 pub mod session;
+pub mod sniff;
 pub mod stats;
 
 use std::net::IpAddr;
@@ -77,7 +78,10 @@ pub struct Instance {
 
 /// The parts of a config that a hot reload cannot change.
 fn fixed_part(c: &Config) -> String {
-    format!("{:?}|{:?}|{:?}", c.inbounds, c.dns, c.limits)
+    format!(
+        "{:?}|{:?}|{:?}|{:?}|{:?}",
+        c.inbounds, c.dns, c.limits, c.route.default_interface, c.route.default_mark
+    )
 }
 
 async fn build_outbounds(
@@ -105,10 +109,13 @@ impl Instance {
     /// Validates `config`, builds outbounds and starts every inbound.
     pub async fn start(config: Config, hooks: PlatformHooks) -> Result<Instance> {
         config.validate()?;
-        let sockets = Arc::new(SocketFactory::new(
-            hooks.bind_interface.clone(),
-            hooks.protect.clone(),
-        ));
+        let binding = match &config.route.default_interface {
+            Some(name) => Some(net::find_interface(name)?),
+            None => hooks.bind_interface.clone(),
+        };
+        let sockets = Arc::new(
+            SocketFactory::new(binding, hooks.protect.clone()).with_mark(config.route.default_mark),
+        );
         let tun_cfg = config.tun().cloned();
         let mobile = hooks.tun_fd.is_some();
         if mobile && tun_cfg.is_none() {
