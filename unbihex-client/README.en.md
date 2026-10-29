@@ -119,6 +119,13 @@ unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-l
 captures all traffic of the machine (needs root, `ip` and `resolvectl`), `system` is the proxy plus GNOME's settings.
 Data lives in `~/.config/unbihex-cli` (or `--dir`, `$UNBIHEX_DIR`).
 
+**Full-screen menu.** `unbihex-cli` without a command in a terminal (or `unbihex-cli tui`) opens a btop-like menu:
+servers with their ping, the connection state, download and upload speed graphs, traffic through the VPN and direct,
+the log. Keys: `↑↓` pick a server, `Enter` connects (or switches on the fly) and disconnects, `p` ping, `u` update
+subscriptions, `a` add a link or subscription (pasting works), `m` mode (proxy → TUN → system proxy), `r` routing,
+`d` disconnect, `q` quit. The engine runs inside the menu, so quitting disconnects. For TUN start the menu with
+`sudo`; over SSH it first warns that the session may drop. The menu's labels are in Russian.
+
 ### A NAS (QNAP, Synology) or a home server
 
 The Linux binaries are static: they run on x86_64, ARM64 and ARMv7 NAS devices, over SSH as well as in Docker

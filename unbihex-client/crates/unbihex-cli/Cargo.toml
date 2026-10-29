@@ -21,6 +21,8 @@ serde_json.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
+# The full-screen menu (`unbihex-cli` in a terminal, `unbihex-cli tui`).
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
 [lints.rust]
 unsafe_code = "deny"

@@ -100,6 +100,13 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - Tunnel sockets: `TCP_NODELAY` and 4 MiB buffers (`SO_RCVBUF`/`SO_SNDBUF`) on outgoing and accepted connections.
 - These changes are by Pavel Shakhmin (github.com/pshakhmin), PR #18.
 
+## 30.10 — a full-screen menu in unbihex-cli
+- `unbihex-cli` without a command in a terminal (or `unbihex-cli tui`) opens a btop-like ratatui menu: servers with
+  their ping (filled in as answers come), connecting and switching on the fly, mode and routing from the keyboard,
+  speed graphs, traffic through the VPN and direct, the log (engine logs go there instead of the screen).
+- Links and subscriptions are added in a popup line; pasting works over SSH too.
+- TUN over SSH: the first Enter only warns that the session may drop.
+
 ## Next
 1. Fuzzing and benchmarks, the engine README as an SDK.
 2. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).
