@@ -4,6 +4,7 @@
 
 > This is the original MVP specification (0.1). Since then the engine has gained much of what is listed below as
 > "non-goals": REALITY, XTLS Vision, XHTTP, XUDP (mux), geosite/geoip and `.srs` databases, hot reload, a mixed inbound.
+> For tests and measurements there is a test server, described in §17.
 > The layout in §2 is the original plan; the engine is now a single `unbihex-engine` crate.
 > What has been done is in [`../unbihex-client/PROGRESS.en.md`](../unbihex-client/PROGRESS.en.md).
 
@@ -253,7 +254,7 @@ If any step fails, undo what has been done and return the error.
 - All domains in the config are converted to ASCII lowercase through IDNA (`рф` → `xn--p1ai`).
 - If the target is an IP address, domain conditions are false. If the target is a domain, IP conditions are false on the first pick.
 - If `direct` is picked, the target is a domain and the decision was not made by a domain rule, the Dispatcher resolves the domain itself (with the same resolver as direct) and runs the rules again for each address (like IPIfNonMatch in Xray). If any address hits `block`, the session is blocked; if the first address leads to the proxy, the session goes to the proxy with the domain; otherwise direct connects only to the checked addresses (without resolving again, so that DNS rebinding cannot bypass the check). Sessions picked for the proxy are never resolved locally: that would leak the name to the local DNS.
-- DNS rebinding protection: when a direct session with a domain gets private addresses (`ip_private`), they are dropped, whatever rule picked the session. With no addresses left the session is blocked. Exceptions: single-label names, `localhost`, and the suffixes in `dns.fakeip_exclude` and `dns.allow_private_answers`.
+- DNS rebinding protection: when a direct session with a domain gets private addresses (`ip_private`), they are dropped, whatever rule picked the session. With no addresses left the session is blocked. Exceptions: single-label names, `localhost`, and the suffixes in `dns.fakeip_exclude` and `dns.allow_private_answers`. On the test server (with a VLESS inbound) the only exceptions are `dns.allow_private_answers`: a server has no LAN of its own, and `metadata` or `metadata.google.internal` lead to the cloud's metadata service.
 - Direct does not connect to the engine's own listen addresses (a loop), nor to the host's loopback addresses (127/8, ::1, 0.0.0.0, ::) when the client is not on this host (the source is not loopback and the inbound is not TUN).
 - `ip_private` covers: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, 100.64/10, 224/4, 255.255.255.255/32, ::1/128, fc00::/7, fe80::/10, ff00::/8.
 - Performance: keep suffixes in a `HashSet` and check them label by label from the right; CIDRs in a sorted list. A test with 10,000 rules must perform 100,000 matches in under 1 s in release.
@@ -608,3 +609,71 @@ On Android the recommended loop protection is `VpnService.Builder.addDisallowedA
 - `cargo test --workspace` green on Windows/Linux/macOS;
 - `cargo clippy --workspace --all-targets -- -D warnings` clean;
 - `unbihex run --link vless://...` on Windows/Linux/macOS sends browser traffic through the server, and after Ctrl-C the routes and DNS are restored.
+
+---
+
+## 17. Test server (feature `server`)
+
+> The server is for tests and measurements: run your own client ↔ server pair and watch how traffic gets through.
+> It is not a server for users: it has no management API, no live user changes, no per-user traffic statistics
+> and no panel config formats.
+
+The protocol code lives in `unbihex-engine` behind the `server` feature: the VLESS inbound (`inbound/vless.rs`),
+server-side TLS and REALITY (`inbound/reality.rs`, `inbound/reality_shape.rs`), Mux.Cool / XUDP (`inbound/mux.rs`).
+The process and the CLI live in the `test_server` crate (binary `test_server`, version 0.0.1). Client builds are
+compiled without the `server` feature and do not contain this code.
+
+### 17.1 VLESS inbound
+
+```json
+{ "type": "vless", "tag": "vless-in", "listen": "0.0.0.0:443",
+  "users": [ { "id": "6f1d7e2a-3b4c-4d5e-8f60-718293a4b5c6", "email": "alice", "flow": "xtls-rprx-vision" } ],
+  "tls": { "certificate_file": "/etc/test_server/fullchain.pem", "key_file": "/etc/test_server/privkey.pem" } }
+```
+
+- Exactly one of `tls` and `reality` is set. VLESS without encryption is not supported on the server.
+- `users` is not empty; `id` is a UUID and may not repeat; `flow` is `""`, `xtls-rprx-vision` or `xtls-rprx-vision-udp443`,
+  and any other value is an `Unsupported` error. `email` names the user in logs.
+- `tls`: the certificate chain and key in PEM, plus `alpn` (default `h2`, `http/1.1`, as in Xray). The server supports
+  the X25519MLKEM768 key exchange.
+- `reality` (the counterpart of Xray's `realitySettings`):
+
+  | Field | Meaning |
+  |---|---|
+  | `dest` | the site the server impersonates, `host:port` |
+  | `server_names` | allowed SNI values, not empty |
+  | `private_key` | X25519, base64url (`test_server x25519`) |
+  | `short_ids` | hex, up to 16 characters; `""` is the all-zero ID; not empty |
+  | `max_time_diff_ms` | allowed client clock difference; 0 or absent means 120,000 (unlike Xray, the check cannot be turned off) |
+
+  A client without the key (a scanner, a browser) is forwarded to `dest` untouched and sees the real site.
+- Replay: the `client_random` of accepted hellos is remembered for twice the `max_time_diff_ms` window. A replayed
+  hello (one a censor recorded) goes to `dest`, like a stranger's.
+- Handshake sizes like `dest`'s: for our client the server, as Xray, sends the same ClientHello to `dest` and reads
+  the answer. It answers with the same key exchange group and cipher suite, so the ServerHello has the same length.
+  It re-frames its EncryptedExtensions…Finished into records of `dest`'s lengths with TLS 1.3 padding
+  (RFC 8446 §5.4) (`inbound/reality_shape.rs`). `dest`'s answer ends at a pause, at a record boundary, of a quarter of its TCP connect time (2–15 ms); a record still arriving is always waited for.
+  If `dest` does not answer within 3 s, the records keep rustls's sizes. `dest`'s answer is cached for 10 minutes by the stable ClientHello fields (SNI, cipher suites, groups, ALPN, key_share groups; GREASE ignored), its addresses for 5 minutes; a failed probe is not cached. Clock skew and replays are logged at info.
+- Users come from the config only: the test server cannot change them live or count traffic per user.
+- Vision follows Xray's rules: a user whose `flow` is Vision must use it.
+- UDP: the VLESS UDP command and Mux.Cool / XUDP.
+- Accepted connections go to the same `Dispatcher` (§7): routing, DNS and outbounds are shared with the client.
+
+### 17.2 CLI
+
+```text
+test_server run -c <config.json | stdin:>   run until Ctrl-C / SIGTERM
+test_server check -c <config.json>          validate the config
+test_server uuid [-i text]                  a random UUID, or the UUIDv5 of the text (as Xray)
+test_server x25519 [-i key]                 a REALITY key pair, or the public key of a private one
+test_server version
+```
+
+The config is the engine's own JSON (§5) with a `vless` inbound, nothing else.
+
+### 17.3 Tests
+
+All on `127.0.0.1`, our client against our server (`test_server/tests/`):
+- TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users;
+- REALITY with Vision and the Chrome fingerprint, a fragmented ClientHello, one `dest` probe per ClientHello shape;
+- what strangers see: the real site over TLS and HTTP.

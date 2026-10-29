@@ -1,0 +1,46 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "0.0.0.0:443",
+      "users": [
+        {
+          "id": "6f1d7e2a-3b4c-4d5e-8f60-718293a4b5c6",
+          "email": "vision",
+          "flow": "xtls-rprx-vision"
+        },
+        {
+          "id": "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9",
+          "email": "plain"
+        }
+      ],
+      "tls": {
+        "certificate_file": "/etc/test_server/fullchain.pem",
+        "key_file": "/etc/test_server/privkey.pem"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "ip_private": true,
+        "outbound": "block"
+      }
+    ],
+    "final": "direct"
+  }
+}

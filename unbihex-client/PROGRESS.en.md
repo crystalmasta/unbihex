@@ -108,6 +108,11 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - TUN over SSH: the first Enter only warns that the session may drop.
 - Two console client builds: `unbihex-cli` without the menu (routers, NAS, scripts) and `unbihex-cli-tui` with it (feature `tui`).
 
+## 30.10 — the test server, test_server 0.0.1
+- The VLESS server is back, for tests and measurements only: TLS, REALITY (with the `dest` answer cache from PR #18),
+  Vision, UDP, Mux / XUDP. The `test_server` crate: `run -c`, `check -c`, `uuid`, `x25519`, `version`, the engine's JSON config.
+- Not there and not planned: a management API, live users, per-user traffic statistics, panel configs.
+
 ## Next
 1. Fuzzing and benchmarks, the engine README as an SDK.
 2. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).

@@ -13,6 +13,9 @@ homepage = "https://github.com/crystalmasta"
 default = []
 # Exposes test-only helpers (custom TLS roots) to integration tests.
 test-util = []
+# Test server role: the VLESS / REALITY inbound (the binary is ../test_server). No user
+# management or per-user statistics. Client builds leave it off.
+server = []
 
 [dependencies]
 # src/adapter.rs (bridge to the old client, now in _archive\clean) is no longer compiled:

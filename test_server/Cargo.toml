@@ -1,0 +1,47 @@
+[package]
+name = "test_server"
+description = "Unbihex test server: a VLESS / REALITY server on the engine, for tests and measurements only"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+license = "MPL-2.0"
+authors = ["Crystalmasta (https://github.com/crystalmasta)"]
+homepage = "https://github.com/crystalmasta"
+publish = false
+
+[[bin]]
+name = "test_server"
+path = "src/main.rs"
+
+[dependencies]
+# The protocols live in the engine (shared with the client); `server` adds the inbounds.
+unbihex-engine = { path = "../unbihex-engine", features = ["server"] }
+base64 = "0.22"
+rand = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[dev-dependencies]
+unbihex-engine = { path = "../unbihex-engine", features = ["server", "test-util"] }
+rcgen = "0.14"
+serde_json = "1"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+
+[workspace]
+
+# The engine's patched rustls (ClientHello rewriting for the browser TLS fingerprint);
+# see ../unbihex-engine/vendor/rustls/UNBIHEX-PATCH.md.
+[patch.crates-io]
+rustls = { path = "../unbihex-engine/vendor/rustls" }

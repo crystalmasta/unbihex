@@ -84,6 +84,9 @@ pub enum InboundConfig {
     Http(ProxyInboundConfig),
     /// SOCKS5 and HTTP proxy on one port, told apart by the first byte.
     Mixed(ProxyInboundConfig),
+    /// VLESS server over TLS (the `server` feature).
+    #[cfg(feature = "server")]
+    Vless(VlessInboundConfig),
 }
 
 impl InboundConfig {
@@ -92,13 +95,109 @@ impl InboundConfig {
         match self {
             InboundConfig::Tun(c) => &c.tag,
             InboundConfig::Socks(c) | InboundConfig::Http(c) | InboundConfig::Mixed(c) => &c.tag,
+            #[cfg(feature = "server")]
+            InboundConfig::Vless(c) => &c.tag,
         }
     }
 }
 
+/// VLESS server settings.
+#[cfg(feature = "server")]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VlessInboundConfig {
+    /// Inbound tag.
+    pub tag: String,
+    /// Address to listen on.
+    pub listen: SocketAddr,
+    /// Who may connect.
+    pub users: Vec<VlessUser>,
+    /// TLS with a certificate. Exactly one of `tls` and `reality` is set: a VLESS
+    /// server without either is not supported.
+    #[serde(default)]
+    pub tls: Option<ServerTlsConfig>,
+    /// REALITY: TLS 1.3 that impersonates another site to everyone without the key.
+    #[serde(default)]
+    pub reality: Option<ServerRealityConfig>,
+}
 
+#[cfg(feature = "server")]
+impl VlessInboundConfig {
+    fn validate(&self) -> Result<()> {
+        if self.users.is_empty() {
+            return Err(Error::config(format!("inbound {}: no users", self.tag)));
+        }
+        let mut ids = HashSet::new();
+        for u in &self.users {
+            let id = uuid::Uuid::parse_str(u.id.expose())
+                .map_err(|_| Error::config(format!("inbound {}: invalid user id", self.tag)))?;
+            if !ids.insert(id) {
+                return Err(Error::config(format!("inbound {}: duplicate user id", self.tag)));
+            }
+            if !(u.flow.is_empty() || u.flow == FLOW_VISION || u.flow == "xtls-rprx-vision-udp443") {
+                return Err(Error::Unsupported(format!(
+                    "inbound {}: flow {:?}",
+                    self.tag, u.flow
+                )));
+            }
+        }
+        match (&self.tls, &self.reality) {
+            (Some(_), None) => Ok(()),
+            (None, Some(r)) => r
+                .validate()
+                .map_err(|e| Error::config(format!("inbound {}: {e}", self.tag))),
+            _ => Err(Error::config(format!(
+                "inbound {}: set exactly one of tls and reality",
+                self.tag
+            ))),
+        }
+    }
+}
 
+/// REALITY server settings (Xray's `realitySettings`).
+#[cfg(feature = "server")]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerRealityConfig {
+    /// The site to impersonate, `host:port`: clients without the key are forwarded
+    /// there untouched.
+    pub dest: String,
+    /// Server names (SNI) clients may use; names of `dest`.
+    pub server_names: Vec<String>,
+    /// X25519 private key, base64url (`test_server x25519`).
+    pub private_key: Secret,
+    /// Allowed short IDs, hex, up to 16 characters each; `""` is the all-zero ID.
+    pub short_ids: Vec<String>,
+    /// Largest allowed difference between the client's clock and ours, in
+    /// milliseconds. 0 (the default) means 120 s: unlike Xray, the check cannot be
+    /// turned off, since the window also bounds the replay cache.
+    #[serde(default)]
+    pub max_time_diff_ms: u64,
+}
 
+#[cfg(feature = "server")]
+impl ServerRealityConfig {
+    fn validate(&self) -> Result<()> {
+        let (host, port) = self
+            .dest
+            .rsplit_once(':')
+            .ok_or_else(|| Error::config("reality: dest must be host:port"))?;
+        if host.is_empty() || port.parse::<u16>().is_err() {
+            return Err(Error::config("reality: dest must be host:port"));
+        }
+        if self.server_names.iter().all(|n| n.trim().is_empty()) {
+            return Err(Error::config("reality: no server_names"));
+        }
+        if self.short_ids.is_empty() {
+            return Err(Error::config("reality: no short_ids"));
+        }
+        for id in &self.short_ids {
+            parse_short_id(id)?;
+        }
+        parse_x25519_key(self.private_key.expose(), "private_key")?;
+        Ok(())
+    }
+}
 
 /// A base64url (or standard base64) X25519 key; `what` names it in errors.
 pub fn parse_x25519_key(s: &str, what: &str) -> Result<[u8; 32]> {
@@ -123,7 +222,34 @@ pub fn parse_short_id(s: &str) -> Result<[u8; 8]> {
     Ok(out)
 }
 
+/// One VLESS user.
+#[cfg(feature = "server")]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VlessUser {
+    /// User UUID.
+    pub id: Secret,
+    /// Name for logs and statistics.
+    #[serde(default)]
+    pub email: String,
+    /// `xtls-rprx-vision` or empty.
+    #[serde(default)]
+    pub flow: String,
+}
 
+/// Server-side TLS settings.
+#[cfg(feature = "server")]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerTlsConfig {
+    /// PEM certificate chain.
+    pub certificate_file: std::path::PathBuf,
+    /// PEM private key.
+    pub key_file: std::path::PathBuf,
+    /// ALPN protocols, in preference order; default `h2`, `http/1.1` (as Xray).
+    #[serde(default)]
+    pub alpn: Vec<String>,
+}
 
 /// TUN inbound settings.
 #[derive(Clone, Debug, Deserialize)]
@@ -817,6 +943,10 @@ impl Config {
                     "duplicate or empty inbound tag {:?}",
                     i.tag()
                 )));
+            }
+            #[cfg(feature = "server")]
+            if let InboundConfig::Vless(v) = i {
+                v.validate()?;
             }
             if let InboundConfig::Socks(c) | InboundConfig::Http(c) | InboundConfig::Mixed(c) = i
                 && c.users.is_empty()

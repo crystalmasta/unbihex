@@ -27,8 +27,9 @@ File checksums are in `SHA256SUMS.txt` of the same release.
 |---|---|
 | [`unbihex-client`](unbihex-client) | the Tauri 2 app: subscriptions, servers, system proxy, TUN, Android VpnService, iOS Packet Tunnel; the `unbihex-cli` console client |
 | [`unbihex-engine`](unbihex-engine) | the engine: TUN, routing, fake-IP DNS, protocols; described in `SPEC.md` |
+| [`test_server`](test_server) | a test VLESS / REALITY server on the same engine: your own client ↔ server pair for tests and traffic measurements. Not for serving users |
 
-The client links the engine by the relative path `../unbihex-engine`, so the folders sit side by side.
+The client and the test server link the engine by the relative path `../unbihex-engine`, so the folders sit side by side.
 Building, tests and installers are described in [`unbihex-client/README.en.md`](unbihex-client/README.en.md),
 the engine design in [`unbihex-engine/SPEC.en.md`](unbihex-engine/SPEC.en.md), the plans in
 [`unbihex-client/ROADMAP.en.md`](unbihex-client/ROADMAP.en.md).

@@ -175,11 +175,21 @@ impl Instance {
                 InboundConfig::Socks(c) | InboundConfig::Http(c) | InboundConfig::Mixed(c) => {
                     Some(c.listen)
                 }
+                #[cfg(feature = "server")]
+                InboundConfig::Vless(c) => Some(c.listen),
                 InboundConfig::Tun(_) => None,
             })
             .collect();
         let guard = LocalGuard::new(&listens, tun_cfg.as_ref().map(|t| t.tag.clone()));
-        let private_names = config.dns.private_answer_suffixes(true)?;
+        // A server's users must not reach its LAN by name: no client-style exceptions.
+        #[cfg(feature = "server")]
+        let serves = config
+            .inbounds
+            .iter()
+            .any(|i| matches!(i, InboundConfig::Vless(_)));
+        #[cfg(not(feature = "server"))]
+        let serves = false;
+        let private_names = config.dns.private_answer_suffixes(!serves)?;
         let dispatcher = Arc::new(
             Dispatcher::new(
                 router,
@@ -189,7 +199,7 @@ impl Instance {
                 counters.clone(),
             )
             .with_policy(ctx.resolver.clone(), guard)
-            .with_private_names(private_names, true),
+            .with_private_names(private_names, !serves),
         );
         let handshake = Duration::from_secs(config.limits.handshake_timeout_secs);
         let handshakes = Arc::new(tokio::sync::Semaphore::new(config.limits.max_connections));
@@ -232,6 +242,17 @@ impl Instance {
                     tokio::spawn(inbound::mixed::serve(
                         l,
                         c.clone(),
+                        dispatcher.clone(),
+                        handshake,
+                        handshakes.clone(),
+                        cancel.clone(),
+                    ))
+                }),
+                #[cfg(feature = "server")]
+                InboundConfig::Vless(c) => inbound::vless::bind(c).await.map(|(l, server)| {
+                    tokio::spawn(inbound::vless::serve(
+                        l,
+                        server,
                         dispatcher.clone(),
                         handshake,
                         handshakes.clone(),

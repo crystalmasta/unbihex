@@ -12,6 +12,7 @@
 |---|---|
 | Клиент Unbihex (Windows, Android, `unbihex-cli`) | 0.2.x |
 | Ядро `unbihex-engine` | 0.1.x |
+| `test_server` | не поддерживается: только для тестов |
 
 Более старые версии не исправляются: обновитесь до последнего [релиза](https://github.com/crystalmasta/unbihex/releases/latest).
 
@@ -37,6 +38,7 @@ Security fixes are released for the latest versions:
 |---|---|
 | Unbihex client (Windows, Android, `unbihex-cli`) | 0.2.x |
 | `unbihex-engine` | 0.1.x |
+| `test_server` | not supported: for tests only |
 
 Older versions are not patched: please update to the latest [release](https://github.com/crystalmasta/unbihex/releases/latest).
 
