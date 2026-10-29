@@ -93,7 +93,7 @@ The engine must sit next to it: `unbihex-client` and `unbihex-engine` are siblin
 Downloads are in the [GitHub releases](https://github.com/crystalmasta/unbihex/releases/latest).
 Local builds go to the `dist/` folder (it is not in the repository):
 
-- `dist/Unbihex-0.2.1-setup.exe` — installer for Windows 10/11 x64 (NSIS, `installer/build.sh`).
+- `dist/Unbihex-0.2.2-setup.exe` — installer for Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — portable version; `wintun.dll` must sit next to it.
   An MSVC build with a static CRT: no Visual C++ Redistributable needed, WebView2Loader is built into the exe.
 - `dist/android/Unbihex-android-arm64.apk` — Android 7+ (arm64, almost all phones).
@@ -159,7 +159,7 @@ Building for Linux from Windows: `cargo zigbuild --release -p unbihex-cli --targ
    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p unbihex-client --target x86_64-pc-windows-msvc
    MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe" sh installer/build.sh
    ```
-   Output: `installer\Unbihex-0.2.1-setup.exe`.
+   Output: `installer\Unbihex-0.2.2-setup.exe`.
 
 TUN mode needs administrator rights; the app has a "Restart as administrator" button. A known Windows limitation:
 the system may query the DNS of other adapters in parallel (Smart Multi-Homed Name Resolution), so for full
