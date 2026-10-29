@@ -137,6 +137,8 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   removes only ours). A log warning when, after connecting, Windows still sends traffic past the TUN.
 - A window closed to the tray is destroyed together with WebView2: ~6 MB in the background instead of ~210 MB.
 - JSON subscriptions: all servers of a balancer (`routing.balancers`, prefix selectors) are listed, not just `proxy`.
+- Rule databases: a broken download (on phones, issue #4) no longer fails the update. Up to 4 attempts that
+  resume with `Range`, and the error shows the real cause.
 
 ## Next
 1. Runs with real panels: their configs, API, stats, restarts.
