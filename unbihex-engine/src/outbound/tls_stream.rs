@@ -407,3 +407,186 @@ impl AsyncWrite for TlsRecordStream {
         Pin::new(&mut this.tcp).poll_shutdown(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn feed(conn: &mut Connection, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            conn.read_tls(&mut bytes).unwrap();
+            conn.process_new_packets().unwrap();
+        }
+    }
+
+    fn drain(conn: &mut Connection) -> Vec<u8> {
+        let mut out = Vec::new();
+        while conn.wants_write() {
+            conn.write_tls(&mut out).unwrap();
+        }
+        out
+    }
+
+    /// Client and server configs for `example.com` with a fresh self-signed certificate.
+    fn configs() -> (Arc<rustls::ClientConfig>, Arc<rustls::ServerConfig>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["example.com".into()]).unwrap();
+        let der = CertificateDer::from(cert.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let server_cfg = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![der.clone()], key)
+            .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der).unwrap();
+        let client_cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        (Arc::new(client_cfg), Arc::new(server_cfg))
+    }
+
+    /// A client and a server connection with the handshake done in memory.
+    fn connected_pair() -> (Connection, Connection) {
+        let (client_cfg, server_cfg) = configs();
+        let name = ServerName::try_from("example.com").unwrap();
+        let mut c: Connection = ClientConnection::new(client_cfg, name).unwrap().into();
+        let mut s: Connection = ServerConnection::new(server_cfg).unwrap().into();
+        for _ in 0..10 {
+            let to_server = drain(&mut c);
+            feed(&mut s, &to_server);
+            let to_client = drain(&mut s);
+            feed(&mut c, &to_client);
+            if !c.is_handshaking() && !s.is_handshaking() {
+                return (c, s);
+            }
+        }
+        panic!("handshake did not finish");
+    }
+
+    /// The TLS records carrying `plain`.
+    fn sealed(s: &mut Connection, plain: &[u8]) -> Vec<u8> {
+        // rustls buffers at most 64 KB of plaintext: seal it piece by piece.
+        let mut out = Vec::new();
+        for piece in plain.chunks(16 * 1024) {
+            s.writer().write_all(piece).unwrap();
+            out.extend(drain(s));
+        }
+        out
+    }
+
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ours = TcpStream::connect(l.local_addr().unwrap()).await.unwrap();
+        let (peer, _) = l.accept().await.unwrap();
+        (ours, peer)
+    }
+
+    /// Vision: the peer's last TLS record and the raw bytes after it arrive in one
+    /// read; after the switch the raw bytes still come out, in order.
+    #[tokio::test]
+    async fn raw_bytes_after_the_last_record_survive_the_switch() {
+        let (c, mut s) = connected_pair();
+        let mut wire = sealed(&mut s, b"last record");
+        wire.extend_from_slice(b"raw bytes after the switch");
+        let (ours, mut peer) = tcp_pair().await;
+        peer.write_all(&wire).await.unwrap();
+        peer.shutdown().await.unwrap();
+        let mut tls = TlsRecordStream::new(ours, c);
+        let mut got = [0u8; 11];
+        tls.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"last record");
+        assert!(tls.switch_to_raw_read().unwrap().is_empty());
+        let mut raw = Vec::new();
+        tls.read_to_end(&mut raw).await.unwrap();
+        assert_eq!(raw, b"raw bytes after the switch");
+    }
+
+    /// Records cut at any byte (inside headers, across several records) come out whole.
+    #[tokio::test]
+    async fn records_split_anywhere_arrive_whole() {
+        let (c, mut s) = connected_pair();
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+        let wire = sealed(&mut s, &data);
+        let (ours, mut peer) = tcp_pair().await;
+        peer.set_nodelay(true).unwrap();
+        tokio::spawn(async move {
+            let sizes = [1usize, 4, 2, 7000, 3, 16_389, 70_000];
+            let mut rest = &wire[..];
+            for n in sizes.iter().cycle() {
+                if rest.is_empty() {
+                    break;
+                }
+                let n = (*n).min(rest.len());
+                peer.write_all(&rest[..n]).await.unwrap();
+                rest = &rest[n..];
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            peer.shutdown().await.unwrap();
+        });
+        let mut tls = TlsRecordStream::new(ours, c);
+        let mut got = Vec::new();
+        tls.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got.len(), data.len());
+        assert!(got == data);
+    }
+
+    /// One TLS stream over loopback, ours against tokio-rustls on either side:
+    /// `cargo test --release --features server --lib tls_throughput -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "a measurement, not a check"]
+    async fn tls_throughput() {
+        use crate::outbound::AsyncStream;
+        const TOTAL: usize = 1 << 30;
+        let (client_cfg, server_cfg) = configs();
+        for (writer_ours, reader_ours) in [(true, true), (false, false), (false, true), (true, false)] {
+            let (ours, peer) = tcp_pair().await;
+            let scfg = server_cfg.clone();
+            let writer = tokio::spawn(async move {
+                let mut w: Box<dyn AsyncStream> = if writer_ours {
+                    Box::new(TlsRecordStream::accept(peer, scfg).await.unwrap())
+                } else {
+                    Box::new(tokio_rustls::TlsAcceptor::from(scfg).accept(peer).await.unwrap())
+                };
+                let chunk = vec![7u8; 64 * 1024];
+                let mut sent = 0;
+                while sent < TOTAL {
+                    w.write_all(&chunk).await.unwrap();
+                    sent += chunk.len();
+                }
+                w.shutdown().await.unwrap();
+            });
+            let name = ServerName::try_from("example.com").unwrap();
+            let mut r: Box<dyn AsyncStream> = if reader_ours {
+                Box::new(TlsRecordStream::connect(ours, client_cfg.clone(), name, None).await.unwrap())
+            } else {
+                Box::new(tokio_rustls::TlsConnector::from(client_cfg.clone()).connect(name, ours).await.unwrap())
+            };
+            let start = std::time::Instant::now();
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut got = 0;
+            loop {
+                let n = r.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                got += n;
+            }
+            let secs = start.elapsed().as_secs_f64();
+            writer.await.unwrap();
+            let side = |o: bool| if o { "ours" } else { "tokio-rustls" };
+            println!(
+                "writer {:12} reader {:12} {:6.2} Gbit/s",
+                side(writer_ours),
+                side(reader_ours),
+                got as f64 * 8.0 / secs / 1e9
+            );
+        }
+    }
+}
