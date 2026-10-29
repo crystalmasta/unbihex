@@ -173,6 +173,7 @@ fn session(target: SocketAddr) -> Session {
         source: None,
         target: TargetAddr::from(target),
         inbound_tag: "test".into(),
+        sniffed: None,
     }
 }
 
@@ -233,6 +234,7 @@ async fn udp_roundtrip(ob: &dyn Outbound, echo: SocketAddr) {
         source: Some(SocketAddr::from(([127, 0, 0, 1], 40000))),
         target: TargetAddr::from(echo),
         inbound_tag: "test".into(),
+        sniffed: None,
     };
     let flow = ob.connect_udp(&sess).await.unwrap();
     let mut buf = [0u8; 2048];

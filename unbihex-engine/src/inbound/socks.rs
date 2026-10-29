@@ -134,6 +134,7 @@ pub(super) async fn handshake(
             source: Some(peer),
             target,
             inbound_tag: cfg.tag.clone(),
+            sniffed: None,
         },
     )))
 }

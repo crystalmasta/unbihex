@@ -374,14 +374,39 @@ async fn relaunch_admin(app: AppHandle, state: State<'_, AppState>) -> Result<()
     }
 }
 
+/// Windows: lets Microsoft Store apps use the system proxy, or undoes that.
+#[tauri::command]
+fn store_apps_loopback(state: State<'_, AppState>, allow: bool) -> Result<usize, String> {
+    #[cfg(desktop)]
+    {
+        unbihex_client_core::platform::store_apps_loopback(state.client.dir(), allow).map_err(err)
+    }
+    #[cfg(mobile)]
+    {
+        let _ = (&state, allow);
+        Err("не нужно на мобильных".into())
+    }
+}
+
 // ---------------------------------------------------------------- desktop shell
 
+/// Shows the main window, creating it again if it was closed to the tray.
 #[cfg(desktop)]
 fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        return;
+    }
+    let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
+        return;
+    };
+    match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build()) {
+        Ok(w) => {
+            let _ = w.set_focus();
+        }
+        Err(e) => tracing::error!("window: {e}"),
     }
 }
 
@@ -525,18 +550,8 @@ pub fn run() {
             clear_logs,
             update_geodata,
             relaunch_admin,
+            store_apps_loopback,
         ]);
-
-    #[cfg(desktop)]
-    let builder = builder.on_window_event(|window, event| {
-        // Closing the window keeps the VPN running in the tray.
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event
-            && window.app_handle().tray_by_id("main").is_some()
-        {
-            api.prevent_close();
-            let _ = window.hide();
-        }
-    });
 
     let app = match builder.build(tauri::generate_context!()) {
         Ok(app) => app,
@@ -545,12 +560,20 @@ pub fn run() {
             return;
         }
     };
-    app.run(|app, event| {
-        if let tauri::RunEvent::Exit = event {
+    app.run(|app, event| match event {
+        // Closing the window keeps the VPN running in the tray. The window is
+        // destroyed, not hidden: WebView2 and its processes (~200 MB) go away and
+        // the tray creates the window again. "Выход" exits with a code.
+        #[cfg(desktop)]
+        tauri::RunEvent::ExitRequested { code: None, api, .. } if app.tray_by_id("main").is_some() => {
+            api.prevent_exit();
+        }
+        tauri::RunEvent::Exit => {
             // Restore the system proxy and routes before the process ends.
             if let Some(state) = app.try_state::<AppState>() {
                 state.client.controller.disconnect_blocking();
             }
         }
+        _ => {}
     });
 }

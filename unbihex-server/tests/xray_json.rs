@@ -135,6 +135,7 @@ async fn a_panel_config_runs_like_xray() {
             source: None,
             target: echo.into(),
             inbound_tag: "t".into(),
+            sniffed: None,
         })
         .await
         .unwrap();

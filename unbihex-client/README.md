@@ -116,6 +116,28 @@ unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-l
 `tun` заворачивает весь трафик машины (нужен root, `ip` и `resolvectl`), `system` — прокси плюс настройки GNOME.
 Данные — в `~/.config/unbihex-cli` (или `--dir`, `$UNBIHEX_DIR`).
 
+### Роутер или сервер: чистый туннель
+
+`connect --mode tun --no-routes` поднимает интерфейс `unbihex0` и больше ничего не меняет: маршруты, `ip rule`
+и DNS остаются вашими. Ещё ключи: `--tun-name`, `--interface <имя>` (к какому интерфейсу привязывать
+собственные соединения ядра), `--mark <n>` (`SO_MARK` на них же, для `ip rule fwmark`). Ключи сохраняются,
+`--routes` возвращает обычный режим; `unbihex-cli settings` показывает текущие.
+
+Пример для роутера: трафик LAN идёт в туннель, сам роутер ходит как раньше.
+
+```text
+sudo unbihex-cli connect --mode tun --no-routes --mark 255
+ip route add default dev unbihex0 table 100
+ip rule add iif br-lan lookup 100        # или «not fwmark 255 lookup 100» — весь трафик, кроме ядра
+sysctl -w net.ipv4.ip_forward=1
+```
+
+Чтобы в правилах работали домены, отдайте DNS туннелю: в dnsmasq `server=10.199.233.2`.
+
+`unbihex-cli run -c config.json` запускает конфиг ядра как есть (формат — `unbihex-engine/SPEC.md`, §5), без
+подписок и папки данных. Маршруты и DNS этот режим не трогает никогда, SIGHUP перечитывает файл,
+`check -c` проверяет конфиг.
+
 Сборка под Linux из Windows: `cargo zigbuild --release -p unbihex-cli --target x86_64-unknown-linux-musl`
 (нужны [zig](https://ziglang.org) и `cargo install cargo-zigbuild`); на самом Linux — `cargo build --release -p unbihex-cli`.
 
@@ -140,6 +162,13 @@ unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-l
 «Перезапустить от администратора». Известное ограничение Windows: система может параллельно
 спрашивать DNS других адаптеров (Smart Multi-Homed Name Resolution), поэтому для полной
 защиты от утечек DNS используйте TUN, а не системный прокси.
+
+Приложения из Microsoft Store (WhatsApp, Почта, Xbox и другие) Windows не пускает к прокси на `127.0.0.1`. В
+режиме «Системный прокси» есть кнопка «Разрешить им прокси» (нужны права администратора), «Отменить» снимает
+только то, что добавил Unbihex. В режиме TUN это не нужно.
+
+Если DNS перехватывает AdGuard (не VPN), антивирус или DoH в браузере, приложения подключаются к настоящим IP.
+Ядро тогда берёт имя сайта из TLS (SNI) или HTTP (`Host`), и доменные правила продолжают работать.
 
 Проверки:
 ```

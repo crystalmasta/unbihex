@@ -183,6 +183,20 @@ pub fn relaunch_elevated() -> Result<()> {
     os::relaunch_elevated()
 }
 
+/// Windows: lets Microsoft Store apps use the local proxy (`allow`), or undoes
+/// that. Returns how many apps changed.
+pub fn store_apps_loopback(dir: &Path, allow: bool) -> Result<usize> {
+    #[cfg(windows)]
+    {
+        os::store_apps_loopback(dir, allow)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (dir, allow);
+        Err(ClientError::platform("нужно только на Windows"))
+    }
+}
+
 /// System tools the client may run.
 const SYSTEM_PROGRAMS: &[&str] = &[
     "route",

@@ -168,6 +168,7 @@ fn session(network: Network, target: SocketAddr) -> Session {
         source: None,
         target: target.into(),
         inbound_tag: "t".into(),
+        sniffed: None,
     }
 }
 

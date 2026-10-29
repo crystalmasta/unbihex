@@ -343,6 +343,7 @@ async fn accept(
         source: Some(peer),
         target: req.target.clone(),
         inbound_tag: server.tag.clone(),
+        sniffed: None,
     };
     Ok(match req.command {
         CMD_UDP => {

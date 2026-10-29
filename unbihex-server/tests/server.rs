@@ -85,6 +85,7 @@ fn session(target: std::net::SocketAddr) -> Session {
         source: None,
         target: target.into(),
         inbound_tag: "t".into(),
+        sniffed: None,
     }
 }
 
@@ -94,6 +95,7 @@ fn udp_session(target: std::net::SocketAddr) -> Session {
         source: None,
         target: target.into(),
         inbound_tag: "t".into(),
+        sniffed: None,
     }
 }
 

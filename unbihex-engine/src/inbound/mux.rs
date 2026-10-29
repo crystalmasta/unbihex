@@ -235,6 +235,7 @@ fn open_tcp(
         source: Some(ctx.source),
         target,
         inbound_tag: ctx.inbound_tag.clone(),
+        sniffed: None,
     };
     let (d, stop) = (ctx.dispatcher.clone(), done.clone());
     let task = tokio::spawn(async move {
@@ -278,6 +279,7 @@ fn open_udp(
         source: Some(ctx.source),
         target: dest.clone(),
         inbound_tag: ctx.inbound_tag.clone(),
+        sniffed: None,
     };
     let flow = MuxUdp {
         id,

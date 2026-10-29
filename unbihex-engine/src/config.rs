@@ -275,6 +275,10 @@ pub struct TunInboundConfig {
     /// Answer every UDP/53 query with fake IPs.
     #[serde(default = "default_true")]
     pub dns_hijack: bool,
+    /// Read the TLS server name or HTTP `Host` of TCP connections to real IPs, so
+    /// domain rules apply to apps that resolve names themselves (DoH, AdGuard).
+    #[serde(default = "default_true")]
+    pub sniff: bool,
 }
 
 impl TunInboundConfig {
@@ -288,6 +292,7 @@ impl TunInboundConfig {
             ipv6: None,
             auto_route: true,
             dns_hijack: true,
+            sniff: true,
         }
     }
 
@@ -614,6 +619,14 @@ pub struct RouteConfig {
     /// sing-box binary rule-sets referenced by `rule_set` conditions.
     #[serde(default)]
     pub rule_sets: Vec<RuleSetConfig>,
+    /// Interface every outgoing socket is bound to, as sing-box's
+    /// `route.default_interface` (SPEC §9); overrides the platform's binding.
+    #[serde(default)]
+    pub default_interface: Option<String>,
+    /// Linux: `SO_MARK` of every outgoing socket, for policy routing
+    /// (`ip rule add fwmark …`), as sing-box's `route.default_mark`.
+    #[serde(default)]
+    pub default_mark: Option<u32>,
 }
 
 /// A rule-set file.
@@ -993,6 +1006,21 @@ impl Config {
                 return Err(Error::config("tun mtu must be at least 576"));
             }
         }
+        if self
+            .route
+            .default_interface
+            .as_ref()
+            .is_some_and(|i| i.trim().is_empty())
+        {
+            return Err(Error::config("route.default_interface is empty"));
+        }
+        match self.route.default_mark {
+            Some(0) => return Err(Error::config("route.default_mark must not be 0")),
+            Some(_) if !cfg!(any(target_os = "linux", target_os = "android")) => {
+                return Err(Error::config("route.default_mark is supported on Linux only"));
+            }
+            _ => {}
+        }
         let mut set_tags = HashSet::new();
         for rs in &self.route.rule_sets {
             if rs.tag.is_empty() || !set_tags.insert(rs.tag.as_str()) {
@@ -1060,6 +1088,25 @@ mod tests {
         assert!(cfg("0.0.0.0:1080", "").is_err());
         assert!(cfg("192.168.1.2:1080", "").is_err());
         assert!(cfg("0.0.0.0:1080", r#"{"username":"u","password":"p"}"#).is_ok());
+    }
+
+    #[test]
+    fn outgoing_socket_options() {
+        let cfg = |route: &str| {
+            Config::from_json(&format!(
+                r#"{{"outbounds":[{{"type":"direct","tag":"d"}}],"route":{{{route}}}}}"#
+            ))
+        };
+        let c = cfg(r#""default_interface":"eth0""#).unwrap();
+        assert_eq!(c.route.default_interface.as_deref(), Some("eth0"));
+        assert!(cfg(r#""default_interface":" ""#).is_err());
+        assert!(cfg(r#""default_mark":0"#).is_err());
+        let marked = cfg(r#""default_mark":255"#);
+        if cfg!(target_os = "linux") {
+            assert_eq!(marked.unwrap().route.default_mark, Some(255));
+        } else {
+            assert!(marked.is_err());
+        }
     }
 
     #[test]

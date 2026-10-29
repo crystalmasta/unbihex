@@ -231,7 +231,7 @@ If any step fails, undo what has been done and return the error.
 
 ### 5.3 `tun` defaults
 
-`name` = `unbihex0` (on macOS `utunN`, chosen by the OS), `mtu` = 1500, `ipv4` = `10.199.233.1/30`, no `ipv6`, `auto_route` = true, `dns_hijack` = true. The fake-DNS server address inside the TUN is **the second address of the ipv4 subnet** (for `/30` that is `10.199.233.2`).
+`name` = `unbihex0` (on macOS `utunN`, chosen by the OS), `mtu` = 1500, `ipv4` = `10.199.233.1/30`, no `ipv6`, `auto_route` = true, `dns_hijack` = true, `sniff` = true. The fake-DNS server address inside the TUN is **the second address of the ipv4 subnet** (for `/30` that is `10.199.233.2`).
 
 ### 5.4 Share links (`type: "link"`)
 
@@ -334,6 +334,11 @@ The socket is created with `socket2`, configured **before** `connect`/`bind`, th
 
 On desktop (§12) host routes to the proxy server IPs through the original gateway are added as well.
 
+From the config (as in sing-box): `route.default_interface` is the interface name (on Windows the friendly name
+works too) every outgoing socket is bound to; it replaces the platform layer's binding, and a missing interface
+fails the start. `route.default_mark` is `SO_MARK` (needs `CAP_NET_ADMIN`) for policy routing
+(`ip rule add fwmark …`); Linux only, 0 is not allowed. Neither can change in a hot reload.
+
 TCP: `TCP_NODELAY` = true, keepalive 30 s.
 
 ---
@@ -367,12 +372,22 @@ TCP: `TCP_NODELAY` = true, keepalive 30 s.
 ### 10.3 TUN
 
 - **Desktop:** the device is created with `tun-rs` from `name`, `mtu`, `ipv4`, `ipv6`. On Windows wintun is used: `wintun.dll` sits next to the exe; if it is missing, a clear error links to https://www.wintun.net.
+- The engine itself never changes the system's routes or DNS: `auto_route` tells the platform layer (the client,
+  §12) what to do. With `auto_route: false` the client only brings the interface up (a "clean tunnel" for routers
+  and servers), and the admin sets up routing.
 - **Mobile:** the device is opened from `tun_fd`. The fd belongs to the OS layer and Unbihex does not close it: on Android the owner is a ParcelFileDescriptor, on iOS the fd is found by scanning (see the example).
 - Packets are parsed by the `ipstack` userspace stack, MTU = the device MTU.
   - A TCP connection → `Session{network: Tcp, source, target: dst (with the fake IP restored), inbound_tag}` → `dispatch_tcp`.
   - A UDP flow → if `dns_hijack` and the destination port is 53, handling per §8.2, otherwise `dispatch_udp` (a PacketStream over the stack's UDP flow).
   - ICMP: an echo request to a fake IP or any address is dropped in the MVP (the stack may not support it).
 - Traffic to the TUN's own address (other than the fake DNS) is dropped.
+- **Sniffing** (`sniff`, true by default). A TCP connection to a real IP rather than a fake IP happens when an app
+  resolves the name itself: browser DoH, AdGuard or an antivirus filtering DNS, a cache. Its first bytes (up to
+  300 ms and 16 KB) are read: the name from the SNI of a TLS ClientHello (also one split over several records) or
+  from the `Host` header of HTTP/1.x. The name goes to `Session.sniffed` and only domain conditions of rules (and
+  rule-sets) see it. IP conditions look at the real address, and the connection goes to the original IP (like
+  Xray's `routeOnly`). The bytes read are passed on unchanged. Ports where the server speaks first
+  (21, 25, 110, 143, 587, 3306, 5900) are not waited on. UDP (QUIC) is not parsed.
 
 ### 10.4 Mixed (SOCKS5 + HTTP on one port)
 

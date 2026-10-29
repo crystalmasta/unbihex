@@ -55,6 +55,30 @@ async fn socks_to_direct() {
 }
 
 #[tokio::test]
+async fn default_interface_must_exist() {
+    let cfg = |iface: &str| {
+        Config::from_json(&format!(
+            r#"{{"outbounds":[{{"type":"direct","tag":"direct"}}],"route":{{"default_interface":"{iface}"}}}}"#
+        ))
+        .unwrap()
+    };
+    let err = Instance::start(cfg("no-such-interface0"), PlatformHooks::default()).await;
+    assert!(err.is_err());
+    // Loopback exists everywhere; on Windows netdev reports it by a friendly name.
+    let lo = unbihex_engine::net::find_interface(if cfg!(windows) {
+        "Loopback Pseudo-Interface 1"
+    } else if cfg!(target_os = "linux") {
+        "lo"
+    } else {
+        "lo0"
+    });
+    if let Ok(lo) = lo {
+        let inst = Instance::start(cfg(&lo.name), PlatformHooks::default()).await.unwrap();
+        inst.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn http_connect_and_plain_request() {
     let echo = tcp_echo().await;
     let port = free_port();
@@ -122,6 +146,7 @@ async fn socks_to_vless_plain_tcp_and_udp() {
         source: None,
         target: udp_echo.into(),
         inbound_tag: "t".into(),
+        sniffed: None,
     };
     let ps = ob.connect_udp(&sess).await.unwrap();
     for msg in [&b"first"[..], b"second datagram"] {
@@ -166,6 +191,7 @@ async fn vless_over_tls() {
         source: None,
         target: echo.into(),
         inbound_tag: "t".into(),
+        sniffed: None,
     };
     let mut s = ob.connect_tcp(&sess).await.unwrap();
     s.write_all(b"over tls").await.unwrap();
@@ -259,6 +285,7 @@ async fn socks_to_shadowsocks_all_methods() {
             source: None,
             target: udp.into(),
             inbound_tag: "t".into(),
+            sniffed: None,
         };
         let ps = ob.connect_udp(&sess).await.unwrap();
         ps.send(b"udp via ss").await.unwrap();

@@ -323,13 +323,28 @@ impl Dispatcher {
     }
 
     /// Handles one TCP session until both sides are done.
-    pub async fn dispatch_tcp(&self, mut sess: Session, inbound: BoxStream) {
+    pub async fn dispatch_tcp(&self, sess: Session, inbound: BoxStream) {
+        self.dispatch_tcp_with(sess, inbound, false).await;
+    }
+
+    /// Like [`Dispatcher::dispatch_tcp`], but a connection to a real IP first has its
+    /// TLS server name or HTTP `Host` read for the rules (the TUN, SPEC §10.3).
+    pub async fn dispatch_tcp_sniffing(&self, sess: Session, inbound: BoxStream) {
+        self.dispatch_tcp_with(sess, inbound, true).await;
+    }
+
+    async fn dispatch_tcp_with(&self, mut sess: Session, mut inbound: BoxStream, sniff: bool) {
         let Some(_permit) = self.acquire() else {
             return;
         };
         if let Err(e) = self.restore_fake_ip(&mut sess) {
             tracing::debug!("{} tcp {}: {e}", sess.inbound_tag, sess.target);
             return;
+        }
+        if sniff && sess.target.addr.as_domain().is_none() {
+            let (name, stream) = crate::sniff::peek(inbound, sess.target.port).await;
+            inbound = stream;
+            sess.sniffed = name;
         }
         let connect = async {
             let route = self.route(&sess).await?;
@@ -359,10 +374,11 @@ impl Dispatcher {
             }
         };
         tracing::debug!(
-            "{} tcp {} -> {} via {}",
+            "{} tcp {} -> {}{} via {}",
             sess.inbound_tag,
             sess.source.map(|s| s.to_string()).unwrap_or_default(),
             sess.target,
+            sess.sniffed.as_ref().map(|n| format!(" ({n})")).unwrap_or_default(),
             ob.tag()
         );
         let idle = Duration::from_secs(self.limits.tcp_idle_secs);
@@ -470,6 +486,7 @@ mod tests {
             source: Some(source.parse().unwrap()),
             target: target.parse().unwrap(),
             inbound_tag: inbound.into(),
+            sniffed: None,
         }
     }
 
@@ -567,6 +584,7 @@ mod tests {
                 source: None,
                 target: t.parse().unwrap(),
                 inbound_tag: "in".into(),
+                sniffed: None,
             };
             let d = &d;
             async move { d.route(&s).await.unwrap() }

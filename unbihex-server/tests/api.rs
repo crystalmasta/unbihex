@@ -118,6 +118,7 @@ fn session(target: SocketAddr) -> Session {
         source: None,
         target: target.into(),
         inbound_tag: "t".into(),
+        sniffed: None,
     }
 }
 

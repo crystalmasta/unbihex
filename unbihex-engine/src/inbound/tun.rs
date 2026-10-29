@@ -262,7 +262,7 @@ fn run_stack(
     stack_cfg.with_tcp_config(tcp_cfg);
     let mut stack = IpStack::new(stack_cfg, io);
 
-    let (tun_net, tag, dns_hijack) = (cfg.ipv4, cfg.tag.clone(), cfg.dns_hijack);
+    let (tun_net, tag, dns_hijack, sniff) = (cfg.ipv4, cfg.tag.clone(), cfg.dns_hijack, cfg.sniff);
     let dns_tcp = Arc::new(Semaphore::new(MAX_DNS_TCP));
     Ok(async move {
         loop {
@@ -306,11 +306,17 @@ fn run_stack(
                         source: Some(tcp.local_addr()),
                         target: dst.into(),
                         inbound_tag: tag.clone(),
+                        sniffed: None,
                     };
                     let d = dispatcher.clone();
-                    tokio::spawn(
-                        async move { d.dispatch_tcp(sess, Box::new(TunTcp::new(tcp))).await },
-                    );
+                    tokio::spawn(async move {
+                        let stream = Box::new(TunTcp::new(tcp));
+                        if sniff {
+                            d.dispatch_tcp_sniffing(sess, stream).await;
+                        } else {
+                            d.dispatch_tcp(sess, stream).await;
+                        }
+                    });
                 }
                 IpStackStream::Udp(udp) => {
                     let dst = udp.peer_addr();
@@ -329,6 +335,7 @@ fn run_stack(
                         source: Some(udp.local_addr()),
                         target: dst.into(),
                         inbound_tag: tag.clone(),
+                        sniffed: None,
                     };
                     let d = dispatcher.clone();
                     tokio::spawn(
@@ -775,6 +782,75 @@ mod tests {
             got.extend_from_slice(&payload);
         }
         assert_eq!(got, b"hello tcp");
+        h.cancel.cancel();
+    }
+
+    /// An app that resolved a name itself connects to a real IP: the `Host` it sends
+    /// decides the route, and the bytes read for that still reach the server.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sniffed_names_pick_the_route() {
+        let mut h = harness_with(
+            r#"{"inbounds":[{"type":"tun","tag":"tun-in"}],
+                "outbounds":[{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}],
+                "route":{"rules":[{"domain_suffix":["blocked.test"],"outbound":"block"}]}}"#,
+        )
+        .await;
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = accepted.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let (mut r, mut w) = s.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                });
+            }
+        });
+        let open = |port: u16, request: &'static [u8]| {
+            let app: SocketAddr = format!("10.199.233.1:{port}").parse().unwrap();
+            (app, request)
+        };
+        let blocked = b"GET / HTTP/1.1\r\nHost: www.blocked.test\r\n\r\n";
+        let allowed = b"GET / HTTP/1.1\r\nHost: open.test\r\n\r\n";
+
+        for (app, request) in [open(40010, allowed), open(40011, blocked)] {
+            h.inject
+                .send(tcp_packet(app, echo_addr, 1000, None, true, b""))
+                .await
+                .unwrap();
+            // Packets of the previous flow may still come first.
+            let server_seq = loop {
+                let (seq, syn, ack, _) = next_tcp(&mut h).await;
+                if syn && ack {
+                    break seq;
+                }
+            };
+            h.inject
+                .send(tcp_packet(
+                    app,
+                    echo_addr,
+                    1001,
+                    Some(server_seq.wrapping_add(1)),
+                    false,
+                    request,
+                ))
+                .await
+                .unwrap();
+            if request == blocked {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+                continue;
+            }
+            let mut got = Vec::new();
+            while got.len() < request.len() {
+                let (_, _, _, payload) = next_tcp(&mut h).await;
+                got.extend_from_slice(&payload);
+            }
+            assert_eq!(got, request);
+            assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
         h.cancel.cancel();
     }
 

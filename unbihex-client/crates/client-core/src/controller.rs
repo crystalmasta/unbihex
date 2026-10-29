@@ -194,8 +194,13 @@ impl Controller {
                         "для режима TUN нужны права администратора".into(),
                     ));
                 }
-                let uplink = platform::detect_default()?;
                 let mut config = build_config(server, settings, geo, Target::DesktopTun)?;
+                // A clean tunnel: the TUN comes up, routes and DNS stay the admin's.
+                let uplink = if settings.tun_routes {
+                    Some(platform::detect_default()?)
+                } else {
+                    None
+                };
                 if !platform::ipv6_available() {
                     tracing::warn!("IPv6 is disabled on this system; the TUN gets IPv4 only");
                     for inbound in &mut config.inbounds {
@@ -213,19 +218,19 @@ impl Controller {
                 }
                 let upstream = config.dns.upstream.clone();
                 let hooks = PlatformHooks {
-                    bind_interface: Some(uplink.binding.clone()),
+                    bind_interface: uplink.as_ref().map(|u| u.binding.clone()),
                     ..Default::default()
                 };
                 let instance = Instance::start(config, hooks).await.map_err(explain_start)?;
-                let tun = instance.tun_info().cloned();
-                let routes = match tun {
-                    Some(tun) => platform::apply_routes(
-                        &self.data_dir,
-                        &tun,
-                        &instance.server_ips(),
-                        &uplink,
-                    ),
-                    None => Err(ClientError::platform("ядро не создало TUN")),
+                let routes = match (&uplink, instance.tun_info()) {
+                    (None, Some(tun)) => {
+                        tracing::info!("TUN {} is up; routes and DNS are left as they are", tun.name);
+                        Ok(None)
+                    }
+                    (Some(uplink), Some(tun)) => {
+                        platform::apply_routes(&self.data_dir, tun, &instance.server_ips(), uplink).map(Some)
+                    }
+                    (_, None) => Err(ClientError::platform("ядро не создало TUN")),
                 };
                 let routes = match routes {
                     Ok(r) => r,
@@ -235,7 +240,7 @@ impl Controller {
                     }
                 };
                 self.set_ping_env(PingEnv {
-                    binding: Some(uplink.binding),
+                    binding: uplink.map(|u| u.binding),
                     protect: None,
                     own_dns: Some(upstream),
                 });
@@ -243,7 +248,7 @@ impl Controller {
                     counters: Some(instance.counters()),
                     instance: Some(instance),
                     info,
-                    routes: Some(routes),
+                    routes,
                     proxy: None,
                 }
             }

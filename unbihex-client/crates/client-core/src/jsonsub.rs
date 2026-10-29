@@ -207,10 +207,31 @@ fn xray_config(cfg: &Value, out: &mut Vec<String>) {
         .iter()
         .filter(|o| XRAY_PROXIES.contains(&str_of(o, "protocol")))
         .collect();
-    // A panel config usually has one "proxy" outbound plus helpers.
-    let main: Vec<&Value> = match proxies.iter().find(|o| str_of(o, "tag") == "proxy") {
-        Some(p) => vec![*p],
-        None => proxies,
+    // Balancers pick among outbounds whose tags start with a selector (Xray's
+    // rule); each of those is a server here, chosen by hand or by ping.
+    let selectors: Vec<&str> = cfg
+        .pointer("/routing/balancers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b.get("selector").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let balanced: Vec<&Value> = proxies
+        .iter()
+        .copied()
+        .filter(|o| selectors.iter().any(|s| str_of(o, "tag").starts_with(s)))
+        .collect();
+    // Otherwise a panel config usually has one "proxy" outbound plus helpers.
+    let main: Vec<&Value> = if !balanced.is_empty() {
+        balanced
+    } else {
+        match proxies.iter().find(|o| str_of(o, "tag") == "proxy") {
+            Some(p) => vec![*p],
+            None => proxies,
+        }
     };
     let many = main.len() > 1;
     for ob in main {
@@ -334,6 +355,27 @@ mod tests {
         assert!(s.is_supported(), "{:?}", s.unsupported);
         let s = parse_server(&links[1]).unwrap();
         assert!(s.is_supported() && s.protocol == "ss");
+    }
+
+    #[test]
+    fn xray_balancer_servers_are_all_kept() {
+        let ob = |tag: &str, host: &str| {
+            format!(
+                r#"{{"tag":"{tag}","protocol":"vless","settings":{{"vnext":[{{"address":"{host}","port":443,
+                   "users":[{{"id":"{UUID}","encryption":"none"}}]}}]}}}}"#
+            )
+        };
+        let body = format!(
+            r#"{{"remarks":"Auto","outbounds":[{},{},{},{{"tag":"direct","protocol":"freedom"}}],
+                "routing":{{"balancers":[{{"tag":"auto","selector":["proxy"],"strategy":{{"type":"leastPing"}}}}],
+                  "rules":[{{"network":"tcp,udp","balancerTag":"auto"}}]}}}}"#,
+            ob("proxy", "a.example"),
+            ob("proxy-2", "b.example"),
+            ob("proxy-3", "c.example")
+        );
+        let links = links_from_json(&body).unwrap();
+        assert_eq!(links.len(), 3, "{links:?}");
+        assert!(links[1].contains("b.example") && links[1].contains("Auto%20%C2%B7%20proxy%2D2"), "{}", links[1]);
     }
 
     #[test]

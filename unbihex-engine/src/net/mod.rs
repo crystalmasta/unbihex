@@ -1,6 +1,6 @@
 pub mod socket;
 
-pub use socket::{InterfaceBinding, ProtectFn, SocketFactory};
+pub use socket::{InterfaceBinding, ProtectFn, SocketFactory, find_interface};
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
