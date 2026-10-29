@@ -54,7 +54,7 @@ pub async fn serve(
         };
         let (cfg, d) = (cfg.clone(), dispatcher.clone());
         tokio::spawn(async move {
-            let _ = stream.set_nodelay(true);
+            crate::net::socket::tune_tcp(&stream);
             let r = tokio::time::timeout(handshake_timeout, handshake(stream, peer, &cfg)).await;
             drop(permit);
             match r {

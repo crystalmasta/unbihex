@@ -131,6 +131,7 @@ impl RealityServer {
     /// Reads the ClientHello (waiting at most `hello_wait`) and either completes the
     /// handshake or hands the connection back for [`RealityServer::forward`].
     pub async fn accept(&self, mut tcp: TcpStream, hello_wait: Duration) -> Result<Handshake> {
+        crate::net::socket::tune_tcp(&tcp);
         let mut prefix = Vec::with_capacity(2048);
         // A slow or partial hello goes to the real site as it is.
         let hello = tokio::time::timeout(hello_wait, read_hello(&mut tcp, &mut prefix))
