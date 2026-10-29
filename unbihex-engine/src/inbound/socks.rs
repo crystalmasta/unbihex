@@ -58,7 +58,8 @@ pub async fn serve(
         };
         let (cfg, d) = (cfg.clone(), dispatcher.clone());
         tokio::spawn(async move {
-            let _ = stream.set_nodelay(true);
+            // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
+            crate::net::socket::tune_tcp(&stream);
             let r = tokio::time::timeout(handshake_timeout, handshake(stream, peer, &cfg)).await;
             drop(permit);
             match r {
@@ -137,4 +138,44 @@ pub(super) async fn handshake(
             sniffed: None,
         },
     )))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
+    /// `tune_tcp` must reach the kernel, not just be requested: the 4 MiB buffer
+    /// survives the `net.core.{r,w}mem_max` caps here (16 MiB), and Nagle is off.
+    #[tokio::test]
+    async fn tune_tcp_sets_buffers_and_nodelay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        // Nothing is read from the server side; the connection just has to exist.
+        let (server, _) = listener.accept().await.unwrap();
+
+        crate::net::socket::tune_tcp(&client);
+        let sref = socket2::SockRef::from(&client);
+        // The kernel caps the request at net.core.{r,w}mem_max, so assert "as large
+        // as this host allows" instead of the requested size.
+        #[cfg(target_os = "linux")]
+        for (name, actual) in [
+            ("rmem_max", sref.recv_buffer_size().unwrap()),
+            ("wmem_max", sref.send_buffer_size().unwrap()),
+        ] {
+            let cap = std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok());
+            let want = cap.map_or(crate::net::socket::SOCKET_BUFFER, |c| {
+                c.min(crate::net::socket::SOCKET_BUFFER)
+            });
+            assert!(actual >= want, "{name}: {actual} < {want}");
+        }
+        assert!(sref.tcp_nodelay().unwrap());
+
+        drop(client);
+        drop(server);
+    }
 }
