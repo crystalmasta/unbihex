@@ -116,6 +116,25 @@ unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-l
 `tun` заворачивает весь трафик машины (нужен root, `ip` и `resolvectl`), `system` — прокси плюс настройки GNOME.
 Данные — в `~/.config/unbihex-cli` (или `--dir`, `$UNBIHEX_DIR`).
 
+### NAS (QNAP, Synology) и домашний сервер
+
+Бинарники для Linux статические: годятся для NAS на x86_64, ARM64 и ARMv7, как напрямую по SSH, так и в Docker
+(QNAP Container Station, Synology Container Manager). Чтобы прокси NAS был доступен устройствам в сети:
+`unbihex-cli connect --lan`. Логин и пароль для устройств выводятся при подключении.
+
+Docker: рядом с бинарником для процессора NAS (переименованным в `unbihex-cli`) положите
+[`docker/Dockerfile`](docker/Dockerfile) и выполните:
+
+```text
+docker build -t unbihex-cli .
+docker run --rm -v /share/Container/unbihex:/data unbihex-cli add 'https://ваша-подписка'
+docker run -d --name unbihex --restart unless-stopped -v /share/Container/unbihex:/data -p 10808:10808 -p 10809:10809 unbihex-cli
+docker logs unbihex
+```
+
+Свой конфиг ядра вместо подписки: `docker run … unbihex-cli run -c /data/config.json`. Режим TUN в контейнере
+требует `--network host --cap-add NET_ADMIN --device /dev/net/tun`.
+
 ### Роутер или сервер: чистый туннель
 
 `connect --mode tun --no-routes` поднимает интерфейс `unbihex0` и больше ничего не меняет: маршруты, `ip rule`

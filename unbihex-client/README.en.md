@@ -119,6 +119,25 @@ unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-l
 captures all traffic of the machine (needs root, `ip` and `resolvectl`), `system` is the proxy plus GNOME's settings.
 Data lives in `~/.config/unbihex-cli` (or `--dir`, `$UNBIHEX_DIR`).
 
+### A NAS (QNAP, Synology) or a home server
+
+The Linux binaries are static: they run on x86_64, ARM64 and ARMv7 NAS devices, over SSH as well as in Docker
+(QNAP Container Station, Synology Container Manager). To share the NAS's proxy with devices in the network:
+`unbihex-cli connect --lan`. The login and password for the devices are printed on connecting.
+
+Docker: put [`docker/Dockerfile`](docker/Dockerfile) next to the binary for the NAS's processor (renamed to
+`unbihex-cli`) and run:
+
+```text
+docker build -t unbihex-cli .
+docker run --rm -v /share/Container/unbihex:/data unbihex-cli add 'https://your-subscription'
+docker run -d --name unbihex --restart unless-stopped -v /share/Container/unbihex:/data -p 10808:10808 -p 10809:10809 unbihex-cli
+docker logs unbihex
+```
+
+Your own engine config instead of a subscription: `docker run … unbihex-cli run -c /data/config.json`. TUN mode in
+a container needs `--network host --cap-add NET_ADMIN --device /dev/net/tun`.
+
 ### A router or a server: a clean tunnel
 
 `connect --mode tun --no-routes` brings up `unbihex0` and changes nothing else: routes, `ip rule` and DNS stay

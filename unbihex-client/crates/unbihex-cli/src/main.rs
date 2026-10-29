@@ -13,7 +13,8 @@ use unbihex_engine::{Config, Instance, PlatformHooks};
 const USAGE: &str = "\
 usage: unbihex-cli [--dir <folder>] <command>
 
-  add <url | link>...      add subscription URLs or share links (vless://, ss://, …)
+  add <url | link | file>... add subscription URLs, share links (vless://, ss://, …)
+                           or a file: links, or an Xray / sing-box JSON config
   update                   refresh all subscriptions
   subs                     list subscriptions
   list                     list servers (* = selected)
@@ -28,6 +29,8 @@ usage: unbihex-cli [--dir <folder>] <command>
                                 stay yours (routers, servers); --routes undoes it
       --tun-name <name>         tun interface name (default unbihex0)
       --interface <name|auto>   bind the engine's own connections to this interface
+      --lan / --no-lan          open the proxy ports to the local network (a NAS,
+                                a home server); devices log in with the printed password
       --mark <n|off>            Linux: SO_MARK of the engine's own connections
                                 (for `ip rule fwmark`); connect options are saved
   settings                 show the connection settings
@@ -205,14 +208,35 @@ async fn run(client: &Client, cmd: &str, args: &[String]) -> Result<(), String> 
             if args.is_empty() {
                 return Err(USAGE.into());
             }
-            let r = client
-                .add_input(&args.join("\n"))
-                .await
-                .map_err(|e| e.to_string())?;
-            println!("subscriptions: {}, servers: {}", r.subscriptions, r.servers);
-            for e in &r.errors {
-                eprintln!("  {e}");
+            // A file (a JSON config from another client, a list of links) is read as
+            // its contents and added on its own: JSON must not be mixed with lines.
+            let mut inputs = Vec::new();
+            let mut lines = Vec::new();
+            for a in args {
+                let path = Path::new(a);
+                if !a.contains("://") && path.is_file() {
+                    inputs.push(std::fs::read_to_string(path).map_err(|e| format!("{a}: {e}"))?);
+                } else {
+                    lines.push(a.as_str());
+                }
             }
+            if !lines.is_empty() {
+                inputs.push(lines.join("\n"));
+            }
+            let (mut subs, mut servers) = (0, 0);
+            for input in inputs {
+                match client.add_input(&input).await {
+                    Ok(r) => {
+                        subs += r.subscriptions;
+                        servers += r.servers;
+                        for e in &r.errors {
+                            eprintln!("  {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("  {e}"),
+                }
+            }
+            println!("subscriptions: {subs}, servers: {servers}");
         }
         "update" => {
             for (id, r) in client.update_all(true).await {
@@ -274,6 +298,8 @@ async fn run(client: &Client, cmd: &str, args: &[String]) -> Result<(), String> 
                     }
                     "--no-routes" => settings.tun_routes = false,
                     "--routes" => settings.tun_routes = true,
+                    "--lan" => settings.allow_lan = true,
+                    "--no-lan" => settings.allow_lan = false,
                     "--tun-name" => settings.tun_name = value()?,
                     "--interface" => {
                         let v = value()?;
@@ -314,11 +340,18 @@ async fn run(client: &Client, cmd: &str, args: &[String]) -> Result<(), String> 
                     unbihex_client_core::plan::TUN_DNS
                 );
             }
+            let host = if settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" };
             if let Some(p) = info.socks_port {
-                println!("  SOCKS5 127.0.0.1:{p}");
+                println!("  SOCKS5 {host}:{p}");
             }
             if let Some(p) = info.http_port {
-                println!("  HTTP   127.0.0.1:{p}");
+                println!("  HTTP   {host}:{p}");
+            }
+            if settings.allow_lan {
+                println!(
+                    "  LAN    login {} password {} (this machine needs none)",
+                    settings.lan_username, settings.lan_password
+                );
             }
             println!("Ctrl-C to disconnect");
             stop_signal().await;
