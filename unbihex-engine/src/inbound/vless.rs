@@ -260,6 +260,11 @@ async fn accept(
     } else {
         user.email.as_str()
     };
+    if !req.vision {
+        // No XTLS Vision on this connection, so nothing will switch to a raw
+        // read: stop framing reads by hand and read the socket in bulk.
+        tls.set_bulk();
+    }
     let stream = ResponseFirst::new(tls);
     let session = |network| Session {
         network,

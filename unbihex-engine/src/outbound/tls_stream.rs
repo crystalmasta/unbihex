@@ -18,6 +18,13 @@ use tokio::net::TcpStream;
 
 use crate::error::{Error, Result};
 
+/// How much of the socket a [`TlsRecordStream`] read asks for in bulk mode once
+/// it is moving data.
+const BULK_READ: usize = 64 * 1024;
+/// The first bulk reads ask for one record only: an idle connection should not
+/// hold 64 KB of scratch for a transfer that may never happen.
+const BULK_READ_MIN: usize = 16 * 1024;
+
 /// Where the record reader is inside the current record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
@@ -132,6 +139,16 @@ impl Write for Sink<'_, '_> {
             Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
         }
     }
+    /// rustls hands `write_tls` a header chunk and a payload chunk and writes them
+    /// with `write_vectored`. The default `Write::write_vectored` only writes the
+    /// first chunk, so without this every record costs two `write` syscalls and
+    /// arrives as a 5-byte segment followed by the payload.
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        match Pin::new(&mut *self.tcp).poll_write_vectored(self.cx, bufs) {
+            Poll::Ready(r) => r,
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        }
+    }
     fn flush(&mut self) -> io::Result<()> {
         match Pin::new(&mut *self.tcp).poll_flush(self.cx) {
             Poll::Ready(r) => r,
@@ -144,6 +161,58 @@ fn tls_err(e: rustls::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
+/// What [`feed_wire`] managed to hand over.
+struct Fed {
+    /// Bytes of the slice rustls accepted.
+    consumed: usize,
+    /// The peer ended the TLS stream.
+    eof: bool,
+}
+
+/// Hands wire bytes to rustls, draining decrypted plaintext into `buf` as it goes
+/// so rustls' plaintext buffer never fills up mid-buffer.
+///
+/// Stops when `buf` is full; the caller keeps the rest for the next read.
+fn feed_wire(conn: &mut Connection, wire: &[u8], buf: &mut ReadBuf<'_>) -> io::Result<Fed> {
+    let mut rest = wire;
+    let mut eof = false;
+    while !rest.is_empty() {
+        match conn.read_tls(&mut rest) {
+            Ok(0) => {
+                eof = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e),
+        }
+        conn.process_new_packets().map_err(tls_err)?;
+        match conn.reader().read(buf.initialize_unfilled()) {
+            // read() returns 0 only at the end of the TLS stream.
+            Ok(0) => {
+                eof = true;
+                break;
+            }
+            Ok(n) => {
+                buf.advance(n);
+                if buf.remaining() == 0 {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                eof = true;
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(Fed {
+        consumed: wire.len() - rest.len(),
+        eof,
+    })
+}
+
 /// A TLS stream with record-exact reads and a switch to raw reads.
 pub struct TlsRecordStream {
     tcp: TcpStream,
@@ -151,6 +220,12 @@ pub struct TlsRecordStream {
     rec: RecordReader,
     /// Reads bypass TLS (Vision direct copy).
     raw_read: bool,
+    /// Reads no longer stop at TLS record boundaries (Vision is not in use).
+    bulk: bool,
+    /// One socket read while `bulk`; fed to rustls from memory.
+    scratch: Vec<u8>,
+    /// Wire bytes read from the socket but not yet handed to rustls.
+    carry: Vec<u8>,
     /// The peer closed the TLS stream.
     eof: bool,
     /// close_notify was queued.
@@ -173,8 +248,31 @@ impl TlsRecordStream {
             conn: conn.into(),
             rec: RecordReader::new(),
             raw_read: false,
+            bulk: false,
+            scratch: Vec::new(),
+            carry: Vec::new(),
             eof: false,
             closing: false,
+        }
+    }
+
+    /// Stops reading one record at a time.
+    ///
+    /// The record-exact feed exists for XTLS Vision, which may switch to a raw
+    /// copy in the middle of the connection and therefore must not have read past
+    /// the record carrying the command. Without Vision that guarantee costs two
+    /// socket reads per record — a 5-byte header read and a body read — and pins
+    /// reads to the first record, so a `read` can never return more than 16 KB.
+    /// Bulk mode reads the socket once into a scratch buffer and lets rustls
+    /// deframe from memory instead.
+    pub fn set_bulk(&mut self) {
+        if self.bulk {
+            return;
+        }
+        debug_assert!(self.rec.at_boundary(), "bulk read mid-record");
+        self.bulk = true;
+        if self.scratch.is_empty() {
+            self.scratch = vec![0u8; BULK_READ_MIN];
         }
     }
 
@@ -307,6 +405,100 @@ impl TlsRecordStream {
         Ok(left)
     }
 
+    /// Reads as much as the socket has, up to `buf.len()`, without stopping at a
+    /// record boundary: the socket is read once into `scratch` and rustls deframes
+    /// it from memory. Keeps decrypting while the caller has room, so a 64 KB read
+    /// can come back in one call instead of four 16 KB ones.
+    fn poll_read_bulk(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        loop {
+            // Anything already decrypted goes out first.
+            match self.conn.reader().read(buf.initialize_unfilled()) {
+                Ok(0) => {
+                    if buf.filled().len() == before {
+                        // close_notify: the peer ended the TLS stream cleanly.
+                        self.eof = true;
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(n) => {
+                    buf.advance(n);
+                    if buf.remaining() == 0 {
+                        return Poll::Ready(Ok(()));
+                    }
+                    continue;
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                // Closed without close_notify: treat as a normal end of stream.
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    self.eof = true;
+                    return Poll::Ready(Ok(()));
+                }
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+            // Never block once bytes were delivered; the next poll drains the rest.
+            if buf.filled().len() > before {
+                return Poll::Ready(Ok(()));
+            }
+
+            // Wire bytes rustls did not take last time go first.
+            if !self.carry.is_empty() {
+                let wire = std::mem::take(&mut self.carry);
+                match feed_wire(&mut self.conn, &wire, buf) {
+                    Ok(fed) => {
+                        if fed.consumed < wire.len() {
+                            self.carry = wire[fed.consumed..].to_vec();
+                        }
+                        if fed.eof {
+                            self.eof = true;
+                        }
+                    }
+                    Err(e) => return Poll::Ready(Err(e)),
+                }
+                if buf.remaining() == 0 || self.eof {
+                    return Poll::Ready(Ok(()));
+                }
+                continue;
+            }
+
+            let n = {
+                let mut rb = ReadBuf::new(&mut self.scratch);
+                match Pin::new(&mut self.tcp).poll_read(cx, &mut rb) {
+                    Poll::Ready(Ok(())) => rb.filled().len(),
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            };
+            if n == 0 {
+                self.eof = true;
+                return Poll::Ready(Ok(()));
+            }
+            if n == self.scratch.len() && self.scratch.len() < BULK_READ {
+                // A full read means a bulk transfer: ask for more next time.
+                let next = (self.scratch.len() * 2).min(BULK_READ);
+                self.scratch.resize(next, 0);
+            }
+            match feed_wire(&mut self.conn, &self.scratch[..n], buf) {
+                Ok(fed) => {
+                    if fed.consumed < n {
+                        self.carry = self.scratch[fed.consumed..n].to_vec();
+                    }
+                    if fed.eof || fed.consumed == 0 {
+                        self.eof = true;
+                    }
+                }
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+            if buf.remaining() == 0 || self.eof {
+                return Poll::Ready(Ok(()));
+            }
+        }
+    }
+
     /// Writes queued ciphertext; `Pending` while the socket is full.
     fn poll_flush_tls(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.conn.wants_write() {
@@ -329,6 +521,9 @@ impl AsyncRead for TlsRecordStream {
         let this = &mut *self;
         if this.raw_read {
             return Pin::new(&mut this.tcp).poll_read(cx, buf);
+        }
+        if this.bulk {
+            return this.poll_read_bulk(cx, buf);
         }
         loop {
             if this.eof {
@@ -537,6 +732,33 @@ mod tests {
         assert!(got == data);
     }
 
+    /// Bulk mode: a single read crosses record boundaries, and the stream still
+    /// ends where it should.
+    #[tokio::test]
+    async fn bulk_read_crosses_record_boundaries() {
+        let (c, mut s) = connected_pair();
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let wire = sealed(&mut s, &data);
+        let (ours, mut peer) = tcp_pair().await;
+        peer.set_nodelay(true).unwrap();
+        tokio::spawn(async move {
+            peer.write_all(&wire).await.unwrap();
+            peer.shutdown().await.unwrap();
+        });
+        let mut tls = TlsRecordStream::new(ours, c);
+        tls.set_bulk();
+        let mut buf = vec![0u8; BULK_READ];
+        let first = tls.read(&mut buf).await.unwrap();
+        assert!(
+            first > 16 * 1024,
+            "a bulk read returned {first} bytes: still stopping at one record"
+        );
+        let mut got = buf[..first].to_vec();
+        tls.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got.len(), data.len());
+        assert!(got == data);
+    }
+
     /// One TLS stream over loopback, ours against tokio-rustls on either side:
     /// `cargo test --release --features server --lib tls_throughput -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread")]
@@ -545,7 +767,14 @@ mod tests {
         use crate::outbound::AsyncStream;
         const TOTAL: usize = 1 << 30;
         let (client_cfg, server_cfg) = configs();
-        for (writer_ours, reader_ours) in [(true, true), (false, false), (false, true), (true, false)] {
+        for (writer_ours, reader_ours, bulk) in [
+            (true, true, false),
+            (true, true, true),
+            (false, false, false),
+            (false, true, false),
+            (false, true, true),
+            (true, false, false),
+        ] {
             let (ours, peer) = tcp_pair().await;
             let scfg = server_cfg.clone();
             let writer = tokio::spawn(async move {
@@ -564,7 +793,11 @@ mod tests {
             });
             let name = ServerName::try_from("example.com").unwrap();
             let mut r: Box<dyn AsyncStream> = if reader_ours {
-                Box::new(TlsRecordStream::connect(ours, client_cfg.clone(), name, None).await.unwrap())
+                let mut r = TlsRecordStream::connect(ours, client_cfg.clone(), name, None).await.unwrap();
+                if bulk {
+                    r.set_bulk();
+                }
+                Box::new(r)
             } else {
                 Box::new(tokio_rustls::TlsConnector::from(client_cfg.clone()).connect(name, ours).await.unwrap())
             };
@@ -581,10 +814,12 @@ mod tests {
             let secs = start.elapsed().as_secs_f64();
             writer.await.unwrap();
             let side = |o: bool| if o { "ours" } else { "tokio-rustls" };
+            let how = if reader_ours && !bulk { "exact" } else if bulk { "bulk" } else { "" };
             println!(
-                "writer {:12} reader {:12} {:6.2} Gbit/s",
+                "writer {:12} reader {:12} {:5} {:6.2} Gbit/s",
                 side(writer_ours),
                 side(reader_ours),
+                how,
                 got as f64 * 8.0 / secs / 1e9
             );
         }

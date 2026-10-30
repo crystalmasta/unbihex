@@ -374,13 +374,17 @@ impl VlessOutbound {
             return Ok(Box::new(VlessStream::new(stream, header)));
         }
         // REALITY and Vision need the record-exact TLS stream.
-        let tls: TlsRecordStream = match (&self.reality, &self.tls) {
+        let mut tls: TlsRecordStream = match (&self.reality, &self.tls) {
             (Some(r), _) => r.connect(tcp, self.fragment.as_ref()).await?,
             (None, Some(t)) => t.connect_record(tcp, self.fragment.as_ref()).await?,
             (None, None) => return Err(Error::config("vision needs tls or reality")),
         };
         // Vision wraps TCP and the Mux stream that carries XUDP.
         let vision = self.vision && (cmd == CMD_TCP || cmd == CMD_MUX);
+        if !vision {
+            // Nothing can switch to a raw copy, so read records in bulk.
+            tls.set_bulk();
+        }
         let flow = vision.then_some(FLOW_VISION);
         let header = encode_request_with_flow(&self.uuid, cmd, target, flow)?;
         let vless = VlessStream::new(tls, header);
