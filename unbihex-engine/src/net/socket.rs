@@ -37,8 +37,45 @@ pub(crate) const SOCKET_BUFFER: usize = 4 * 1024 * 1024;
 pub fn tune_tcp(stream: &TcpStream) {
     let sref = SockRef::from(stream);
     let _ = sref.set_tcp_nodelay(true);
-    let _ = sref.set_recv_buffer_size(SOCKET_BUFFER);
-    let _ = sref.set_send_buffer_size(SOCKET_BUFFER);
+    let (recv, send) = fixed_buffers();
+    if recv {
+        let _ = sref.set_recv_buffer_size(SOCKET_BUFFER);
+    }
+    if send {
+        let _ = sref.set_send_buffer_size(SOCKET_BUFFER);
+    }
+}
+
+/// Whether to ask for [`SOCKET_BUFFER`] as the (receive, send) buffer.
+///
+/// On Linux and Android an explicit size turns the kernel's autotuning off and is
+/// capped at `net.core.{r,w}mem_max` (208 KiB by default): there a fixed buffer only
+/// pays off when the cap admits the whole of it, otherwise autotuning (up to
+/// `tcp_{r,w}mem`, 6 / 4 MiB by default) does better. Unreadable caps count as low.
+/// Elsewhere the size is always set.
+fn fixed_buffers() -> (bool, bool) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        static CAPS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+        *CAPS.get_or_init(|| {
+            let cap = |name: &str| {
+                std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+            };
+            (admits(cap("rmem_max")), admits(cap("wmem_max")))
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        (true, true)
+    }
+}
+
+/// Whether a kernel cap of `cap` bytes admits the whole [`SOCKET_BUFFER`].
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+fn admits(cap: Option<usize>) -> bool {
+    cap.is_some_and(|c| c >= SOCKET_BUFFER)
 }
 
 /// The physical interface outgoing sockets are bound to.
@@ -251,4 +288,18 @@ fn bind_to_interface(_sock: &Socket, _b: &InterfaceBinding, _v6: bool) -> io::Re
         io::ErrorKind::Unsupported,
         "interface binding is not supported on this OS",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_buffers_only_when_the_cap_admits_them() {
+        assert!(!admits(None), "unreadable cap: keep autotuning");
+        assert!(!admits(Some(212_992)), "default Linux rmem_max");
+        assert!(!admits(Some(SOCKET_BUFFER - 1)));
+        assert!(admits(Some(SOCKET_BUFFER)));
+        assert!(admits(Some(16 * 1024 * 1024)));
+    }
 }

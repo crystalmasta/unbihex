@@ -340,7 +340,7 @@ works too) every outgoing socket is bound to; it replaces the platform layer's b
 fails the start. `route.default_mark` is `SO_MARK` (needs `CAP_NET_ADMIN`) for policy routing
 (`ip rule add fwmark …`); Linux only, 0 is not allowed. Neither can change in a hot reload.
 
-TCP: `TCP_NODELAY` = true, keepalive 30 s.
+TCP: `TCP_NODELAY` = true, keepalive 30 s. Receive and send buffers of 4 MiB (accepted inbound connections too); on Linux and Android only when `net.core.rmem_max` / `wmem_max` is at least 4 MiB: an explicit size there turns the kernel's buffer autotuning off, and under the default cap (208 KiB) that is worse than none.
 
 ---
 

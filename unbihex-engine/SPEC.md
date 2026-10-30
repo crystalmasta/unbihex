@@ -340,7 +340,7 @@ impl SocketFactory {
 интерфейс — ошибка старта. `route.default_mark` — `SO_MARK` (нужен `CAP_NET_ADMIN`) для policy routing
 (`ip rule add fwmark …`); только Linux, 0 запрещён. Оба поля не меняются при hot reload.
 
-TCP: `TCP_NODELAY` = true, keepalive 30 с.
+TCP: `TCP_NODELAY` = true, keepalive 30 с. Буферы приёма и отправки 4 МиБ (и у принятых inbound-соединений); на Linux и Android — только если `net.core.rmem_max` / `wmem_max` не меньше 4 МиБ: явный размер там отключает автонастройку буфера ядром, и при стандартном пределе (208 КиБ) это хуже, чем без него.
 
 ---
 

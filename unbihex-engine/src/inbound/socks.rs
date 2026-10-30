@@ -146,8 +146,9 @@ mod tests {
     use super::*;
 
     // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
-    /// `tune_tcp` must reach the kernel, not just be requested: the 4 MiB buffer
-    /// survives the `net.core.{r,w}mem_max` caps here (16 MiB), and Nagle is off.
+    /// `tune_tcp` must reach the kernel, not just be requested, and Nagle is off. On
+    /// Linux the 4 MiB buffer is only asked for when `net.core.{r,w}mem_max` admits
+    /// it (otherwise autotuning stays on).
     #[tokio::test]
     async fn tune_tcp_sets_buffers_and_nodelay() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -168,10 +169,10 @@ mod tests {
             let cap = std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
                 .ok()
                 .and_then(|s| s.trim().parse::<usize>().ok());
-            let want = cap.map_or(crate::net::socket::SOCKET_BUFFER, |c| {
-                c.min(crate::net::socket::SOCKET_BUFFER)
-            });
-            assert!(actual >= want, "{name}: {actual} < {want}");
+            let want = crate::net::socket::SOCKET_BUFFER;
+            if cap.is_some_and(|c| c >= want) {
+                assert!(actual >= want, "{name}: {actual} < {want}");
+            }
         }
         assert!(sref.tcp_nodelay().unwrap());
 
