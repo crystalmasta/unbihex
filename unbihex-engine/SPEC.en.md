@@ -227,6 +227,11 @@ If any step fails, undo what has been done and return the error.
 - Unknown fields are an error (`#[serde(deny_unknown_fields)]`), so typos do not pass silently.
 - TLS has **no** option to disable certificate verification.
 - Mobile (`tun_fd` set): a tun inbound ignores `name`, `auto_route` and the addresses, which the OS manages. At most one tun inbound is allowed.
+- `limits.socket_buffer` is how many bytes to ask the kernel for in `SO_RCVBUF`/`SO_SNDBUF` of every TCP
+  socket carrying tunnel traffic (4 MiB by default). It is a cap, not an allocation: the kernel fills
+  it as data arrives. `0` leaves sockets untouched at the kernel default, for a host with thousands
+  of connections. The accepted range is 65536..16777216 bytes; anything else is a config error. The
+  kernel still clamps the request to `net.core.{r,w}mem_max`.
 - The `limits` defaults are the values in the example.
 
 ### 5.3 `tun` defaults

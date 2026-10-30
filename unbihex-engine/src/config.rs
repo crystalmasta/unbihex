@@ -844,6 +844,14 @@ pub struct Limits {
     /// Limit for proxy handshakes and outbound connects, in seconds.
     #[serde(default = "default_handshake_timeout")]
     pub handshake_timeout_secs: u64,
+    /// Buffer every proxy-side TCP socket asks the kernel for, in bytes.
+    ///
+    /// This is a cap, not an allocation: the kernel fills it on demand, and a
+    /// long path runs at `buffer / RTT` until it is raised. `0` leaves the
+    /// kernel default, which is what a host with thousands of connections may
+    /// prefer over 4 MiB per direction.
+    #[serde(default = "default_socket_buffer")]
+    pub socket_buffer: usize,
 }
 
 impl Default for Limits {
@@ -853,6 +861,7 @@ impl Default for Limits {
             tcp_idle_secs: default_tcp_idle(),
             udp_idle_secs: default_udp_idle(),
             handshake_timeout_secs: default_handshake_timeout(),
+            socket_buffer: default_socket_buffer(),
         }
     }
 }
@@ -868,6 +877,9 @@ fn default_udp_idle() -> u64 {
 }
 fn default_handshake_timeout() -> u64 {
     10
+}
+fn default_socket_buffer() -> usize {
+    crate::net::socket::DEFAULT_SOCKET_BUFFER
 }
 
 impl Config {
@@ -1067,6 +1079,17 @@ impl Config {
         if self.limits.max_connections == 0 {
             return Err(Error::config("limits.max_connections must be positive"));
         }
+        let buffer = self.limits.socket_buffer;
+        if buffer != 0
+            && !(crate::net::socket::MIN_SOCKET_BUFFER..=crate::net::socket::MAX_SOCKET_BUFFER)
+                .contains(&buffer)
+        {
+            return Err(Error::config(format!(
+                "limits.socket_buffer must be 0 (kernel default) or between {} and {} bytes, got {buffer}",
+                crate::net::socket::MIN_SOCKET_BUFFER,
+                crate::net::socket::MAX_SOCKET_BUFFER
+            )));
+        }
         Ok(())
     }
 }
@@ -1229,5 +1252,32 @@ mod tests {
         let c = Config::from_link("vless://x@h:1").unwrap();
         assert!(c.tun().is_some());
         assert_eq!(c.final_outbound(), "proxy");
+    }
+
+    #[test]
+    fn socket_buffer_limit() {
+        let cfg = |limits: &str| {
+            Config::from_json(&format!(
+                r#"{{"outbounds":[{{"type":"direct","tag":"d"}}],"limits":{{{limits}}}}}"#
+            ))
+        };
+        // Absent: the 4 MiB default that the bench measured.
+        assert_eq!(
+            cfg("").unwrap().limits.socket_buffer,
+            crate::net::socket::DEFAULT_SOCKET_BUFFER
+        );
+        assert_eq!(cfg(r#""socket_buffer":131072"#).unwrap().limits.socket_buffer, 131_072);
+        // 0 is the documented way to leave the kernel default alone.
+        assert_eq!(cfg(r#""socket_buffer":0"#).unwrap().limits.socket_buffer, 0);
+        for bad in ["1024", "33554432"] {
+            let err = cfg(&format!(r#""socket_buffer":{bad}"#)).unwrap_err();
+            assert!(
+                err.to_string().contains("limits.socket_buffer"),
+                "{bad}: {err}"
+            );
+        }
+        // The rest of the limits block keeps its defaults.
+        let c = cfg(r#""socket_buffer":131072"#).unwrap();
+        assert_eq!(c.limits.max_connections, 4096);
     }
 }

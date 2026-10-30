@@ -156,7 +156,10 @@ mod tests {
         // Nothing is read from the server side; the connection just has to exist.
         let (server, _) = listener.accept().await.unwrap();
 
-        crate::net::socket::tune_tcp(&client);
+        crate::net::socket::tune_tcp_with(
+            &client,
+            crate::net::socket::DEFAULT_SOCKET_BUFFER,
+        );
         let sref = socket2::SockRef::from(&client);
         // The kernel caps the request at net.core.{r,w}mem_max, so assert "as large
         // as this host allows" instead of the requested size.
@@ -168,8 +171,8 @@ mod tests {
             let cap = std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
                 .ok()
                 .and_then(|s| s.trim().parse::<usize>().ok());
-            let want = cap.map_or(crate::net::socket::SOCKET_BUFFER, |c| {
-                c.min(crate::net::socket::SOCKET_BUFFER)
+            let want = cap.map_or(crate::net::socket::DEFAULT_SOCKET_BUFFER, |c| {
+                c.min(crate::net::socket::DEFAULT_SOCKET_BUFFER)
             });
             assert!(actual >= want, "{name}: {actual} < {want}");
         }
