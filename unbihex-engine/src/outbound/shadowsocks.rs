@@ -4,12 +4,10 @@
 //! UDP: salt | seal(nonce = 0, socks_addr || payload)
 //! subkey = HKDF-SHA1(master_key, salt, "ss-subkey"); master_key = EVP_BytesToKey(MD5)
 
-use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
-use std::time::Duration;
 
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes128Gcm, Aes256Gcm};
@@ -20,7 +18,6 @@ use rand::RngCore;
 use sha1::Sha1;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
-use tokio::time::Sleep;
 
 use super::{BoxStream, Outbound, PacketStream, ServerEndpoint};
 use crate::address::{TargetAddr, parse_socks_addr, write_socks_addr};
@@ -33,7 +30,6 @@ use crate::session::Session;
 pub const MAX_CHUNK: usize = 0x3FFF;
 /// AEAD tag length.
 pub const TAG_LEN: usize = 16;
-const EARLY_DATA_WAIT: Duration = Duration::from_millis(5);
 /// Passwords shorter than this get a warning (the key derivation is weak).
 const MIN_STRONG_PASSWORD: usize = 16;
 
@@ -199,7 +195,6 @@ pub struct SsStream<S> {
     enc: AeadCipher,
     salt_pending: Option<Vec<u8>>,
     first: Option<Vec<u8>>,
-    deadline: Pin<Box<Sleep>>,
     out: PendingOut,
     dec: Option<AeadCipher>,
     stage: ReadStage,
@@ -220,7 +215,6 @@ impl<S> SsStream<S> {
             enc,
             salt_pending: Some(salt),
             first,
-            deadline: Box::pin(tokio::time::sleep(EARLY_DATA_WAIT)),
             out: PendingOut::default(),
             dec: None,
             stage: ReadStage::Salt,
@@ -333,12 +327,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for SsStream<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
-        if this.first.is_some() {
-            ready!(this.deadline.as_mut().poll(cx));
-            ready!(this.poll_push(cx, true))?;
-        } else {
-            ready!(this.poll_push(cx, false))?;
-        }
+        // The server answers only after the target address, and a download-only
+        // connection never writes, so a read has to send it now.
+        ready!(this.poll_push(cx, true))?;
         if this.plain_pos >= this.plain.len() && !ready!(this.poll_fill(cx))? {
             return Poll::Ready(Ok(()));
         }

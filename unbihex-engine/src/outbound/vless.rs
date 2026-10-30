@@ -4,17 +4,14 @@
 //! Response: ver(0) | addons_len(N) | addons(N) | payload…
 //! UDP (cmd 2): every packet is `len(be16) | payload` in both directions.
 
-use std::future::Future;
 use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
-use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
-use tokio::time::Sleep;
 
 use super::reality::RealityClient;
 use super::tls::TlsClient;
@@ -40,9 +37,6 @@ pub const ATYP_IPV4: u8 = 0x01;
 pub const ATYP_DOMAIN: u8 = 0x02;
 /// VLESS address type: IPv6.
 pub const ATYP_IPV6: u8 = 0x03;
-
-/// How long the request header waits for the first client payload to ride along.
-const EARLY_DATA_WAIT: Duration = Duration::from_millis(5);
 
 /// Encodes a VLESS request header.
 pub fn encode_request(uuid: &[u8; 16], cmd: u8, target: &TargetAddr) -> Result<Vec<u8>> {
@@ -112,7 +106,6 @@ enum Resp {
 pub struct VlessStream<S> {
     inner: S,
     header: Option<Vec<u8>>,
-    deadline: Pin<Box<Sleep>>,
     out: PendingOut,
     resp: Resp,
 }
@@ -128,7 +121,6 @@ impl<S> VlessStream<S> {
         VlessStream {
             inner,
             header: Some(header),
-            deadline: Box::pin(tokio::time::sleep(EARLY_DATA_WAIT)),
             out: PendingOut::default(),
             resp: Resp::Head {
                 buf: [0; 2],
@@ -159,13 +151,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VlessStream<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
-        if this.header.is_some() {
-            // The server answers only after the header; wait briefly for payload to coalesce.
-            ready!(this.deadline.as_mut().poll(cx));
-            ready!(this.poll_push(cx, true))?;
-        } else {
-            ready!(this.poll_push(cx, false))?;
-        }
+        // The server answers only after the request header, and a download-only
+        // connection never writes, so a read has to send it now. Waiting here for
+        // early data to coalesce stalled every such connection by the full wait.
+        ready!(this.poll_push(cx, true))?;
         loop {
             match &mut this.resp {
                 Resp::Done => return Pin::new(&mut this.inner).poll_read(cx, buf),
