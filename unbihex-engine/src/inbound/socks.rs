@@ -145,9 +145,10 @@ pub(super) async fn handshake(
 mod tests {
     use super::*;
 
-    // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
-    /// `tune_tcp` must reach the kernel, not just be requested: the 4 MiB buffer
-    /// survives the `net.core.{r,w}mem_max` caps here (16 MiB), and Nagle is off.
+    /// `tune_tcp_with` must reach the kernel, not just be requested: a 128 KiB
+    /// request survives the `net.core.{r,w}mem_max` caps, and Nagle is off.
+    /// The default is now "leave the buffers to the kernel", so the test asks for
+    /// an explicit size.
     #[tokio::test]
     async fn tune_tcp_sets_buffers_and_nodelay() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -156,10 +157,8 @@ mod tests {
         // Nothing is read from the server side; the connection just has to exist.
         let (server, _) = listener.accept().await.unwrap();
 
-        crate::net::socket::tune_tcp_with(
-            &client,
-            crate::net::socket::DEFAULT_SOCKET_BUFFER,
-        );
+        const REQUEST: usize = 128 * 1024;
+        crate::net::socket::tune_tcp_with(&client, REQUEST);
         let sref = socket2::SockRef::from(&client);
         // The kernel caps the request at net.core.{r,w}mem_max, so assert "as large
         // as this host allows" instead of the requested size.
@@ -171,9 +170,7 @@ mod tests {
             let cap = std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
                 .ok()
                 .and_then(|s| s.trim().parse::<usize>().ok());
-            let want = cap.map_or(crate::net::socket::DEFAULT_SOCKET_BUFFER, |c| {
-                c.min(crate::net::socket::DEFAULT_SOCKET_BUFFER)
-            });
+            let want = cap.map_or(REQUEST, |c| c.min(REQUEST));
             assert!(actual >= want, "{name}: {actual} < {want}");
         }
         assert!(sref.tcp_nodelay().unwrap());

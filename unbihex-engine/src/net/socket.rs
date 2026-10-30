@@ -20,14 +20,17 @@ use crate::error::{Error, Result};
 /// `VpnService.protect(fd)`: returns `false` when the socket could not be protected.
 pub type ProtectFn = Arc<dyn Fn(i32) -> bool + Send + Sync>;
 
-/// Send/receive buffer every proxy-side TCP socket asks the kernel for.
+/// Default for [`set_socket_buffer`]: leave the buffers to the kernel.
 ///
-/// The kernel does not grow this on its own when the peer is window-limited:
-/// with the default (~87 KB) the tunnel is stuck at `buffer / RTT`, which on a
-/// 50 ms path is ~1 MB/s. Measured on the comparison stand: 0.9 MB/s with the
-/// default and 108 MB/s with a 4 MiB buffer, same binaries, one sysctl changed.
-/// 4 MiB is the cap here, not an allocation: the kernel fills it on demand.
-pub const DEFAULT_SOCKET_BUFFER: usize = 4 * 1024 * 1024;
+/// Linux autotunes the receive buffer up to `net.ipv4.tcp_rmem[2]`, and its
+/// receive-window growth is driven by how fast the application drains the
+/// socket. Pinning `SO_RCVBUF` disables that autotuning; measured on a shaped
+/// 50 ms path (MTU 1500) it cost 55 MB/s against 64 and produced occasional
+/// collapses to 1 MB/s, when the kernel's appetite estimate (`rcv_space`) fell
+/// from 5 MB to 56 KB. On a loopback profile with MTU 65536 autotuning looks
+/// worse only because the window (36 KB) is smaller than one segment (64 KB),
+/// which cannot happen on a real link.
+pub const DEFAULT_SOCKET_BUFFER: usize = 0;
 /// Smallest configurable value: below this the cap binds on any real path.
 pub const MIN_SOCKET_BUFFER: usize = 64 * 1024;
 /// Largest configurable value. The kernel clamps to `net.core.{r,w}mem_max`
