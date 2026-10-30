@@ -9,13 +9,14 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{RData, Record, RecordType};
 
-use super::client::{DnsClient, exchange_tcp, is_answer, is_truncated, with_id};
+use super::client::{DnsClient, exchange_tcp, is_answer, is_truncated, race, with_id};
 use super::fakeip::FakeIpPool;
 use crate::address::normalize_domain;
 use crate::dispatcher::Dispatcher;
@@ -24,6 +25,11 @@ use crate::session::{Network, Session};
 
 /// Per-server limit for a forwarded query (it may cross a proxy, maybe over TCP).
 const ROUTED_TIMEOUT: Duration = Duration::from_secs(5);
+/// With no answer yet, the next server is asked in parallel after this long (longer
+/// than for direct queries: opening a flow through a proxy takes a few round trips).
+const ROUTED_STAGGER: Duration = Duration::from_secs(1);
+/// The query is sent again over the same flow after this long without an answer.
+const ROUTED_RESEND: Duration = Duration::from_secs(1);
 
 /// Answers DNS queries captured by the TUN inbound.
 pub struct DnsServer {
@@ -33,6 +39,8 @@ pub struct DnsServer {
     via: Option<(Arc<Dispatcher>, String)>,
     /// Normalized suffixes answered with real records instead of fake ones.
     exclude: HashSet<String>,
+    /// The upstream server that answered a routed query last; queries start with it.
+    preferred: AtomicUsize,
 }
 
 impl DnsServer {
@@ -44,6 +52,7 @@ impl DnsServer {
             ttl,
             via: None,
             exclude: HashSet::new(),
+            preferred: AtomicUsize::new(0),
         }
     }
 
@@ -156,22 +165,31 @@ impl DnsServer {
     ) -> Result<Vec<u8>> {
         // A fresh ID: the client's own may be guessable.
         let wire = with_id(packet, rand::random());
-        let mut last = Error::Dns("no upstream servers".into());
-        for server in self.upstream.upstream() {
-            let sess = Session {
-                network: Network::Udp,
-                source: None,
-                target: (*server).into(),
-                inbound_tag: tag.to_string(),
-                sniffed: None,
-            };
-            match tokio::time::timeout(ROUTED_TIMEOUT, routed_exchange(d, sess, msg, &wire)).await {
-                Ok(Ok(r)) => return Ok(with_id(&r, msg.metadata.id)),
-                Ok(Err(e)) => last = e,
-                Err(_) => last = Error::Dns(format!("{server}: timed out")),
-            }
-        }
-        Err(last)
+        let servers = self.upstream.upstream();
+        let (i, r) = race(
+            servers.len(),
+            self.preferred.load(Ordering::Relaxed),
+            ROUTED_STAGGER,
+            |i| {
+                let server = servers[i];
+                let sess = Session {
+                    network: Network::Udp,
+                    source: None,
+                    target: server.into(),
+                    inbound_tag: tag.to_string(),
+                    sniffed: None,
+                };
+                let one = routed_exchange(d, sess, msg, &wire);
+                async move {
+                    tokio::time::timeout(ROUTED_TIMEOUT, one)
+                        .await
+                        .unwrap_or_else(|_| Err(Error::Dns(format!("{server}: timed out"))))
+                }
+            },
+        )
+        .await?;
+        self.preferred.store(i, Ordering::Relaxed);
+        Ok(with_id(&r, msg.metadata.id))
     }
 }
 
@@ -187,14 +205,28 @@ async fn routed_exchange(
         Ok((_permit, flow)) => {
             flow.send(wire).await?;
             let mut buf = vec![0u8; 65_535];
-            loop {
-                let n = flow.recv(&mut buf).await?;
-                if is_answer(wire, msg, &buf[..n]) {
-                    if !is_truncated(&buf[..n]) {
-                        return Ok(buf[..n].to_vec());
+            let recv = async {
+                loop {
+                    let n = flow.recv(&mut buf).await?;
+                    if is_answer(wire, msg, &buf[..n]) {
+                        return Ok::<_, Error>((!is_truncated(&buf[..n])).then(|| buf[..n].to_vec()));
                     }
-                    break;
                 }
+            };
+            // Resent alongside the receive loop, never by cancelling it: a packet
+            // stream framed over TCP (VLESS) must not lose a half-read packet.
+            let resend = async {
+                loop {
+                    tokio::time::sleep(ROUTED_RESEND).await;
+                    let _ = flow.send(wire).await;
+                }
+            };
+            let answer = tokio::select! {
+                r = recv => r?,
+                () = resend => unreachable!("the resend loop never ends"),
+            };
+            if let Some(r) = answer {
+                return Ok(r);
             }
         }
         Err(Error::Unsupported(_)) => {}

@@ -303,7 +303,8 @@ impl Dispatcher {
 ### 8.3 DNS client to the upstream
 
 - A minimal client: a UDP socket **from the SocketFactory** (§9), the query built with hickory-proto, a random ID, the ID and question checked in the answer.
-- A 2 s timeout per server; servers are tried in order. If the answer is truncated (TC), retry over TCP (a u16 length prefix, RFC 1035 §4.2.2).
+- A 2 s timeout per server. The server that answered last is asked first; while there is no answer, the next one joins in parallel every 300 ms (at once when every running attempt has already failed), and the first answer wins. Without an answer the query is sent to the same server again every 700 ms (one lost datagram must not cost the whole timeout). If the answer is truncated (TC), retry over TCP (a u16 length prefix, RFC 1035 §4.2.2).
+- Queries forwarded from the TUN through the Dispatcher (§8.2) ask the servers the same way, but with a 5 s timeout per server, a 1 s stagger and a resend after 1 s (a flow through a proxy takes a few RTTs to open). The resend goes out alongside the receive, never by cancelling it: UDP over TCP (VLESS) must not lose a half-read packet.
 - A TTL-aware cache: up to 4096 entries, minimum TTL 5 s, maximum 1 h.
 - `resolve(domain) -> Vec<IpAddr>`: A first, AAAA only if the device has an IPv6 route. In the MVP, A only.
 
