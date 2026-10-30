@@ -55,6 +55,8 @@ pub(crate) struct Tcb {
     send_wscale: u8,
     recv_wscale: u8,
     wscale_on: bool,
+    // Unbihex patch: bytes handed to the stream's reader channel but not read yet.
+    unread: usize,
     state: TcpState,
     inflight_packets: BTreeMap<SeqNum, InflightPacket>,
     unordered_packets: BTreeMap<SeqNum, Vec<u8>>,
@@ -90,6 +92,7 @@ impl Tcb {
             send_wscale: 0,
             recv_wscale: 0,
             wscale_on: false,
+            unread: 0,
             state: TcpState::Listen,
             inflight_packets: BTreeMap::new(),
             unordered_packets: BTreeMap::new(),
@@ -131,8 +134,25 @@ impl Tcb {
         }
         self.unordered_packets.insert(seq, buf);
     }
+    // Unbihex patch: data the reader has not taken yet counts against the buffer,
+    // so the window closes when the app sends faster than the stream is read
+    // (stock ipstack queued it without limit).
     pub(super) fn get_available_read_buffer_size(&self) -> usize {
-        self.read_buffer_size.saturating_sub(self.get_unordered_packets_total_len())
+        self.read_buffer_size
+            .saturating_sub(self.get_unordered_packets_total_len())
+            .saturating_sub(self.unread)
+    }
+    pub(super) fn add_unread(&mut self, n: usize) {
+        self.unread += n;
+    }
+    /// Unbihex patch: the reader took `n` bytes. Returns whether the window has just
+    /// reopened past half the buffer and the app should hear of it: below half the
+    /// last window we advertised may have stalled it, above half it never stalls.
+    pub(super) fn release_unread(&mut self, n: usize) -> bool {
+        let before = self.get_available_read_buffer_size();
+        self.unread = self.unread.saturating_sub(n);
+        let half = self.read_buffer_size / 2;
+        before < half && self.get_available_read_buffer_size() >= half
     }
     #[inline]
     pub(crate) fn get_unordered_packets_total_len(&self) -> usize {

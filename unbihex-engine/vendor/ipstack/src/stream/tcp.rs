@@ -288,6 +288,16 @@ impl IpStackTcpStream {
     pub fn stream_sender(&self) -> PacketSender {
         self.stream_sender.clone()
     }
+
+    /// Unbihex patch: the reader took `n` bytes; tells the app when that reopened a
+    /// window it may be waiting on (a pure ACK carrying the new window).
+    fn consumed(&self, n: usize) {
+        let mut tcb = self.tcb.lock().unwrap();
+        let receiving = matches!(tcb.get_state(), TcpState::Established | TcpState::FinWait1 | TcpState::FinWait2);
+        if tcb.release_unread(n) && receiving {
+            _ = write_packet_to_device(&self.up_packet_sender, self.network_tuple(), &tcb, None, ACK, None, None);
+        }
+    }
 }
 
 impl AsyncRead for IpStackTcpStream {
@@ -297,6 +307,7 @@ impl AsyncRead for IpStackTcpStream {
             let len = std::cmp::min(buf.remaining(), self.temp_read_buffer.len());
             buf.put_slice(&self.temp_read_buffer[..len]);
             self.temp_read_buffer.drain(..len); // remove the read data from the temp buffer
+            self.consumed(len);
             return Poll::Ready(Ok(()));
         }
 
@@ -334,10 +345,12 @@ impl AsyncRead for IpStackTcpStream {
                 let capacity = buf.remaining();
                 if capacity >= data.len() {
                     buf.put_slice(&data);
+                    self.consumed(data.len());
                 } else {
                     // if `buf` is not enough, put the remaining data into the temp buffer
                     buf.put_slice(&data[..capacity]);
                     self.temp_read_buffer.extend_from_slice(&data[capacity..]);
+                    self.consumed(capacity);
                 }
                 Poll::Ready(Ok(()))
             }
@@ -926,6 +939,7 @@ fn extract_data_n_write_upstream(
     }
 
     if let Some(data) = tcb.consume_unordered_packets(8192) {
+        tcb.add_unread(data.len()); // Unbihex patch: see `Tcb::get_available_read_buffer_size`.
         let hint = if state == TcpState::Established { "normally" } else { "still" };
         log::trace!("{network_tuple} {state:?}: {l_info} {hint} receiving data, len = {}", data.len());
         data_tx.send(data).map_err(|e| std::io::Error::new(BrokenPipe, e))?;
@@ -949,7 +963,9 @@ pub(crate) fn write_packet_to_device(
     use std::io::Error;
     let seq = seq.unwrap_or(tcb.get_seq()).0;
     let syn = flags & SYN != 0;
-    let (ack, window_size) = (tcb.get_ack().0, tcb.get_recv_window(tcb.get_mtu() as usize, syn));
+    // Unbihex patch: the window may close to 0 (no MTU floor): the reader reopens it
+    // with an update (`IpStackTcpStream::consumed`).
+    let (ack, window_size) = (tcb.get_ack().0, tcb.get_recv_window(0, syn));
     let wscale = if syn { tcb.window_scale_option() } else { None };
     let (src, dst) = (tuple.dst, tuple.src); // Note: The address is reversed here
     let calc = |ip_header_len: usize, tcp_header_len: usize| tcb.calculate_payload_max_len(ip_header_len, tcp_header_len);

@@ -258,7 +258,9 @@ fn tcp_config(mtu: u16, idle: Duration) -> TcpConfig {
     cfg.timeout = idle;
     // ipstack caps both directions at these values: 16 KiB (its default) limits a
     // connection to `window / RTT`, i.e. ~1.3 Mbit/s at 100 ms. The buffers are
-    // byte budgets (ipstack tracks lengths), not preallocated memory.
+    // byte budgets (ipstack tracks lengths), not preallocated memory; with the
+    // vendored patch the read buffer also caps what an app may upload ahead of the
+    // relay (data not read yet closes the window).
     cfg.read_buffer_size = 256 * 1024;
     cfg.max_unacked_bytes = 256 * 1024;
     // One MSS for both families: mtu - 60 is right for IPv6 and 20 bytes
@@ -884,6 +886,80 @@ mod tests {
 
         drop(s);
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    /// Data the stream has not read closes the window the stack advertises (stock
+    /// ipstack queued it without limit), and reading reopens it with an update.
+    #[tokio::test]
+    async fn unread_data_closes_the_window_and_reading_reopens_it() {
+        use etherparse::TcpOptionElement;
+        let (inject, rx) = mpsc::channel(64);
+        let (tx, mut out) = mpsc::channel(QUEUE);
+        let mut cfg = IpStackConfig::default();
+        cfg.mtu(1400).unwrap();
+        cfg.with_tcp_config(tcp_config(1400, Duration::from_secs(60)));
+        let mut stack = IpStack::new(cfg, TunIo { rx, tx });
+        let (app, server) = ([10, 199, 233, 1], [93, 184, 216, 34]);
+        let segment = |seq: u32, ack: u32, payload: &[u8]| {
+            let mut p = Vec::new();
+            PacketBuilder::ipv4(app, server, 64)
+                .tcp(40011, 443, seq, 65_535)
+                .ack(ack)
+                .write(&mut p, payload)
+                .unwrap();
+            p
+        };
+        // Window fields of the stack's segments until it goes quiet.
+        async fn windows(out: &mut mpsc::Receiver<Vec<u8>>) -> Vec<u16> {
+            let mut w = Vec::new();
+            while let Ok(Some(pkt)) =
+                tokio::time::timeout(Duration::from_millis(300), out.recv()).await
+            {
+                if let Some(TransportSlice::Tcp(t)) =
+                    SlicedPacket::from_ip(&pkt).unwrap().transport
+                {
+                    w.push(t.window_size());
+                }
+            }
+            w
+        }
+
+        let mut syn = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40011, 443, 1000, 65_535)
+            .syn()
+            .options(&[TcpOptionElement::Noop, TcpOptionElement::WindowScale(7)])
+            .unwrap()
+            .write(&mut syn, &[])
+            .unwrap();
+        inject.send(syn).await.unwrap();
+        let IpStackStream::Tcp(mut s) = stack.accept().await.unwrap() else {
+            panic!("expected a TCP stream")
+        };
+        let pkt = out.recv().await.unwrap();
+        let Some(TransportSlice::Tcp(t)) = SlicedPacket::from_ip(&pkt).unwrap().transport else {
+            panic!("expected TCP")
+        };
+        let ack = t.sequence_number().wrapping_add(1);
+
+        // 200 segments of 1340 bytes (268 000) > the 256 KiB read buffer, none read.
+        let chunk = [5u8; 1340];
+        let mut seq = 1001u32;
+        for _ in 0..200 {
+            inject.send(segment(seq, ack, &chunk)).await.unwrap();
+            seq += chunk.len() as u32;
+        }
+        let w = windows(&mut out).await;
+        assert_eq!(w.last(), Some(&0), "the window must close: {w:?}");
+
+        // Reading 200 000 bytes frees more than half the buffer: one update, unasked.
+        let mut buf = vec![0u8; 200_000];
+        s.read_exact(&mut buf).await.unwrap();
+        let w = windows(&mut out).await;
+        assert!(
+            w.iter().any(|&w| (w as usize) << 3 >= 128 * 1024),
+            "expected a window update: {w:?}"
+        );
     }
 
     /// An app that resolved a name itself connects to a real IP: the `Host` it sends
