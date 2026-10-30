@@ -162,7 +162,7 @@ pub struct PlatformHooks {
 }
 ```
 
-Runtime requirement: a tun inbound needs a **multi-threaded** tokio runtime. `ipstack` calls `block_in_place` in the `Drop` of a TCP stream, which hangs on a single-threaded runtime. `start` checks this and returns an error.
+No runtime requirement: the `ipstack` in `vendor/ipstack` closes a TCP stream without blocking (in stock 1.0.1 its `Drop` called `block_in_place`, so a tun inbound needed a multi-threaded tokio runtime). It also scales the TCP window (RFC 7323) when the app's SYN offers it: windows past 64 KB both ways (`vendor/ipstack/UNBIHEX-PATCH.md`).
 
 `start` order:
 

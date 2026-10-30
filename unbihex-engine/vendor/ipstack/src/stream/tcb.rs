@@ -49,7 +49,12 @@ pub(crate) struct Tcb {
     ack: SeqNum,
     mtu: u16,
     last_received_ack: SeqNum,
-    send_window: u16,
+    // Unbihex patch: the peer's window in bytes (scaled), and the window scale
+    // shifts (RFC 7323), both 0 unless the peer's SYN offered the option.
+    send_window: u32,
+    send_wscale: u8,
+    recv_wscale: u8,
+    wscale_on: bool,
     state: TcpState,
     inflight_packets: BTreeMap<SeqNum, InflightPacket>,
     unordered_packets: BTreeMap<SeqNum, Vec<u8>>,
@@ -81,7 +86,10 @@ impl Tcb {
             ack,
             mtu,
             last_received_ack: seq.into(),
-            send_window: u16::MAX,
+            send_window: u16::MAX as u32,
+            send_wscale: 0,
+            recv_wscale: 0,
+            wscale_on: false,
             state: TcpState::Listen,
             inflight_packets: BTreeMap::new(),
             unordered_packets: BTreeMap::new(),
@@ -190,14 +198,39 @@ impl Tcb {
     pub(super) fn get_state(&self) -> TcpState {
         self.state
     }
-    pub(super) fn update_send_window(&mut self, window: u16) {
-        self.send_window = window;
+    /// Unbihex patch: turns window scaling on when the peer's SYN offered it with
+    /// `peer_shift`. Our own shift is the smallest that fits the read buffer into
+    /// the 16-bit window field. Both are capped at 14 (RFC 7323 §2.3).
+    pub(super) fn enable_window_scale(&mut self, peer_shift: u8) {
+        self.send_wscale = peer_shift.min(14);
+        let mut shift = 0;
+        while shift < 14 && (self.read_buffer_size >> shift) > u16::MAX as usize {
+            shift += 1;
+        }
+        self.recv_wscale = shift;
+        self.wscale_on = true;
     }
-    pub(super) fn get_send_window(&self) -> u16 {
+    /// Unbihex patch: our shift to announce in the SYN-ACK, if scaling is on (it
+    /// must be echoed even when it is 0, or the peer would not scale its window).
+    pub(super) fn window_scale_option(&self) -> Option<u8> {
+        self.wscale_on.then_some(self.recv_wscale)
+    }
+    /// The peer's window from a segment header, in bytes.
+    pub(super) fn scale_send_window(&self, window: u16) -> u32 {
+        (window as u32) << self.send_wscale
+    }
+    pub(super) fn update_send_window(&mut self, window: u16) {
+        self.send_window = self.scale_send_window(window);
+    }
+    pub(super) fn get_send_window(&self) -> u32 {
         self.send_window
     }
-    pub(super) fn get_recv_window(&self) -> u16 {
-        self.get_available_read_buffer_size().try_into().unwrap_or(u16::MAX)
+    /// The window field for an outgoing segment: the free read buffer (at least
+    /// `floor` bytes), shifted by our scale. Never scaled in a SYN (RFC 7323 §2.2).
+    pub(super) fn get_recv_window(&self, floor: usize, syn: bool) -> u16 {
+        let bytes = self.get_available_read_buffer_size().max(floor);
+        let shift = if syn { 0 } else { self.recv_wscale };
+        (bytes >> shift).try_into().unwrap_or(u16::MAX)
     }
     // #[inline(always)]
     // pub(super) fn buffer_size(&self, payload_len: u16) -> u16 {
@@ -227,7 +260,7 @@ impl Tcb {
                         PacketType::KeepAlive
                     } else if !payload.is_empty() {
                         PacketType::NewPacket
-                    } else if self.get_send_window() == rcvd_window && self.seq != rcvd_ack && self.is_duplicate_ack_count_exceeded() {
+                    } else if self.get_send_window() == self.scale_send_window(rcvd_window) && self.seq != rcvd_ack && self.is_duplicate_ack_count_exceeded() {
                         PacketType::RetransmissionRequest
                     } else {
                         PacketType::WindowUpdate
@@ -320,7 +353,7 @@ impl Tcb {
     pub fn is_send_buffer_full(&self) -> bool {
         // To respect the receiver's window (remote_window) size and avoid sending too many unacknowledged packets, which may cause packet loss
         // Simplified version: min(cwnd, rwnd)
-        self.seq.distance(self.get_last_received_ack()) >= self.max_unacked_bytes.min(self.get_send_window() as u32)
+        self.seq.distance(self.get_last_received_ack()) >= self.max_unacked_bytes.min(self.get_send_window())
     }
 }
 

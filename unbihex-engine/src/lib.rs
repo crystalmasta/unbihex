@@ -118,17 +118,6 @@ impl Instance {
                 "tun_fd was given but the config has no tun inbound",
             ));
         }
-        // The userspace stack (ipstack) blocks inside Drop of TCP streams via
-        // `block_in_place`, which only works on the multi-thread runtime.
-        if tun_cfg.is_some()
-            && tokio::runtime::Handle::current().runtime_flavor()
-                != tokio::runtime::RuntimeFlavor::MultiThread
-        {
-            return Err(Error::config(
-                "a tun inbound requires a multi-thread tokio runtime",
-            ));
-        }
-
         let dns_client = Arc::new(DnsClient::new(config.dns.upstream.clone(), sockets.clone()));
         let upstream = Arc::new(Resolver::Upstream(dns_client.clone()));
         let system = Arc::new(Resolver::System);

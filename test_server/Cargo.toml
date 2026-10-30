@@ -41,7 +41,9 @@ expect_used = "warn"
 
 [workspace]
 
-# The engine's patched rustls (ClientHello rewriting for the browser TLS fingerprint);
-# see ../unbihex-engine/vendor/rustls/UNBIHEX-PATCH.md.
+# The engine's patched rustls (ClientHello rewriting for the browser TLS fingerprint)
+# and ipstack (TCP window scaling, a non-blocking stream drop);
+# see UNBIHEX-PATCH.md in ../unbihex-engine/vendor/rustls and vendor/ipstack.
 [patch.crates-io]
 rustls = { path = "../unbihex-engine/vendor/rustls" }
+ipstack = { path = "../unbihex-engine/vendor/ipstack" }

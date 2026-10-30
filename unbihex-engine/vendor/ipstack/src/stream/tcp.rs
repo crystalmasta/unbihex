@@ -184,7 +184,7 @@ impl IpStackTcpStream {
         destroy_messenger: Option<::tokio::sync::oneshot::Sender<()>>,
         config: Arc<TcpConfig>,
     ) -> Result<IpStackTcpStream, IpStackError> {
-        let tcb = Tcb::new(
+        let mut tcb = Tcb::new(
             SeqNum(tcp.sequence_number),
             mtu,
             config.max_unacked_bytes,
@@ -193,6 +193,15 @@ impl IpStackTcpStream {
             config.rto,
             config.max_retransmit_count,
         );
+        // Unbihex patch: window scaling (RFC 7323) when the peer's SYN offers it.
+        if tcp.syn
+            && let Some(shift) = tcp.options_iterator().find_map(|o| match o {
+                Ok(TcpOptionElement::WindowScale(shift)) => Some(shift),
+                _ => None,
+            })
+        {
+            tcb.enable_window_scale(shift);
+        }
         let tuple = NetworkTuple::new(src_addr, dst_addr, true);
         if !tcp.syn {
             if !tcp.rst
@@ -434,11 +443,14 @@ impl Drop for IpStackTcpStream {
         log::trace!("{nt} {state:?}: [drop] session dropping, ========================= ");
         if let Some(task_handle) = self.task_handle.take() {
             if !task_handle.is_finished() {
+                // Unbihex patch: signal the task and let it finish on its own. Blocking
+                // here (block_in_place + block_on) took a runtime worker out of service
+                // per closed stream and panicked on a current-thread runtime. The
+                // channel holds 10 signals: if it is full, a signal is already queued;
+                // if it is closed, the task has already ended.
                 if let Some(notifier) = self.exit_notifier.take() {
-                    _ = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(notifier.send(())));
+                    _ = notifier.try_send(());
                 }
-                // synchronously wait for the task to finish
-                _ = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task_handle));
             } else {
                 log::trace!("{nt} {state:?}: [drop] task already finished, no need to wait exiting");
             }
@@ -936,7 +948,9 @@ pub(crate) fn write_packet_to_device(
 ) -> std::io::Result<usize> {
     use std::io::Error;
     let seq = seq.unwrap_or(tcb.get_seq()).0;
-    let (ack, window_size) = (tcb.get_ack().0, tcb.get_recv_window().max(tcb.get_mtu()));
+    let syn = flags & SYN != 0;
+    let (ack, window_size) = (tcb.get_ack().0, tcb.get_recv_window(tcb.get_mtu() as usize, syn));
+    let wscale = if syn { tcb.window_scale_option() } else { None };
     let (src, dst) = (tuple.dst, tuple.src); // Note: The address is reversed here
     let calc = |ip_header_len: usize, tcp_header_len: usize| tcb.calculate_payload_max_len(ip_header_len, tcp_header_len);
     let packet = create_raw_packet(
@@ -950,6 +964,7 @@ pub(crate) fn write_packet_to_device(
         window_size,
         payload.unwrap_or_default(),
         options,
+        wscale,
     )?;
     let len = packet.payload.as_ref().map(|p| p.len()).unwrap_or(0);
     up_packet_sender.send(packet).map_err(|e| Error::new(UnexpectedEof, e))?;
@@ -968,6 +983,7 @@ pub(crate) fn create_raw_packet(
     win: u16,
     mut payload: Vec<u8>,
     options: Option<&Vec<TcpOptions>>,
+    wscale: Option<u8>,
 ) -> std::io::Result<NetworkPacket> {
     let mut tcp_header = etherparse::TcpHeader::new(src_addr.port(), dst_addr.port(), seq, win);
     tcp_header.acknowledgment_number = ack;
@@ -977,13 +993,18 @@ pub(crate) fn create_raw_packet(
     tcp_header.fin = flags & FIN != 0;
     tcp_header.psh = flags & PSH != 0;
 
-    if let Some(opts) = options {
-        let mut tcp_options = Vec::new();
-        for opt in opts {
-            match opt {
-                TcpOptions::MaximumSegmentSize(mss) => tcp_options.push(TcpOptionElement::MaximumSegmentSize(*mss)),
-            }
+    let mut tcp_options = Vec::new();
+    for opt in options.into_iter().flatten() {
+        match opt {
+            TcpOptions::MaximumSegmentSize(mss) => tcp_options.push(TcpOptionElement::MaximumSegmentSize(*mss)),
         }
+    }
+    // Unbihex patch: our window scale in the SYN-ACK.
+    if let Some(shift) = wscale {
+        tcp_options.push(TcpOptionElement::Noop);
+        tcp_options.push(TcpOptionElement::WindowScale(shift));
+    }
+    if !tcp_options.is_empty() {
         tcp_header
             .set_options(&tcp_options)
             .map_err(|e| std::io::Error::new(InvalidInput, e))?;

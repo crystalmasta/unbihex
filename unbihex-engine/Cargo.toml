@@ -29,7 +29,7 @@ hex = "0.4"
 hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
 idna = "1"
 ipnet = { version = "2", features = ["serde"] }
-ipstack = "1"
+ipstack = "1.0.1"
 lru = "0.19"
 netdev = "0.46"
 parking_lot = "0.12"
@@ -95,5 +95,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # rustls 0.23.46 with one hook: the encoded ClientHello can be rewritten before it is
 # hashed and sent (vendor/rustls/UNBIHEX-PATCH.md). Builds that use this engine
 # (unbihex-client) must carry the same patch.
+# ipstack 1.0.1 with TCP window scaling and a non-blocking stream drop
+# (vendor/ipstack/UNBIHEX-PATCH.md); same rule.
 [patch.crates-io]
 rustls = { path = "vendor/rustls" }
+ipstack = { path = "vendor/ipstack" }

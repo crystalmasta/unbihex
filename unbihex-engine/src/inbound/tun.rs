@@ -641,7 +641,6 @@ mod tests {
         }
     }
 
-    // ipstack blocks in Drop of TCP streams (block_in_place): multi-thread runtime only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dns_hijack_answers_with_fake_ip() {
         let mut h = harness().await;
@@ -701,7 +700,6 @@ mod tests {
         }
     }
 
-    // ipstack blocks in Drop of TCP streams (block_in_place): multi-thread runtime only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn udp_flow_is_dispatched() {
         let mut h = harness().await;
@@ -769,7 +767,6 @@ mod tests {
         }
     }
 
-    // ipstack blocks in Drop of TCP streams (block_in_place): multi-thread runtime only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tcp_flow_is_dispatched() {
         let mut h = harness().await;
@@ -808,6 +805,85 @@ mod tests {
         }
         assert_eq!(got, b"hello tcp");
         h.cancel.cancel();
+    }
+
+    /// The patched ipstack (vendor/ipstack) scales windows when the app's SYN offers
+    /// it, and drops a TCP stream without blocking: on a current-thread runtime the
+    /// old `block_in_place` in its Drop panicked.
+    #[tokio::test]
+    async fn tcp_window_scale_and_non_blocking_drop() {
+        use etherparse::TcpOptionElement;
+        let (inject, rx) = mpsc::channel(64);
+        let (tx, mut out) = mpsc::channel(QUEUE);
+        let mut cfg = IpStackConfig::default();
+        cfg.mtu(1400).unwrap();
+        cfg.with_tcp_config(tcp_config(1400, Duration::from_secs(60)));
+        let mut stack = IpStack::new(cfg, TunIo { rx, tx });
+        let (app, server) = ([10, 199, 233, 1], [93, 184, 216, 34]);
+
+        let mut syn = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40010, 443, 1000, 1000)
+            .syn()
+            .options(&[
+                TcpOptionElement::MaximumSegmentSize(1360),
+                TcpOptionElement::Noop,
+                TcpOptionElement::WindowScale(7),
+            ])
+            .unwrap()
+            .write(&mut syn, &[])
+            .unwrap();
+        inject.send(syn).await.unwrap();
+        let IpStackStream::Tcp(mut s) = stack.accept().await.unwrap() else {
+            panic!("expected a TCP stream")
+        };
+
+        // SYN-ACK: our shift for the 256 KiB read buffer is 3 (65 536 > u16::MAX at 2);
+        // its own window is unscaled.
+        let pkt = tokio::time::timeout(Duration::from_secs(5), out.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let sliced = SlicedPacket::from_ip(&pkt).unwrap();
+        let Some(TransportSlice::Tcp(t)) = sliced.transport else {
+            panic!("expected TCP")
+        };
+        assert!(t.syn() && t.ack());
+        assert_eq!(t.window_size(), u16::MAX);
+        let shifts: Vec<u8> = t
+            .options_iterator()
+            .filter_map(|o| match o {
+                Ok(TcpOptionElement::WindowScale(s)) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shifts, [3]);
+
+        // The app's window 1000 << 7 = 128 000 bytes: the stack sends well past 64 KiB.
+        let mut ack = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40010, 443, 1001, 1000)
+            .ack(t.sequence_number().wrapping_add(1))
+            .write(&mut ack, &[])
+            .unwrap();
+        inject.send(ack).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let data = vec![7u8; 300 * 1024];
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(300), s.write_all(&data)).await;
+        assert!(blocked.is_err(), "the window must stop the writer");
+        let mut sent = 0;
+        while let Ok(Some(pkt)) =
+            tokio::time::timeout(Duration::from_millis(300), out.recv()).await
+        {
+            if let Some(TransportSlice::Tcp(t)) = SlicedPacket::from_ip(&pkt).unwrap().transport {
+                sent += t.payload().len();
+            }
+        }
+        assert!(sent > 65_535 && sent <= 128_000 + 1400, "sent {sent}");
+
+        drop(s);
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     /// An app that resolved a name itself connects to a real IP: the `Host` it sends

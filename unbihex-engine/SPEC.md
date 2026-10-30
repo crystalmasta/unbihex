@@ -162,7 +162,7 @@ pub struct PlatformHooks {
 }
 ```
 
-Требование к рантайму: при tun-inbound нужен **многопоточный** tokio runtime. `ipstack` в `Drop` TCP-потока вызывает `block_in_place`, и на однопоточном рантайме это зависает. `start` проверяет это и возвращает ошибку.
+Требований к рантайму нет: `ipstack` из `vendor/ipstack` закрывает TCP-поток без блокировки (в исходном 1.0.1 `Drop` вызывал `block_in_place`, и tun-inbound требовал многопоточный tokio runtime). Он же поддерживает масштабирование окна TCP (RFC 7323), если его предлагает SYN приложения: окно больше 64 КБ в обе стороны (`vendor/ipstack/UNBIHEX-PATCH.md`).
 
 Порядок `start`:
 
