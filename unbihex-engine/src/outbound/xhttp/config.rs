@@ -278,8 +278,8 @@ impl XhttpConfig {
         }
         // Cookie metadata owns the physical Cookie header. A raw header named
         // Cookie cannot simultaneously carry session IDs or padding values.
-        if keys.iter().any(|(p, k)| *p == "header" && k.eq_ignore_ascii_case("cookie")) {
-            return Err(Error::config("xhttp: use cookie placement, not a raw Cookie header"));
+        if keys.iter().any(|(p, k)| *p == "header" && ["cookie", "content-type"].iter().any(|h| k.eq_ignore_ascii_case(h))) {
+            return Err(Error::config("xhttp: Cookie/Content-Type are reserved generated headers"));
         }
         for (i, (a, ka)) in keys.iter().enumerate() {
             for (b, kb) in &keys[i + 1..] {
@@ -599,6 +599,8 @@ mod tests {
             serde_json::json!({"sessionIDTable":"number", "sessionIDLength":4}),
             serde_json::json!({"sessionIDTable":"abc"}),
             serde_json::json!({"mode":"stream-one", "uplinkHTTPMethod":"GET"}),
+            serde_json::json!({"mode":"stream-up", "sessionIDPlacement":"header", "sessionIDKey":"Content-Type"}),
+            serde_json::json!({"mode":"stream-up", "xPaddingObfsMode":true, "xPaddingHeader":"Content-Type"}),
         ] {
             assert!(XhttpConfig::from_xray(&bad).is_err(), "{bad}");
         }

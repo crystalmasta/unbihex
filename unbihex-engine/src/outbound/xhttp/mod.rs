@@ -50,16 +50,30 @@ fn set_header(headers: &mut Vec<(String, String)>, key: &str, value: String) {
     headers.push((key.to_string(), value));
 }
 
-fn set_query(query: &mut String, key: &str, value: &str) {
+fn remove_query(query: &mut String, key: &str) {
     // Keep every byte of unrelated/signed query parameters, including flag-only
     // fields, percent-escape case, non-UTF8 escapes and the original spacing.
     let parts: Vec<&str> = query.split('&').filter(|part| {
         url::form_urlencoded::parse(part.as_bytes()).next().is_none_or(|(k, _)| k != key)
     }).collect();
-    let mut out = parts.join("&");
+    *query=parts.join("&");
+}
+
+fn set_query(query: &mut String, key: &str, value: &str) {
+    remove_query(query,key);
+    let mut out=std::mem::take(query);
     if !out.is_empty() { out.push('&'); }
     out.push_str(&url::form_urlencoded::Serializer::new(String::new()).append_pair(key, value).finish());
     *query = out;
+}
+
+fn remove_cookie(headers:&mut Vec<(String,String)>,key:&str) {
+    let value=headers.iter().filter(|(k,_)|k.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_,v)|v.split(';')).map(str::trim)
+        .filter(|c|!c.is_empty() && c.split_once('=').is_none_or(|(name,_)|name.trim()!=key))
+        .collect::<Vec<_>>().join("; ");
+    headers.retain(|(k,_)|!k.eq_ignore_ascii_case("cookie"));
+    if !value.is_empty() {headers.push(("Cookie".into(),value));}
 }
 
 fn huffman_bits(c: u8) -> usize {
@@ -268,6 +282,19 @@ impl XhttpClient {
         let mut t = self.path.clone();
         let mut h = browser_headers(&self.cfg.headers);
         let mut query = self.query.clone();
+        // A downlink has no sequence number. Remove stale transport-owned
+        // values even when this request will not replace them with a new one.
+        for (placement,key) in [
+            (self.cfg.session_placement(),self.cfg.session_key()),
+            (self.cfg.sequence_placement(),self.cfg.sequence_key()),
+        ] {
+            match placement {
+                "query"=>remove_query(&mut query,key),
+                "cookie"=>remove_cookie(&mut h,key),
+                "header"=>h.retain(|(k,_)|!k.eq_ignore_ascii_case(key)),
+                _=>{},
+            }
+        }
         let mut put = |placement: &str, key: &str, value: &str, target: &mut String, headers: &mut Vec<(String, String)>| {
             match placement {
                 "path" => {
@@ -279,6 +306,7 @@ impl XhttpClient {
                 }
                 "header" => set_header(headers, key, value.to_string()),
                 "cookie" => {
+                    remove_cookie(headers,key);
                     let old = headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
                         .flat_map(|(_, v)| v.split(';')).map(str::trim)
                         .filter(|c| !c.is_empty() && c.split_once('=').is_none_or(|(name, _)| name.trim() != key))
@@ -793,11 +821,17 @@ mod tests {
         })).unwrap();
         let c=client(cfg);
         assert_eq!(c.request_shape(Some("abc"),Some(2),false).target,format!("/api/abc?{raw}&x_seq=2"));
+        assert_eq!(c.request_shape(Some("abc"),None,false).target,format!("/api/abc?{raw}"));
         let cfg = XhttpConfig::from_xray(&serde_json::json!({
             "sessionIDPlacement":"cookie", "headers":{"Cookie":"keep=1; x_session=old; x_session=stale"}
         })).unwrap();
         let c=client(cfg);
         let shape=c.request_shape(Some("new"),None,false);
         assert_eq!(shape.headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("cookie")).unwrap().1,"keep=1; x_session=new");
+        let cfg=XhttpConfig::from_xray(&serde_json::json!({
+            "seqPlacement":"cookie", "headers":{"Cookie":"keep=1; x_seq=old"}
+        })).unwrap();
+        let shape=client(cfg).request_shape(Some("abc"),None,false);
+        assert_eq!(shape.headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("cookie")).unwrap().1,"keep=1");
     }
 }
