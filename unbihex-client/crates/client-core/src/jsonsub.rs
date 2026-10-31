@@ -410,6 +410,31 @@ mod tests {
     }
 
     #[test]
+    fn xray_cdn_xhttp_preserves_obfuscation_and_client_tls() {
+        let body = serde_json::json!({"outbounds":[{
+            "protocol":"vless", "tag":"CDN", "settings":{"address":"cdn.example", "port":443, "id":UUID},
+            "streamSettings":{"network":"xhttp", "security":"tls",
+                "tlsSettings":{"serverName":"edge.example", "alpn":["http/1.1"]},
+                "xhttpSettings":{"path":"/media/segment.ts", "mode":"packet-up",
+                    "xPaddingObfsMode":true, "xPaddingPlacement":"query", "xPaddingKey":"_token",
+                    "xPaddingMethod":"tokenish", "xPaddingBytes":"4-10",
+                    "sessionIDPlacement":"path", "sessionIDTable":"abcdefgh............", "sessionIDLength":"16-24",
+                    "seqPlacement":"query", "seqKey":"offset", "uplinkHTTPMethod":"GET"}}
+        }]}).to_string();
+        let link = links_from_json(&body).unwrap().remove(0);
+        let s = parse_server(&link).unwrap();
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        let unbihex_engine::config::OutboundConfig::Vless(v) = unbihex_engine::link::parse_link(&link, "proxy").unwrap() else { panic!() };
+        assert_eq!(v.server, "cdn.example");
+        assert_eq!(v.tls.as_ref().unwrap().sni.as_deref(), Some("edge.example"));
+        let x = v.xhttp.unwrap();
+        assert_eq!(x.sequence_placement(), "query");
+        assert_eq!(x.sequence_key(), "offset");
+        assert_eq!(x.uplink_method(), "GET");
+        assert_eq!(x.x_padding_method, "tokenish");
+    }
+
+    #[test]
     fn sing_box() {
         let body = format!(
             r#"{{"outbounds":[{{"type":"selector","tag":"select","outbounds":["a"]}},

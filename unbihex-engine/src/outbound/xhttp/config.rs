@@ -169,6 +169,42 @@ pub struct XhttpConfig {
     /// Size of the random `x_padding`, default 100-1000.
     #[serde(default)]
     pub x_padding_bytes: Option<Range>,
+    /// Use Xray's configurable padding instead of `Referer: ...?x_padding=...`.
+    #[serde(default)]
+    pub x_padding_obfs_mode: bool,
+    /// Padding query/cookie key (Xray default: `x_padding`).
+    #[serde(default)]
+    pub x_padding_key: String,
+    /// Padding header name in obfuscation mode (Xray default: `X-Padding`).
+    #[serde(default)]
+    pub x_padding_header: String,
+    /// `query`, `header`, `cookie`, or `queryInHeader`.
+    #[serde(default)]
+    pub x_padding_placement: String,
+    /// `repeat-x` or `tokenish` (size measured in HPACK Huffman bytes).
+    #[serde(default)]
+    pub x_padding_method: String,
+    /// Session metadata location: `path` (default), `query`, `header`, or `cookie`.
+    #[serde(default)]
+    pub session_id_placement: String,
+    /// Session metadata key; defaults to `X-Session` / `x_session` off-path.
+    #[serde(default)]
+    pub session_id_key: String,
+    /// Session alphabet (including Xray's named alphabets); empty uses a UUID.
+    #[serde(default)]
+    pub session_id_table: String,
+    /// Custom session ID length, enabled together with `session_id_table`.
+    #[serde(default)]
+    pub session_id_length: Option<Range>,
+    /// Sequence metadata location, with the same choices as the session.
+    #[serde(default)]
+    pub seq_placement: String,
+    /// Sequence metadata key; defaults to `X-Seq` / `x_seq` off-path.
+    #[serde(default)]
+    pub seq_key: String,
+    /// Uplink method (`POST` by default); GET uploads still carry a request body.
+    #[serde(default)]
+    pub uplink_http_method: String,
     /// Do not send `Content-Type: application/grpc` on streaming uploads.
     #[serde(default)]
     pub no_grpc_header: bool,
@@ -204,6 +240,60 @@ impl XhttpConfig {
         {
             return Err(Error::config("xhttp: xPaddingBytes cannot be disabled"));
         }
+        if self.padding().to > 65_536 {
+            return Err(Error::config("xhttp: xPaddingBytes exceeds 65536"));
+        }
+        for (placement, key) in [
+            (self.session_placement(), self.session_key()),
+            (self.sequence_placement(), self.sequence_key()),
+        ] {
+            if !matches!(placement, "path" | "query" | "header" | "cookie") {
+                return Err(Error::config("xhttp: invalid metadata placement"));
+            }
+            if placement != "path" {
+                validate_key(key)?;
+            }
+        }
+        if self.x_padding_obfs_mode {
+            if !matches!(self.padding_placement(), "query" | "header" | "cookie" | "queryInHeader") {
+                return Err(Error::config("xhttp: invalid xPaddingPlacement"));
+            }
+            if !matches!(self.x_padding_method.as_str(), "" | "repeat-x" | "tokenish") {
+                return Err(Error::config("xhttp: invalid xPaddingMethod"));
+            }
+            validate_key(self.padding_key())?;
+            validate_key(self.padding_header())?;
+        }
+        let mut keys = vec![
+            (self.session_placement(), self.session_key()),
+            (self.sequence_placement(), self.sequence_key()),
+        ];
+        if self.x_padding_obfs_mode {
+            keys.push((self.padding_placement(), if self.padding_placement() == "header" {
+                self.padding_header()
+            } else { self.padding_key() }));
+        }
+        for (i, (a, ka)) in keys.iter().enumerate() {
+            for (b, kb) in &keys[i + 1..] {
+                if a == b && *a != "path" && (ka == kb || *a == "header" && ka.eq_ignore_ascii_case(kb)) {
+                    return Err(Error::config("xhttp: colliding metadata/padding keys"));
+                }
+            }
+        }
+        if !matches!(self.uplink_method(), "POST" | "GET" | "PUT" | "PATCH" | "DELETE") {
+            return Err(unsupported("uplinkHTTPMethod"));
+        }
+        if let Some(r) = self.session_id_length {
+            if r.from == 0 || r.from > r.to || r.to > 256 {
+                return Err(Error::config("xhttp: sessionIDLength must be in 1-256"));
+            }
+            if r.from < 3 && self.session_table().contains('.') {
+                return Err(Error::config("xhttp: sessionIDLength too short for a dotted alphabet"));
+            }
+        }
+        if !self.session_table().bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)) {
+            return Err(Error::config("xhttp: sessionIDTable must contain URL-safe ASCII characters"));
+        }
         if let Some(r) = self.sc_max_each_post_bytes
             && r.from == 0
         {
@@ -224,7 +314,7 @@ impl XhttpConfig {
     pub fn normalized_path(&self) -> String {
         let p = self.path.split('?').next().unwrap_or_default();
         let mut p = if p.starts_with('/') { p.to_string() } else { format!("/{p}") };
-        if !p.ends_with('/') {
+        if (self.session_placement() == "path" || self.sequence_placement() == "path") && !p.ends_with('/') {
             p.push('/');
         }
         p
@@ -233,6 +323,54 @@ impl XhttpConfig {
     /// The query part of `path`.
     pub fn query(&self) -> &str {
         self.path.split_once('?').map(|(_, q)| q).unwrap_or_default()
+    }
+
+    /// Effective session placement.
+    pub fn session_placement(&self) -> &str { default_str(&self.session_id_placement, "path") }
+    /// Effective sequence placement.
+    pub fn sequence_placement(&self) -> &str { default_str(&self.seq_placement, "path") }
+    /// Effective session key.
+    pub fn session_key(&self) -> &str {
+        default_str(&self.session_id_key, if self.session_placement() == "header" { "X-Session" } else { "x_session" })
+    }
+    /// Effective sequence key.
+    pub fn sequence_key(&self) -> &str {
+        default_str(&self.seq_key, if self.sequence_placement() == "header" { "X-Seq" } else { "x_seq" })
+    }
+    /// Effective padding placement.
+    pub fn padding_placement(&self) -> &str { default_str(&self.x_padding_placement, "queryInHeader") }
+    /// Effective padding key.
+    pub fn padding_key(&self) -> &str { default_str(&self.x_padding_key, "x_padding") }
+    /// Effective padding header.
+    pub fn padding_header(&self) -> &str { default_str(&self.x_padding_header, "X-Padding") }
+    /// Effective uplink method.
+    pub fn uplink_method(&self) -> &str { default_str(&self.uplink_http_method, "POST") }
+
+    fn session_table(&self) -> &str {
+        match self.session_id_table.as_str() {
+            "ALPHABET" => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "Alphabet" => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            "BASE36" => "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "Base62" => "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            "HEX" => "0123456789ABCDEF",
+            "alphabet" => "abcdefghijklmnopqrstuvwxyz",
+            "base36" => "0123456789abcdefghijklmnopqrstuvwxyz",
+            "hex" => "0123456789abcdef",
+            "number" => "0123456789",
+            s => s,
+        }
+    }
+
+    /// A fresh session ID, with Xray-compatible named/custom alphabets.
+    pub fn new_session_id(&self) -> String {
+        let table = self.session_table().as_bytes();
+        if let Some(length) = self.session_id_length.filter(|r| r.from > 0 && r.to <= 256)
+            && !table.is_empty()
+        {
+            let mut rng = rand::thread_rng();
+            return (0..length.pick()).map(|_| char::from(table[rng.gen_range(0..table.len())])).collect();
+        }
+        uuid::Builder::from_random_bytes(rand::random()).into_uuid().to_string()
     }
 
     /// The padding size range.
@@ -319,28 +457,24 @@ impl XhttpConfig {
                 "noSSEHeader" | "scMaxBufferedPosts" | "scStreamUpServerSecs"
                 | "serverMaxHeaderBytes" => {}
                 // Wire format options: accepted only with their defaults.
-                "xPaddingObfsMode" => {
-                    if b(k)? {
-                        return Err(unsupported(k));
-                    }
-                }
-                "uplinkHTTPMethod" => {
-                    if !matches!(s(k)?.as_deref(), None | Some("") | Some("POST") | Some("post")) {
-                        return Err(unsupported(k));
-                    }
-                }
-                "sessionPlacement" | "seqPlacement" => {
-                    if !matches!(s(k)?.as_deref(), None | Some("") | Some("path")) {
-                        return Err(unsupported(k));
-                    }
-                }
+                "xPaddingObfsMode" => cfg.x_padding_obfs_mode = b(k)?,
+                "xPaddingKey" => cfg.x_padding_key = s(k)?.unwrap_or_default(),
+                "xPaddingHeader" => cfg.x_padding_header = s(k)?.unwrap_or_default(),
+                "xPaddingPlacement" => cfg.x_padding_placement = s(k)?.unwrap_or_default(),
+                "xPaddingMethod" => cfg.x_padding_method = s(k)?.unwrap_or_default(),
+                "uplinkHTTPMethod" => cfg.uplink_http_method = s(k)?.unwrap_or_default().to_ascii_uppercase(),
+                "sessionIDPlacement" | "sessionPlacement" => cfg.session_id_placement = s(k)?.unwrap_or_default(),
+                "sessionIDKey" | "sessionKey" => cfg.session_id_key = s(k)?.unwrap_or_default(),
+                "sessionIDTable" => cfg.session_id_table = s(k)?.unwrap_or_default(),
+                "sessionIDLength" => cfg.session_id_length = r(k)?,
+                "seqPlacement" => cfg.seq_placement = s(k)?.unwrap_or_default(),
+                "seqKey" => cfg.seq_key = s(k)?.unwrap_or_default(),
                 "uplinkDataPlacement" => {
                     if !matches!(s(k)?.as_deref(), None | Some("") | Some("auto") | Some("body")) {
                         return Err(unsupported(k));
                     }
                 }
-                "xPaddingKey" | "xPaddingHeader" | "xPaddingPlacement" | "xPaddingMethod"
-                | "sessionKey" | "seqKey" | "uplinkDataKey" | "uplinkChunkSize" => {
+                "uplinkDataKey" | "uplinkChunkSize" => {
                     // Only meaningful with xPaddingObfsMode or non-default placements.
                 }
                 "downloadSettings" => {
@@ -356,6 +490,19 @@ impl XhttpConfig {
         cfg.validate()?;
         Ok(cfg)
     }
+}
+
+fn default_str<'a>(value: &'a str, default: &'a str) -> &'a str {
+    if value.is_empty() { default } else { value }
+}
+
+fn validate_key(key: &str) -> Result<()> {
+    if http::HeaderName::from_bytes(key.as_bytes()).is_err()
+        || ["host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"].iter().any(|h| key.eq_ignore_ascii_case(h))
+    {
+        return Err(Error::config("xhttp: invalid or reserved metadata/padding key"));
+    }
+    Ok(())
 }
 
 fn unsupported(field: &str) -> Error {
@@ -391,6 +538,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cdn_obfuscation_settings() {
+        let c = XhttpConfig::from_xray(&serde_json::json!({
+            "path": "/media/segment.ts?quality=hd", "mode": "packet-up",
+            "extra": {
+                "xPaddingBytes": "4-10", "xPaddingObfsMode": true,
+                "xPaddingKey": "_token", "xPaddingHeader": "X-Client-Version",
+                "xPaddingPlacement": "query", "xPaddingMethod": "tokenish",
+                "sessionIDPlacement": "path", "sessionIDKey": "sid",
+                "sessionIDTable": "abcdefgh............", "sessionIDLength": "16-24",
+                "seqPlacement": "query", "seqKey": "offset",
+                "uplinkDataPlacement": "body", "uplinkHTTPMethod": "GET",
+                "xmux": {"maxConnections": "4-8", "hKeepAlivePeriod": 0}
+            }
+        })).unwrap();
+        assert_eq!(c.normalized_path(), "/media/segment.ts/");
+        assert_eq!(c.query(), "quality=hd");
+        assert_eq!(c.padding(), Range { from: 4, to: 10 });
+    }
+
+    #[test]
+    fn rejects_unsafe_wire_settings_and_unimplemented_payload_placements() {
+        for bad in [
+            serde_json::json!({"sessionIDPlacement":"header", "sessionIDKey":"Content-Length"}),
+            serde_json::json!({"xPaddingObfsMode":true, "xPaddingHeader":"bad\r\nname"}),
+            serde_json::json!({"sessionIDTable":"a/b", "sessionIDLength":16}),
+            serde_json::json!({"sessionIDTable":"abc", "sessionIDLength":"1-100000"}),
+            serde_json::json!({"xPaddingBytes":1000000}),
+            serde_json::json!({"seqPlacement":"query", "seqKey":"same", "sessionIDPlacement":"query", "sessionIDKey":"same"}),
+            serde_json::json!({"uplinkHTTPMethod":"HEAD"}),
+            serde_json::json!({"uplinkDataPlacement":"header"}),
+            serde_json::json!({"uplinkDataPlacement":"cookie"}),
+        ] {
+            assert!(XhttpConfig::from_xray(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn xray_settings() {
         let v: Value = serde_json::json!({
             "path": "/api?ed=1", "host": "cdn.example", "mode": "packet-up",
@@ -411,8 +595,8 @@ mod tests {
 
         for bad in [
             serde_json::json!({"mode": "nope"}),
-            serde_json::json!({"xPaddingObfsMode": true}),
-            serde_json::json!({"sessionPlacement": "header"}),
+            serde_json::json!({"xPaddingObfsMode": true, "xPaddingMethod": "unknown"}),
+            serde_json::json!({"sessionPlacement": "body"}),
             serde_json::json!({"headers": {"Host": "x"}}),
             serde_json::json!({"downloadSettings": {}}),
             serde_json::json!({"whatever": 1}),

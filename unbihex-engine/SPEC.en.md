@@ -682,3 +682,37 @@ All on `127.0.0.1`, our client against our server (`test_server/tests/`):
 - TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users;
 - REALITY with Vision and the Chrome fingerprint, a fragmented ClientHello, one `dest` probe per ClientHello shape;
 - what strangers see: the real site over TLS and HTTP.
+
+
+## 18. XHTTP: extended CDN request format
+
+VLESS `xhttp` accepts Xray `extra`: `xPaddingObfsMode`, `xPaddingKey`,
+`xPaddingHeader`, `xPaddingPlacement` (`query`, `header`, `cookie`, `queryInHeader`),
+`xPaddingMethod` (`repeat-x`, `tokenish`), `sessionIDPlacement`, `sessionIDKey`,
+`sessionIDTable`, `sessionIDLength`, `seqPlacement`, `seqKey`, `uplinkHTTPMethod`.
+Session and sequence metadata can use path/query/header/cookie. `tokenish` is random
+base62 sized in HPACK Huffman bytes, not characters. Keys and alphabets are checked
+before sending. Named Xray alphabets are supported; custom alphabets are restricted
+to URL-safe ASCII and lengths to 1–256 (short dotted IDs are refused to avoid dot
+segments). Padding is capped at 65536 bytes. Reserved HTTP framing headers and
+colliding metadata/padding keys are refused.
+
+A shared builder produces the same request targets/headers for HTTP/1.1 and HTTP/2,
+preserves the query in `path`, and retains the request body even for GET uploads.
+GET requires `packet-up`; POST/PUT/PATCH/DELETE are also supported. Without obfs,
+the legacy `Referer: …?x_padding=…` stays unchanged. With obfs, Xray defaults are
+`queryInHeader`, `X-Padding`, `x_padding`, `repeat-x`.
+
+TLS, SNI, HTTP Host and the dial address remain separate: a CDN client uses TLS to
+the edge even when its origin accepts plaintext XHTTP on loopback. Plaintext VLESS
+share links remain refused. This does not add HTTP/3, `downloadSettings`, payload in
+cookies/headers, or insecure certificate verification. Unimplemented wire options
+continue to fail explicitly.
+
+Run `XRAY_BIN=/path/to/xray cargo test --test xray_interop
+xhttp_cdn_obfuscation_against_xray`: real TCP/UDP payloads over GET packet-up with
+query sequence, tokenish padding and custom session IDs; HTTP/2+TLS, HTTP/1.1+TLS
+and a plaintext origin on disposable loopback listeners. This proves wire
+interoperability, not availability of any particular CDN. Format references:
+public Xray `transport/internet/splithttp/{config,xpadding}.go` and
+`infra/conf/transport_method.go`.
