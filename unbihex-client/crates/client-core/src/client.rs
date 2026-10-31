@@ -524,26 +524,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saved_unsupported_hysteria2_is_rechecked_without_losing_identity() {
-        let dir=tmp();
-        let c=Client::open(&dir);
-        c.add_input("hy2://pw@hy.example#My%20server").await.unwrap();
-        let id=c.snapshot().servers[0].id;
-        {
-            let mut data=c.data.write();
-            data.servers[0].unsupported=Some("Hysteria пока не поддерживается ядром".into());
-            data.servers[0].ping_error=Some("не поддерживается".into());
-            data.servers[0].name="User label".into();
-        }
-        c.save().unwrap();drop(c);
-        let c=Client::open(&dir);
-        let s=c.snapshot().servers.remove(0);
-        assert_eq!(s.id,id);assert_eq!(s.name,"User label");
-        assert!(s.is_supported());assert_eq!(s.port,443);assert!(s.ping_error.is_none());
-        let _=std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test]
     async fn pasted_json_configs_become_servers() {
         let c = Client::open(tmp());
         // The example from issue #12: sing-box, no TLS block.
@@ -602,6 +582,26 @@ mod tests {
         assert_eq!(d.server(id).unwrap().ping_ms, Some(50));
         d.replace_servers(sub, vec![]);
         assert_eq!(d.selected, None);
+    }
+
+    #[tokio::test]
+    async fn saved_unsupported_hysteria2_is_rechecked_without_losing_identity() {
+        let dir=tmp();
+        let c=Client::open(&dir);
+        c.add_input("hy2://pw@hy.example#My%20server").await.unwrap();
+        let id=c.snapshot().servers[0].id;
+        {
+            let mut data=c.data.write();
+            data.servers[0].unsupported=Some("Hysteria пока не поддерживается ядром".into());
+            data.servers[0].ping_error=Some("не поддерживается".into());
+            data.servers[0].name="User label".into();
+        }
+        c.save().unwrap();drop(c);
+        let c=Client::open(&dir);
+        let s=c.snapshot().servers.remove(0);
+        assert_eq!(s.id,id);assert_eq!(s.name,"User label");
+        assert!(s.is_supported());assert_eq!(s.port,443);assert!(s.ping_error.is_none());
+        let _=std::fs::remove_dir_all(dir);
     }
 
     #[test]

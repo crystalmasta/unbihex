@@ -174,15 +174,15 @@ impl Reassembler {
             self.packets.remove(&message.packet);
             return Ok(Some(message.data));
         }
-        if !self.packets.contains_key(&message.packet) && self.packets.len() >= 8 {
-            if let Some(id) = self
+        if !self.packets.contains_key(&message.packet)
+            && self.packets.len() >= 8
+            && let Some(id) = self
                 .packets
                 .iter()
                 .min_by_key(|(_, p)| p.started)
                 .map(|(k, _)| *k)
-            {
-                self.packets.remove(&id);
-            }
+        {
+            self.packets.remove(&id);
         }
         if self.packets.values().map(|p| p.size).sum::<usize>() + message.data.len() > 128 * 1024 {
             self.packets.remove(&message.packet);
