@@ -48,6 +48,10 @@ produce an unsupported profile rather than silently weakening it. Xray's single
 chains and nonempty TCP masks are not translated. A sing-box public-key pin is
 not confused with a leaf-certificate pin.
 
+Xray HY2 outbounds with additional top-level dial options (for example
+`sendThrough`, `proxySettings` or `mux`) are explicitly refused instead of losing
+their source binding or chaining/multiplexing policy during conversion.
+
 On loading saved state, the client re-evaluates derived capability and addresses,
 preserving server IDs, user labels, selection, links and subscription membership.
 Old cached "unsupported" profiles therefore work after updating, without being

@@ -1,4 +1,4 @@
-//! Share links: `vless://` and `ss://` (SPEC §5.4).
+//! Share links: `vless://`, `ss://`, `hy2://` and `hysteria2://` (SPEC §5.4–5.5).
 
 use base64::Engine;
 use percent_encoding::percent_decode_str;
@@ -9,7 +9,7 @@ use crate::config::{
 };
 use crate::error::{Error, Result};
 
-/// Turns a `vless://` or `ss://` link into an outbound config with `tag`.
+/// Turns a supported proxy share link into an outbound config with `tag`.
 pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
     let url = url.trim();
     if let Some(rest) = strip_scheme(url, "vless://") {

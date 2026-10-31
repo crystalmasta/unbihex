@@ -163,6 +163,7 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
             let valid_stream=str_of(&stream,"network")=="hysteria" && str_of(&stream,"security")=="tls"
                 && h.get("version").and_then(Value::as_u64)==Some(2);
             mark_unsupported(&mut params,!valid_stream
+                || unknown_fields(ob,&["protocol","tag","settings","streamSettings"])
                 || unknown_fields(&settings,&["address","port","version"])
                 || unknown_fields(&stream,&["network","security","tlsSettings","hysteriaSettings","finalmask"])
                 || unknown_fields(&h,&["version","auth","udpIdleTimeout"])
@@ -458,6 +459,21 @@ mod tests {
         outbound["streamSettings"]["tlsSettings"]["allowInsecure"]=json!(true);
         let links=links_from_json(&json!({"outbounds":[outbound]}).to_string()).unwrap();
         assert!(!parse_server(&links[0]).unwrap().is_supported());
+    }
+
+    #[test]
+    fn xray_hysteria2_refuses_dropped_dial_options() {
+        let outbound=json!({"protocol":"hysteria","tag":"HY2",
+            "settings":{"address":"198.51.100.10","port":443,"version":2},
+            "streamSettings":{"network":"hysteria","security":"tls",
+                "hysteriaSettings":{"version":2,"auth":"user:password"}}});
+        for (key,value) in [("sendThrough",json!("192.0.2.5")),
+            ("proxySettings",json!({"tag":"previous-hop","transportLayer":true})),
+            ("mux",json!({"enabled":true})),("futureDialOption",json!(true))] {
+            let mut configured=outbound.clone();configured[key]=value;
+            let links=links_from_json(&json!({"outbounds":[configured]}).to_string()).unwrap();
+            assert!(!parse_server(&links[0]).unwrap().is_supported(),"silently dropped {key}");
+        }
     }
 
     #[test]
