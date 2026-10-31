@@ -113,6 +113,20 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   Vision, UDP, Mux / XUDP. The `test_server` crate: `run -c`, `check -c`, `uuid`, `x25519`, `version`, the engine's JSON config.
 - Not there and not planned: a management API, live users, per-user traffic statistics, panel configs.
 
+## 31.10 — client 0.2.4, engine 0.1.4
+- Android: the VPN no longer drops when the app is swiped away from recents. The whole process used to end with
+  the window, the engine with it; now it stays while the VPN is on, and the window comes back when the app opens.
+- Android: a "VPN is on" notification with a "Disconnect" button; the VPN service runs in the foreground and the
+  system does not close it in the background. Can be switched off in Settings ("Other"), on by default.
+- Android: server and direct names resolve through the system DNS, with 1.1.1.1 / 8.8.8.8 as the fallback
+  (issue #14: the tunnel did not start on networks that block them).
+- Engine: DNS asks the servers in parallel with a stagger and resends a lost query; the one that answered goes first.
+- Engine: its own ipstack (`vendor/ipstack`): TCP window scaling, timer-driven retransmission, a bounded queue,
+  waiting instead of dropping packets on a full TUN queue, one segment copied per write. 64 parallel downloads
+  through the TUN used to hang for good and now complete; closing a stream no longer blocks tokio workers.
+- Linux / Android: the 4 MiB socket buffer is set only when `rmem_max`/`wmem_max` admit it; otherwise the OS
+  sizes the buffer itself.
+
 ## Next
 1. Fuzzing and benchmarks, the engine README as an SDK.
 2. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).
