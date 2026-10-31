@@ -1,8 +1,11 @@
 package com.unbihex.vpn
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
@@ -19,6 +22,10 @@ class StartArgs {
     var prefix: Int = 30
     var dns: String = "10.199.233.2"
     var session: String = "Unbihex"
+    // Server name for the notification.
+    var server: String = ""
+    // Run in the foreground with a "VPN is on" notification.
+    var notification: Boolean = true
     // Used on iOS only; accepted here so both platforms share one argument type.
     var configJson: String = ""
     var serverAddress: String = ""
@@ -59,10 +66,14 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun launch(invoke: Invoke, args: StartArgs) {
-        UnbihexVpnService.onEstablished = { fd, error ->
+        if (args.notification) {
+            askNotificationPermission()
+        }
+        UnbihexVpnService.onEstablished = { fd, stopFd, error ->
             if (fd != null) {
                 val res = JSObject()
                 res.put("fd", fd)
+                res.put("stopFd", stopFd)
                 invoke.resolve(res)
             } else {
                 invoke.reject(error ?: "Не удалось запустить VPN")
@@ -75,6 +86,8 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             putExtra(UnbihexVpnService.EXTRA_PREFIX, args.prefix)
             putExtra(UnbihexVpnService.EXTRA_DNS, args.dns)
             putExtra(UnbihexVpnService.EXTRA_SESSION, args.session)
+            putExtra(UnbihexVpnService.EXTRA_SERVER, args.server)
+            putExtra(UnbihexVpnService.EXTRA_NOTIFICATION, args.notification)
         }
         try {
             activity.startService(intent)
@@ -84,13 +97,28 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /**
+     * Android 13+: notifications need a runtime permission. Asked on connect while
+     * not granted (Android itself stops asking after two refusals), without waiting:
+     * if it is refused the VPN still runs in the foreground, only the notification
+     * is not shown.
+     */
+    private fun askNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val permission = Manifest.permission.POST_NOTIFICATIONS
+        if (activity.checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(arrayOf(permission), 0)
+        }
+    }
+
     @Command
     fun stop(invoke: Invoke) {
         val intent = Intent(activity, UnbihexVpnService::class.java).apply {
             action = UnbihexVpnService.ACTION_STOP
         }
         try {
-            activity.startService(intent)
+            // The application context: this activity may be gone already.
+            activity.applicationContext.startService(intent)
         } catch (_: Exception) {
             // The service is not running: nothing to stop.
         }

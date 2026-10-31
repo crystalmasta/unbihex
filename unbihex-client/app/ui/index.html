@@ -170,6 +170,10 @@
           <fieldset>
             <legend>Прочее</legend>
             <label class="check"><input name="auto_connect" type="checkbox" /> Подключаться при запуске</label>
+            <div id="android-notification">
+              <label class="check"><input name="android_notification" type="checkbox" /> Уведомление «VPN включён»</label>
+              <p class="hint">Держит VPN включённым, когда приложение смахнули из недавних. Без уведомления Android может закрыть VPN в фоне. Действует со следующего подключения.</p>
+            </div>
             <label>Подробность журнала
               <select name="log_level">
                 <option value="error">Только ошибки</option>

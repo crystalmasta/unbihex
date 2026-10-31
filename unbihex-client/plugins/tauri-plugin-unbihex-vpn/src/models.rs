@@ -14,6 +14,11 @@ pub struct StartArgs {
     pub dns: String,
     /// Name shown by the OS.
     pub session: String,
+    /// Android: server name shown in the notification.
+    pub server: String,
+    /// Android: run in the foreground with a "VPN is on" notification, which keeps
+    /// the VPN alive when the app is swiped away.
+    pub notification: bool,
     /// iOS: engine config JSON for the Packet Tunnel extension.
     pub config_json: String,
     /// iOS: server address shown in Settings → VPN.
@@ -26,6 +31,9 @@ pub struct StartArgs {
 pub struct StartResponse {
     /// Android: the TUN descriptor (owned by the service; the engine dups it).
     pub fd: Option<i32>,
+    /// Android: the read end of a pipe the service closes when the VPN goes away
+    /// (stop, revoke, the notification's "Отключить"); ours to close.
+    pub stop_fd: Option<i32>,
 }
 
 /// VPN state reported by the OS.

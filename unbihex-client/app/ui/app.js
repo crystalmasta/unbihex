@@ -402,6 +402,8 @@ function fillSettings() {
   f.user_agent.value = s.user_agent;
   f.send_hwid.checked = s.send_hwid;
   f.auto_connect.checked = s.auto_connect;
+  f.android_notification.checked = s.android_notification;
+  $("#android-notification").hidden = S.platform !== "android";
   f.log_level.value = s.log_level;
   f.geosite_url.value = s.geosite_url;
   f.geoip_url.value = s.geoip_url;
@@ -449,6 +451,7 @@ function readSettings() {
     user_agent: f.user_agent.value.trim(),
     send_hwid: f.send_hwid.checked,
     auto_connect: f.auto_connect.checked,
+    android_notification: f.android_notification.checked,
     log_level: f.log_level.value,
     geosite_url: f.geosite_url.value.trim(),
     geoip_url: f.geoip_url.value.trim(),

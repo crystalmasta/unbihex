@@ -84,6 +84,8 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
         prefix: TUN_PREFIX,
         dns: TUN_DNS.into(),
         session: format!("Unbihex · {}", server.name),
+        server: server.name.clone(),
+        notification: settings.android_notification,
         config_json: if cfg!(target_os = "ios") { config_json } else { String::new() },
         server_address: server.host.clone(),
     };
@@ -96,6 +98,12 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
     if cfg!(target_os = "ios") {
         return Ok(client.controller.mark_external(&server).await);
     }
+    #[cfg(target_os = "android")]
+    let stop_signal = resp.stop_fd.map(|fd| {
+        use std::os::fd::FromRawFd;
+        // SAFETY: the VPN service detached this descriptor for us; nothing else owns it.
+        unsafe { std::fs::File::from_raw_fd(fd) }
+    });
     let fd = resp
         .fd
         .ok_or_else(|| ClientError::State("VPN-сервис не вернул дескриптор TUN".into()))?;
@@ -104,12 +112,41 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
         .connect_tun_fd(&server, &settings, &geo, fd, None)
         .await
     {
-        Ok(info) => Ok(info),
+        Ok(info) => {
+            #[cfg(target_os = "android")]
+            if let Some(signal) = stop_signal {
+                watch_vpn_stop(app.clone(), signal, info.clone());
+            }
+            Ok(info)
+        }
         Err(e) => {
             stop_vpn_service(app).await;
             Err(e)
         }
     }
+}
+
+/// Android: the VPN service closes its end of the stop pipe when the VPN goes away
+/// without us (the notification's "Отключить", another VPN, Settings). Stops the
+/// engine then, also while the app has no window and nothing polls `status`.
+#[cfg(target_os = "android")]
+fn watch_vpn_stop(app: AppHandle, mut signal: std::fs::File, session: ConnectionInfo) {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let mut byte = [0u8; 1];
+        let _ = signal.read(&mut byte); // EOF once the service closes its end
+        tauri::async_runtime::block_on(async move {
+            let state = app.state::<AppState>();
+            let _op = state.op.lock().await;
+            let current = state.client.controller.status().await.info;
+            // Only the session this pipe belongs to: a newer one has its own.
+            if current.is_some_and(|c| c.since == session.since && c.server_id == session.server_id) {
+                tracing::info!("the VPN was switched off outside the app");
+                state.client.disconnect().await;
+                notify(&app);
+            }
+        });
+    });
 }
 
 #[cfg(mobile)]
@@ -390,13 +427,18 @@ fn store_apps_loopback(state: State<'_, AppState>, allow: bool) -> Result<usize,
 
 // ---------------------------------------------------------------- desktop shell
 
-/// Shows the main window, creating it again if it was closed to the tray.
-#[cfg(desktop)]
+/// Shows the main window, creating it again if it was closed to the tray (desktop)
+/// or swiped away while the VPN kept running (Android).
+#[cfg(any(desktop, target_os = "android"))]
 fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
+        #[cfg(desktop)]
+        {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        let _ = w;
         return;
     }
     let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
@@ -497,6 +539,12 @@ fn start_background(app: AppHandle) {
     });
 }
 
+#[cfg(target_os = "android")]
+fn vpn_connected(app: &AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .is_some_and(|state| tauri::async_runtime::block_on(state.client.controller.is_connected()))
+}
+
 /// App entry point (desktop `main` and the mobile entry).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -567,6 +615,18 @@ pub fn run() {
         #[cfg(desktop)]
         tauri::RunEvent::ExitRequested { code: None, api, .. } if app.tray_by_id("main").is_some() => {
             api.prevent_exit();
+        }
+        // Android: swiping the app away destroys its only window, and Tauri would end
+        // the process, the engine with it. While the VPN is on the process stays
+        // (the foreground VPN service keeps Android from killing it), and the window
+        // comes back when the app is opened again.
+        #[cfg(target_os = "android")]
+        tauri::RunEvent::ExitRequested { code: None, api, .. } if vpn_connected(app) => {
+            api.prevent_exit();
+        }
+        #[cfg(target_os = "android")]
+        tauri::RunEvent::Resumed if app.get_webview_window("main").is_none() => {
+            show_window(app);
         }
         tauri::RunEvent::Exit => {
             // Restore the system proxy and routes before the process ends.
