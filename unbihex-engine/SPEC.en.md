@@ -162,7 +162,7 @@ pub struct PlatformHooks {
 }
 ```
 
-No runtime requirement: the `ipstack` in `vendor/ipstack` closes a TCP stream without blocking (in stock 1.0.1 its `Drop` called `block_in_place`, so a tun inbound needed a multi-threaded tokio runtime). It also scales the TCP window (RFC 7323) when the app's SYN offers it: windows past 64 KB both ways; and it takes no more than `read_buffer_size` (256 KiB) of unread data from an app: the window closes, and after a read the stack announces the new window itself (`vendor/ipstack/UNBIHEX-PATCH.md`).
+No runtime requirement: the `ipstack` in `vendor/ipstack` closes a TCP stream without blocking (in stock 1.0.1 its `Drop` called `block_in_place`, so a tun inbound needed a multi-threaded tokio runtime). It also scales the TCP window (RFC 7323) when the app's SYN offers it: windows past 64 KB both ways; it takes no more than `read_buffer_size` (1 MiB) of unread data from an app: the window closes, and after a read the stack announces the new window itself; it resends lost data on a timer, not only on the app's next packet, and resets (RST) a stream out of retransmissions (`vendor/ipstack/UNBIHEX-PATCH.md`). The stack's packets wait for room in a full device queue instead of being dropped: ipstack has no congestion control.
 
 `start` order:
 

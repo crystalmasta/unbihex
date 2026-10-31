@@ -15,7 +15,7 @@ use ipstack::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, PollSender};
 use tun_rs::AsyncDevice;
 
 use crate::config::TunInboundConfig;
@@ -111,7 +111,16 @@ fn open_device(cfg: &TunInboundConfig, fd: Option<i32>) -> Result<AsyncDevice> {
 /// expects: every read yields one packet and every write sends one packet.
 struct TunIo {
     rx: mpsc::Receiver<Vec<u8>>,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: PollSender<Vec<u8>>,
+}
+
+impl TunIo {
+    fn new(rx: mpsc::Receiver<Vec<u8>>, tx: mpsc::Sender<Vec<u8>>) -> Self {
+        TunIo {
+            rx,
+            tx: PollSender::new(tx),
+        }
+    }
 }
 
 impl AsyncRead for TunIo {
@@ -137,16 +146,22 @@ impl AsyncRead for TunIo {
 
 impl AsyncWrite for TunIo {
     fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        match self.tx.try_send(buf.to_vec()) {
-            // A full queue means the device cannot keep up: drop, as a NIC would.
-            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => Poll::Ready(Ok(buf.len())),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
-            }
+        // A full queue waits instead of dropping, unlike a NIC: ipstack has no
+        // congestion control, and a segment lost here is resent only when the app
+        // sends again (three times at most), so a lost tail stalls its stream for
+        // good. What can queue up is bounded by the streams' send windows.
+        match self.tx.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(_)) => return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into())),
+            Poll::Pending => return Poll::Pending,
+        }
+        match self.tx.send_item(buf.to_vec()) {
+            Ok(()) => Poll::Ready(Ok(buf.len())),
+            Err(_) => Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into())),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -229,10 +244,7 @@ pub async fn start(
     };
 
     let accept = run_stack(
-        TunIo {
-            rx: in_rx,
-            tx: out_tx,
-        },
+        TunIo::new(in_rx, out_tx),
         cfg,
         udp_idle,
         tcp_idle,
@@ -260,8 +272,9 @@ fn tcp_config(mtu: u16, idle: Duration) -> TcpConfig {
     // connection to `window / RTT`, i.e. ~1.3 Mbit/s at 100 ms. The buffers are
     // byte budgets (ipstack tracks lengths), not preallocated memory; with the
     // vendored patch the read buffer also caps what an app may upload ahead of the
-    // relay (data not read yet closes the window).
-    cfg.read_buffer_size = 256 * 1024;
+    // relay (data not read yet closes the window). 1 MiB: with 256 KiB the window
+    // closed often enough to cut a single upload by two thirds on the Windows bench.
+    cfg.read_buffer_size = 1024 * 1024;
     cfg.max_unacked_bytes = 256 * 1024;
     // One MSS for both families: mtu - 60 is right for IPv6 and 20 bytes
     // conservative for IPv4 (1340 instead of 1360 at MTU 1400).
@@ -593,7 +606,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let tun = cfg.tun().unwrap().clone();
         let fut = run_stack(
-            TunIo { rx, tx },
+            TunIo::new(rx, tx),
             &tun,
             Duration::from_secs(5),
             Duration::from_secs(cfg.limits.tcp_idle_secs),
@@ -820,7 +833,7 @@ mod tests {
         let mut cfg = IpStackConfig::default();
         cfg.mtu(1400).unwrap();
         cfg.with_tcp_config(tcp_config(1400, Duration::from_secs(60)));
-        let mut stack = IpStack::new(cfg, TunIo { rx, tx });
+        let mut stack = IpStack::new(cfg, TunIo::new(rx, tx));
         let (app, server) = ([10, 199, 233, 1], [93, 184, 216, 34]);
 
         let mut syn = Vec::new();
@@ -840,7 +853,7 @@ mod tests {
             panic!("expected a TCP stream")
         };
 
-        // SYN-ACK: our shift for the 256 KiB read buffer is 3 (65 536 > u16::MAX at 2);
+        // SYN-ACK: our shift for the 1 MiB read buffer is 5 (65 536 > u16::MAX at 4);
         // its own window is unscaled.
         let pkt = tokio::time::timeout(Duration::from_secs(5), out.recv())
             .await
@@ -859,7 +872,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(shifts, [3]);
+        assert_eq!(shifts, [5]);
 
         // The app's window 1000 << 7 = 128 000 bytes: the stack sends well past 64 KiB.
         let mut ack = Vec::new();
@@ -888,6 +901,63 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
+    /// A lost tail is resent on a timer, with nothing coming from the app (stock
+    /// ipstack waited for the app's next packet), and a stream whose retransmissions
+    /// run out is reset instead of stalling with a hole.
+    #[tokio::test]
+    async fn unacknowledged_tail_is_resent_then_reset() {
+        let (inject, rx) = mpsc::channel(64);
+        let (tx, mut out) = mpsc::channel(QUEUE);
+        let mut cfg = IpStackConfig::default();
+        cfg.mtu(1400).unwrap();
+        let mut tcp = tcp_config(1400, Duration::from_secs(60));
+        tcp.rto = Duration::from_millis(50);
+        cfg.with_tcp_config(tcp);
+        let mut stack = IpStack::new(cfg, TunIo::new(rx, tx));
+        let (app, server) = ([10, 199, 233, 1], [93, 184, 216, 34]);
+
+        let mut syn = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40012, 443, 1000, 65_535)
+            .syn()
+            .write(&mut syn, &[])
+            .unwrap();
+        inject.send(syn).await.unwrap();
+        let IpStackStream::Tcp(mut s) = stack.accept().await.unwrap() else {
+            panic!("expected a TCP stream")
+        };
+        let pkt = out.recv().await.unwrap();
+        let Some(TransportSlice::Tcp(t)) = SlicedPacket::from_ip(&pkt).unwrap().transport else {
+            panic!("expected TCP")
+        };
+        let mut ack = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40012, 443, 1001, 65_535)
+            .ack(t.sequence_number().wrapping_add(1))
+            .write(&mut ack, &[])
+            .unwrap();
+        inject.send(ack).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // The app never acknowledges: the same segment comes again, then a RST.
+        s.write_all(b"tail").await.unwrap();
+        let (mut sends, mut reset) = (0, false);
+        while let Ok(Some(pkt)) = tokio::time::timeout(Duration::from_secs(3), out.recv()).await {
+            let Some(TransportSlice::Tcp(t)) = SlicedPacket::from_ip(&pkt).unwrap().transport else {
+                continue;
+            };
+            if t.rst() {
+                reset = true;
+                break;
+            }
+            if t.payload() == b"tail" {
+                sends += 1;
+            }
+        }
+        assert!(sends >= 2, "the tail must be resent without input from the app: {sends}");
+        assert!(reset, "exhausted retransmissions must reset the stream");
+    }
+
     /// Data the stream has not read closes the window the stack advertises (stock
     /// ipstack queued it without limit), and reading reopens it with an update.
     #[tokio::test]
@@ -897,8 +967,11 @@ mod tests {
         let (tx, mut out) = mpsc::channel(QUEUE);
         let mut cfg = IpStackConfig::default();
         cfg.mtu(1400).unwrap();
-        cfg.with_tcp_config(tcp_config(1400, Duration::from_secs(60)));
-        let mut stack = IpStack::new(cfg, TunIo { rx, tx });
+        // A 256 KiB read buffer keeps the test short (the engine uses 1 MiB).
+        let mut tcp = tcp_config(1400, Duration::from_secs(60));
+        tcp.read_buffer_size = 256 * 1024;
+        cfg.with_tcp_config(tcp);
+        let mut stack = IpStack::new(cfg, TunIo::new(rx, tx));
         let (app, server) = ([10, 199, 233, 1], [93, 184, 216, 34]);
         let segment = |seq: u32, ack: u32, payload: &[u8]| {
             let mut p = Vec::new();
@@ -1143,7 +1216,7 @@ mod tests {
         let idle = Duration::from_secs(123);
         for mtu in [1280u16, 1400, 9000] {
             let cfg = tcp_config(mtu, idle);
-            assert_eq!(cfg.read_buffer_size, 256 * 1024, "mtu {mtu}");
+            assert_eq!(cfg.read_buffer_size, 1024 * 1024, "mtu {mtu}");
             assert_eq!(cfg.max_unacked_bytes, 256 * 1024, "mtu {mtu}");
             assert_eq!(cfg.timeout, idle, "mtu {mtu}");
             let opts = cfg.options.as_deref().expect("options set");
@@ -1169,7 +1242,7 @@ mod tests {
         let (tx, _out_rx) = mpsc::channel::<Vec<u8>>(1);
         let (in_tx, rx) = mpsc::channel::<Vec<u8>>(1);
         drop(in_tx);
-        let mut io = TunIo { rx, tx };
+        let mut io = TunIo::new(rx, tx);
         let mut buf = [0u8; 16];
         let mut read_buf = ReadBuf::new(&mut buf);
         let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -1177,5 +1250,21 @@ mod tests {
             Poll::Ready(Err(e)) => assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe),
             other => panic!("expected BrokenPipe, got {other:?}"),
         }
+    }
+
+    /// A full device queue holds the stack back instead of losing its segments.
+    #[tokio::test]
+    async fn tun_io_waits_for_room_instead_of_dropping() {
+        let (tx, mut out_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (_in_tx, rx) = mpsc::channel::<Vec<u8>>(1);
+        let mut io = TunIo::new(rx, tx);
+        io.write_all(b"one").await.unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(100), io.write_all(b"two")).await;
+        assert!(second.is_err(), "a full queue must hold the writer");
+        assert_eq!(out_rx.recv().await.unwrap(), b"one");
+        io.write_all(b"two").await.unwrap();
+        assert_eq!(out_rx.recv().await.unwrap(), b"two");
+        drop(out_rx);
+        assert!(io.write_all(b"three").await.is_err(), "a closed device is an error");
     }
 }

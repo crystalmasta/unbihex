@@ -1,6 +1,6 @@
 # ipstack 1.0.1 — Unbihex patch
 
-This is ipstack 1.0.1 from crates.io (the latest release) with three changes. The build
+This is ipstack 1.0.1 from crates.io (the latest release) with five changes. The build
 script, examples and dev-dependencies are dropped: the build script only copied
 `wintun.dll` for the examples.
 
@@ -35,10 +35,28 @@ Changes (search for "Unbihex patch"):
    reopened window: below half the last advertised window may have stalled it, above
    half it never does.
 
+4. **Retransmission on a timer.** Stock ipstack checked for timed-out segments only when
+   a packet arrived from the app, so a lost tail (or a lost last ACK) left both sides
+   waiting for good; a segment out of retransmissions was dropped and the stream went on
+   with a hole. Now the stream task also sleeps until the earliest in-flight segment is
+   due (`Tcb::next_retransmit_at`; `poll_write` wakes it through `rto_notify` when the
+   first segment goes in flight) and resends then (`retransmit_timed_out`). A segment
+   still unacknowledged after `max_retransmit_count` resends resets the stream
+   (`Tcb::retransmits_exhausted`, RST).
+
+5. **One segment copied per write.** `poll_write` (`src/stream/tcp.rs`) copied the whole
+   buffer it was given (64 KiB from the relay) for every segment and truncated the copy
+   to one segment, keeping its capacity: 48 times the bytes copied, and as much memory
+   for every segment waiting in the device queue. Now it copies at most one MTU. On the
+   Windows bench this took one download through the TUN from 136 to 155 MB/s and the
+   client's peak with 64 parallel downloads from 152 to 85 MB.
+
 To move to a new ipstack version: check which of these upstream has fixed, copy the new
 crate source here, reapply what is still needed, keep the version in
 `unbihex-engine/Cargo.toml` in step, and run the engine tests
-(`inbound::tun::tests::tcp_window_scale_and_non_blocking_drop` covers the first two
-changes, `unread_data_closes_the_window_and_reading_reopens_it` the third).
+(`inbound::tun::tests`: `tcp_window_scale_and_non_blocking_drop` covers the first two
+changes, `unread_data_closes_the_window_and_reading_reopens_it` the third,
+`unacknowledged_tail_is_resent_then_reset` the fourth). The Windows bench
+(64 parallel downloads through the TUN) found the fourth and measures the fifth.
 
 Licensed like ipstack itself: Apache-2.0 (see LICENSE here).

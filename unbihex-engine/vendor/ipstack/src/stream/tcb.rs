@@ -361,6 +361,20 @@ impl Tcb {
         retransmit_list
     }
 
+    /// Unbihex patch: when the earliest in-flight segment is due for retransmission.
+    pub(crate) fn next_retransmit_at(&self) -> Option<std::time::Instant> {
+        self.inflight_packets.values().map(|p| p.send_time + p.retransmit_timeout).min()
+    }
+
+    /// Unbihex patch: a segment is still unacknowledged after every allowed
+    /// retransmission. The stream cannot recover; stock ipstack dropped the segment
+    /// and went on with a hole, which stalled the stream for good.
+    pub(crate) fn retransmits_exhausted(&self) -> bool {
+        self.inflight_packets
+            .values()
+            .any(|p| p.retransmit_count >= self.max_retransmit_count && p.is_timed_out())
+    }
+
     pub(crate) fn get_inflight_packets_total_len(&self) -> usize {
         self.inflight_packets.values().map(|p| p.payload.len()).sum()
     }

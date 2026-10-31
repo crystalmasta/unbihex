@@ -172,6 +172,8 @@ pub struct IpStackTcpStream {
     exit_notifier: Option<tokio::sync::mpsc::Sender<()>>,
     temp_read_buffer: Vec<u8>,
     config: Arc<TcpConfig>,
+    // Unbihex patch: wakes the task to arm its retransmission timer.
+    rto_notify: Arc<tokio::sync::Notify>,
 }
 
 impl IpStackTcpStream {
@@ -235,6 +237,7 @@ impl IpStackTcpStream {
             exit_notifier: None,
             temp_read_buffer: Vec::new(),
             config,
+            rto_notify: Arc::new(tokio::sync::Notify::new()),
         };
 
         let sessions = SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst).saturating_add(1);
@@ -387,8 +390,16 @@ impl AsyncWrite for IpStackTcpStream {
         }
 
         let sender = &self.up_packet_sender;
-        let payload_len = write_packet_to_device(sender, nt, &tcb, None, ACK | PSH, None, Some(buf.to_vec()))?;
+        // Unbihex patch: copy at most one segment. Stock ipstack copied the whole buffer
+        // (64 KiB from the relay) for every segment and truncated it, keeping the
+        // capacity: 48 times the bytes copied, and as much memory per queued segment.
+        let segment = &buf[..buf.len().min(tcb.get_mtu() as usize)];
+        let payload_len = write_packet_to_device(sender, nt, &tcb, None, ACK | PSH, None, Some(segment.to_vec()))?;
+        let was_idle = tcb.get_inflight_packets_total_len() == 0;
         tcb.add_inflight_packet(buf[..payload_len].to_vec())?;
+        if was_idle {
+            self.rto_notify.notify_one(); // Unbihex patch: arm the retransmission timer
+        }
 
         let (state, seq, ack) = (tcb.get_state(), tcb.get_seq(), tcb.get_ack());
         let l_info = format!("local {{ seq: {seq}, ack: {ack} }}");
@@ -490,6 +501,7 @@ impl IpStackTcpStream {
         let (exit_task_notifier, exit_monitor) = tokio::sync::mpsc::channel::<()>(10);
         let exit_notifier = exit_task_notifier.clone();
         let config = self.config.clone();
+        let rto_notify = self.rto_notify.clone();
         self.exit_notifier = Some(exit_task_notifier);
 
         let task_handle = tokio::spawn(async move {
@@ -504,6 +516,7 @@ impl IpStackTcpStream {
                 read_notify,
                 data_tx,
                 exit_monitor,
+                rto_notify,
             )
             .await;
             if let Err(e) = &v {
@@ -532,6 +545,7 @@ async fn tcp_main_logic_loop(
     read_notify: std::sync::Arc<std::sync::Mutex<Option<Waker>>>,
     data_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     mut exit_monitor: tokio::sync::mpsc::Receiver<()>,
+    rto_notify: Arc<tokio::sync::Notify>,
 ) -> std::io::Result<()> {
     {
         let mut tcb = tcb.lock().unwrap();
@@ -651,10 +665,24 @@ async fn tcp_main_logic_loop(
     loop {
         let exit_notifier = exit_notifier.clone();
 
+        // Unbihex patch: retransmission also runs on a timer. Stock ipstack resent only
+        // when the app sent something, so a lost tail (or a lost last ACK) left both
+        // sides waiting for good.
+        let rto_at = tcb.lock().unwrap().next_retransmit_at();
         let network_packet = tokio::select! {
             _ = exit_monitor.recv() => {
                 log::debug!("{network_tuple} task exited due to exit signal");
                 break;
+            }
+            _ = rto_notify.notified() => continue,
+            _ = sleep_until_opt(rto_at) => {
+                let mut t = tcb.lock().unwrap();
+                if retransmit_timed_out(&up_packet_sender, network_tuple, &mut t)? {
+                    write_notify.lock().unwrap().take().map(|w| w.wake_by_ref()).unwrap_or(());
+                    read_notify.lock().unwrap().take().map(|w| w.wake_by_ref()).unwrap_or(());
+                    break;
+                }
+                continue;
             }
             network_packet = stream_receiver.recv() => network_packet,
         };
@@ -695,18 +723,10 @@ async fn tcp_main_logic_loop(
 
         tcb.update_inflight_packet_queue(incoming_ack);
 
-        for packet in tcb.collect_timed_out_inflight_packets() {
-            let (seq, count) = (packet.seq, packet.retransmit_count);
-            log::debug!("{network_tuple} inflight packet retransmission timeout: {seq:?}, retransmit_count: {count}",);
-            write_packet_to_device(
-                &up_packet_sender,
-                network_tuple,
-                &tcb,
-                None,
-                ACK | PSH,
-                Some(seq),
-                Some(packet.payload),
-            )?;
+        if retransmit_timed_out(&up_packet_sender, network_tuple, &mut tcb)? {
+            write_notify.lock().unwrap().take().map(|w| w.wake_by_ref()).unwrap_or(());
+            read_notify.lock().unwrap().take().map(|w| w.wake_by_ref()).unwrap_or(());
+            break;
         }
 
         let pkt_type = tcb.check_pkt_type(tcp_header, &payload);
@@ -922,6 +942,32 @@ async fn tcp_main_logic_loop(
         tcb.update_send_window(incoming_win);
     } // end of loop
     Ok::<(), std::io::Error>(())
+}
+
+/// Unbihex patch: resends the segments whose retransmission timeout has passed. When
+/// one has used up its retransmissions, resets the stream and returns `true` (the
+/// caller ends the task) instead of carrying on with a hole in the data.
+fn retransmit_timed_out(sender: &PacketSender, nt: NetworkTuple, tcb: &mut Tcb) -> std::io::Result<bool> {
+    if tcb.retransmits_exhausted() {
+        log::warn!("{nt}: retransmissions exhausted, resetting the stream");
+        write_packet_to_device(sender, nt, tcb, None, ACK | RST, None, None)?;
+        tcb.change_state(TcpState::Closed);
+        return Ok(true);
+    }
+    for packet in tcb.collect_timed_out_inflight_packets() {
+        let (seq, count) = (packet.seq, packet.retransmit_count);
+        log::debug!("{nt} inflight packet retransmission timeout: {seq:?}, retransmit_count: {count}");
+        write_packet_to_device(sender, nt, tcb, None, ACK | PSH, Some(seq), Some(packet.payload))?;
+    }
+    Ok(false)
+}
+
+/// Unbihex patch: sleeps until `at`, or forever without a deadline.
+async fn sleep_until_opt(at: Option<std::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
+    }
 }
 
 fn extract_data_n_write_upstream(
