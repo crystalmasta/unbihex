@@ -418,7 +418,8 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
 
 Note: VLESS atyp codes **differ** from SOCKS5.
 
-- The header is sent together with the client's first data if it is ready within 5 ms. Otherwise it is sent on its own. This saves round trips and reduces the size signature.
+- The header is sent together with the client's first data if it is ready within 5 ms. Otherwise it is sent on its own. This saves round trips and reduces the size signature. A read started before the first write waits for that time but wakes as soon as a write has sent the header with its data; only connections where the client writes nothing wait it out. The same goes for the address in Shadowsocks.
+- Without Vision TLS is read in bulk: one socket `read` of up to 64 KB, rustls deframes the records from memory; a TLS record leaves in one `write` (header and payload via `write_vectored`). With Vision reads stay one record at a time: the switch to a raw copy needs nothing read past the record carrying it.
 - Server response: `version (1 B) | addons len (1 B, N) | addons (N B)`, then data. The response is read lazily, on the first read from the stream: N addon bytes are skipped. A version ≠ 0 is an error.
 - UDP (command 0x02): each packet in both directions is `length u16 BE | payload`. One VLESS stream corresponds to one destination address, that is one `PacketStream`.
 - Transport: TCP through the SocketFactory, then TLS (§11.4) if `tls.enabled`. Without TLS a warning is logged: traffic goes in the clear.

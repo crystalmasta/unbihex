@@ -9,7 +9,7 @@ use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
@@ -113,6 +113,8 @@ pub struct VlessStream<S> {
     inner: S,
     header: Option<Vec<u8>>,
     deadline: Pin<Box<Sleep>>,
+    /// A read waiting for the header to go out; woken when a write sends it.
+    reader: Option<Waker>,
     out: PendingOut,
     resp: Resp,
 }
@@ -129,6 +131,7 @@ impl<S> VlessStream<S> {
             inner,
             header: Some(header),
             deadline: Box::pin(tokio::time::sleep(EARLY_DATA_WAIT)),
+            reader: None,
             out: PendingOut::default(),
             resp: Resp::Head {
                 buf: [0; 2],
@@ -143,12 +146,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> VlessStream<S> {
     fn poll_push(&mut self, cx: &mut Context<'_>, force_header: bool) -> Poll<io::Result<()>> {
         if force_header && let Some(h) = self.header.take() {
             self.out.extend(&h);
+            self.header_sent();
         }
         if !self.out.is_empty() {
             ready!(self.out.poll_drain(&mut self.inner, cx))?;
             ready!(Pin::new(&mut self.inner).poll_flush(cx))?;
         }
         Poll::Ready(Ok(()))
+    }
+
+    // Found by Pavel Shakhmin (github.com/pshakhmin), PR #25.
+    /// The header is on its way: a read waiting for it must not sit out the rest of
+    /// `EARLY_DATA_WAIT` (nothing else would wake it before the timer).
+    fn header_sent(&mut self) {
+        if let Some(w) = self.reader.take() {
+            w.wake();
+        }
     }
 }
 
@@ -160,7 +173,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VlessStream<S> {
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
         if this.header.is_some() {
-            // The server answers only after the header; wait briefly for payload to coalesce.
+            // The server answers only after the header; wait briefly for payload to
+            // coalesce (a header alone in its own record stands out). A write that
+            // sends the header wakes this read at once; only a connection that never
+            // writes (download-only, server speaks first) waits the whole timer.
+            this.reader = Some(cx.waker().clone());
             ready!(this.deadline.as_mut().poll(cx));
             ready!(this.poll_push(cx, true))?;
         } else {
@@ -227,6 +244,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VlessStream<S> {
         if let Some(h) = this.header.take() {
             this.out.extend(&h);
             this.out.extend(data);
+            this.header_sent();
             if let Poll::Ready(Err(e)) = this.out.poll_drain(&mut this.inner, cx) {
                 return Poll::Ready(Err(e));
             }
@@ -558,5 +576,31 @@ mod tests {
         server.write_all(&[1, 0]).await.unwrap();
         let mut b = [0u8; 1];
         assert!(s.read(&mut b).await.is_err());
+    }
+
+    // Found by Pavel Shakhmin (github.com/pshakhmin), PR #25.
+    /// A read polled before the first write is woken as soon as the write sends the
+    /// header, and the header still goes out in one piece with that first payload.
+    #[tokio::test(start_paused = true)]
+    async fn waiting_read_wakes_when_the_header_goes_out() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (ours, mut server) = tokio::io::duplex(4096);
+        let (mut r, mut w) = tokio::io::split(VlessStream::new(ours, b"HEADER".to_vec()));
+        let start = tokio::time::Instant::now();
+        let reader = tokio::spawn(async move {
+            let mut got = [0u8; 5];
+            r.read_exact(&mut got).await.unwrap();
+            (got, tokio::time::Instant::now())
+        });
+        tokio::task::yield_now().await; // the read is now parked on the early-data wait
+        w.write_all(b"hello").await.unwrap();
+        let mut first = [0u8; 64];
+        let n = server.read(&mut first).await.unwrap();
+        assert_eq!(&first[..n], b"HEADERhello", "header and payload in one write");
+        server.write_all(&[0, 0]).await.unwrap(); // VLESS response: version, no addons
+        server.write_all(b"world").await.unwrap();
+        let (got, done) = reader.await.unwrap();
+        assert_eq!(&got, b"world");
+        assert!(done - start < EARLY_DATA_WAIT, "the read sat out the timer: {:?}", done - start);
     }
 }

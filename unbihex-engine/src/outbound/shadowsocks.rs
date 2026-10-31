@@ -8,7 +8,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 
 use aes_gcm::aead::{AeadInPlace, KeyInit};
@@ -200,6 +200,8 @@ pub struct SsStream<S> {
     salt_pending: Option<Vec<u8>>,
     first: Option<Vec<u8>>,
     deadline: Pin<Box<Sleep>>,
+    /// A read waiting for `first` to go out; woken when a write sends it.
+    reader: Option<Waker>,
     out: PendingOut,
     dec: Option<AeadCipher>,
     stage: ReadStage,
@@ -221,6 +223,7 @@ impl<S> SsStream<S> {
             salt_pending: Some(salt),
             first,
             deadline: Box::pin(tokio::time::sleep(EARLY_DATA_WAIT)),
+            reader: None,
             out: PendingOut::default(),
             dec: None,
             stage: ReadStage::Salt,
@@ -255,12 +258,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SsStream<S> {
     fn poll_push(&mut self, cx: &mut Context<'_>, force_first: bool) -> Poll<io::Result<()>> {
         if force_first && let Some(first) = self.first.take() {
             self.encrypt(&first);
+            self.first_sent();
         }
         if !self.out.is_empty() {
             ready!(self.out.poll_drain(&mut self.inner, cx))?;
             ready!(Pin::new(&mut self.inner).poll_flush(cx))?;
         }
         Poll::Ready(Ok(()))
+    }
+
+    // Found by Pavel Shakhmin (github.com/pshakhmin), PR #25.
+    /// The target address is on its way: a read waiting for it must not sit out
+    /// the rest of `EARLY_DATA_WAIT`.
+    fn first_sent(&mut self) {
+        if let Some(w) = self.reader.take() {
+            w.wake();
+        }
     }
 
     /// Reads and decrypts one payload chunk into `self.plain`. Ready(Ok(false)) = clean EOF.
@@ -334,6 +347,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for SsStream<S> {
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
         if this.first.is_some() {
+            // Woken early by a write that sends `first` with its payload.
+            this.reader = Some(cx.waker().clone());
             ready!(this.deadline.as_mut().poll(cx));
             ready!(this.poll_push(cx, true))?;
         } else {
@@ -363,6 +378,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for SsStream<S> {
             Some(mut first) => {
                 first.extend_from_slice(data);
                 this.encrypt(&first);
+                this.first_sent();
             }
             None => this.encrypt(data),
         }
