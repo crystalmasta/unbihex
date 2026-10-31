@@ -39,3 +39,4 @@ the engine design in [`unbihex-engine/SPEC.en.md`](unbihex-engine/SPEC.en.md), t
 © 2026 Crystalmasta — https://github.com/crystalmasta.
 License — Mozilla Public License 2.0, see the projects' `LICENSE` files.
 Report vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
+To send changes see [`CONTRIBUTING.md`](CONTRIBUTING.md); pull request authors accept the [CLA](CLA.md) once.

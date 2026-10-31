@@ -1,0 +1,128 @@
+# Contributor License Agreement check (CLA.md).
+#
+# Every author of a pull request (its opener and the GitHub accounts of its commits)
+# signs once by commenting the phrase below; signatures are kept on the
+# `cla-signatures` branch. The "CLA" status is red until everyone has signed.
+#
+# pull_request_target runs in the base repository with a write token, so the PR's
+# code is never checked out or run here.
+name: CLA
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+
+jobs:
+  cla:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && contains(github.event.comment.body, 'I hereby sign the CLA'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const SIGN = 'I have read the CLA Document and I hereby sign the CLA';
+            const BRANCH = 'cla-signatures';
+            const FILE = 'signatures.json';
+            const ALLOW = new Set(['crystalmasta']);
+            const { owner, repo } = context.repo;
+            const DOC = `https://github.com/${owner}/${repo}/blob/main/CLA.md`;
+            const number = context.payload.pull_request?.number ?? context.payload.issue.number;
+            const pr = context.payload.pull_request
+              ?? (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
+
+            // Who must sign: the opener and every commit author GitHub can match to an account.
+            const commits = await github.paginate(github.rest.pulls.listCommits,
+              { owner, repo, pull_number: number, per_page: 100 });
+            const people = new Set([pr.user.login]);
+            const unlinked = [];
+            for (const c of commits) {
+              if (c.author?.login) people.add(c.author.login);
+              else unlinked.push(c.sha.slice(0, 7));
+            }
+            const needed = [...people].filter((l) => !ALLOW.has(l) && !l.endsWith('[bot]'));
+
+            let sigs = [];
+            let sha;
+            try {
+              const f = await github.rest.repos.getContent({ owner, repo, path: FILE, ref: BRANCH });
+              sha = f.data.sha;
+              sigs = JSON.parse(Buffer.from(f.data.content, 'base64').toString('utf8'));
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+            const signed = new Set(sigs.map((s) => s.login.toLowerCase()));
+
+            // The phrase as the whole comment signs for its author.
+            if (context.eventName === 'issue_comment') {
+              const who = context.payload.comment.user;
+              const body = context.payload.comment.body.trim();
+              if (body === SIGN && needed.includes(who.login) && !signed.has(who.login.toLowerCase())) {
+                sigs.push({
+                  login: who.login,
+                  id: who.id,
+                  pr: number,
+                  comment: context.payload.comment.html_url,
+                  date: new Date().toISOString(),
+                  cla: 'v1',
+                });
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner, repo, path: FILE, branch: BRANCH, sha,
+                  message: `CLA signed by ${who.login} (PR #${number})`,
+                  content: Buffer.from(JSON.stringify(sigs, null, 2) + '\n').toString('base64'),
+                });
+                signed.add(who.login.toLowerCase());
+              }
+            }
+
+            const missing = needed.filter((l) => !signed.has(l.toLowerCase()));
+            const ok = missing.length === 0 && unlinked.length === 0;
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: pr.head.sha, context: 'CLA',
+              state: ok ? 'success' : 'failure',
+              description: (ok ? 'All authors signed the CLA'
+                : `Not signed: ${[...missing, ...unlinked].join(', ')}`).slice(0, 140),
+              target_url: DOC,
+            });
+
+            // One comment per PR, updated in place.
+            const marker = '<!-- cla-check -->';
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number: number, per_page: 100 });
+            const mine = comments.find((c) => c.user.type === 'Bot' && c.body?.includes(marker));
+            let text;
+            if (ok) {
+              text = `${marker}\n✅ CLA подписано всеми авторами. / All authors have signed the CLA.`;
+            } else {
+              text = `${marker}\nСпасибо за PR! Перед слиянием каждый автор принимает [CLA](${DOC}) — один раз `
+                + `на аккаунт: ответьте в этом PR комментарием ровно с этой фразой.\n\n`
+                + `Thanks for the PR! Before it can be merged, every author accepts the [CLA](${DOC}) — `
+                + `once per account: reply in this PR with exactly this phrase.\n\n`
+                + '```\n' + SIGN + '\n```\n';
+              if (missing.length) {
+                text += `\nЕщё не подписали / Not signed yet: ${missing.map((l) => '@' + l).join(', ')}\n`;
+              }
+              if (unlinked.length) {
+                text += `\nКоммиты с почтой, не привязанной к аккаунту GitHub — привяжите почту в настройках `
+                  + `GitHub или пересоберите коммиты / Commits whose email is not linked to a GitHub `
+                  + `account: ${unlinked.join(', ')}\n`;
+              }
+            }
+            if (mine) {
+              if (mine.body !== text) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body: text });
+              }
+            } else if (!ok) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: number, body: text });
+            }
