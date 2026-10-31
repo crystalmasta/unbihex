@@ -269,9 +269,17 @@ impl XhttpConfig {
             (self.sequence_placement(), self.sequence_key()),
         ];
         if self.x_padding_obfs_mode {
-            keys.push((self.padding_placement(), if self.padding_placement() == "header" {
-                self.padding_header()
-            } else { self.padding_key() }));
+            keys.push(match self.padding_placement() {
+                "header" | "queryInHeader" => ("header", self.padding_header()),
+                placement => (placement, self.padding_key()),
+            });
+        } else {
+            keys.push(("header", "Referer"));
+        }
+        // Cookie metadata owns the physical Cookie header. A raw header named
+        // Cookie cannot simultaneously carry session IDs or padding values.
+        if keys.iter().any(|(p, k)| *p == "header" && k.eq_ignore_ascii_case("cookie")) {
+            return Err(Error::config("xhttp: use cookie placement, not a raw Cookie header"));
         }
         for (i, (a, ka)) in keys.iter().enumerate() {
             for (b, kb) in &keys[i + 1..] {
@@ -283,6 +291,9 @@ impl XhttpConfig {
         if !matches!(self.uplink_method(), "POST" | "GET" | "PUT" | "PATCH" | "DELETE") {
             return Err(unsupported("uplinkHTTPMethod"));
         }
+        if self.uplink_method() == "GET" && matches!(self.mode, XhttpMode::StreamUp | XhttpMode::StreamOne) {
+            return Err(Error::config("xhttp: GET uplink requires packet-up mode"));
+        }
         if let Some(r) = self.session_id_length {
             if r.from == 0 || r.from > r.to || r.to > 256 {
                 return Err(Error::config("xhttp: sessionIDLength must be in 1-256"));
@@ -293,6 +304,16 @@ impl XhttpConfig {
         }
         if !self.session_table().bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)) {
             return Err(Error::config("xhttp: sessionIDTable must contain URL-safe ASCII characters"));
+        }
+        if !self.session_table().is_empty() {
+            let length = self.session_id_length.ok_or_else(|| Error::config("xhttp: custom sessionIDTable requires sessionIDLength"))?;
+            let symbols = self.session_table().bytes().collect::<std::collections::HashSet<_>>().len() as u64;
+            let room = (length.from..=length.to).fold(0u64, |room, n| {
+                room.saturating_add(symbols.saturating_pow(n))
+            });
+            if room < (1u64 << 31) {
+                return Err(Error::config("xhttp: sessionIDTable/sessionIDLength space is too small"));
+            }
         }
         if let Some(r) = self.sc_max_each_post_bytes
             && r.from == 0
@@ -569,6 +590,15 @@ mod tests {
             serde_json::json!({"uplinkHTTPMethod":"HEAD"}),
             serde_json::json!({"uplinkDataPlacement":"header"}),
             serde_json::json!({"uplinkDataPlacement":"cookie"}),
+            serde_json::json!({"sessionIDPlacement":"header", "sessionIDKey":"Referer"}),
+            serde_json::json!({"xPaddingObfsMode":true, "sessionIDPlacement":"header", "sessionIDKey":"X-Padding"}),
+            serde_json::json!({"xPaddingObfsMode":true, "xPaddingHeader":"Cookie"}),
+            serde_json::json!({"sessionIDPlacement":"header", "sessionIDKey":"Cookie"}),
+            serde_json::json!({"sessionIDTable":"a", "sessionIDLength":16}),
+            serde_json::json!({"sessionIDTable":"aaaaaaaaaaaa", "sessionIDLength":16}),
+            serde_json::json!({"sessionIDTable":"number", "sessionIDLength":4}),
+            serde_json::json!({"sessionIDTable":"abc"}),
+            serde_json::json!({"mode":"stream-one", "uplinkHTTPMethod":"GET"}),
         ] {
             assert!(XhttpConfig::from_xray(&bad).is_err(), "{bad}");
         }

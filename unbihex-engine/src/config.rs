@@ -492,6 +492,9 @@ impl VlessConfig {
         }
         if let Some(x) = &self.xhttp {
             x.validate()?;
+            if x.uplink_method() == "GET" && x.mode.resolve(self.reality.is_some()) != crate::outbound::xhttp::XhttpMode::PacketUp {
+                return Err(Error::config("xhttp: GET uplink requires packet-up mode"));
+            }
             if self.is_vision() {
                 return Err(Error::config(format!(
                     "outbound {}: {FLOW_VISION} works only over raw TCP, not XHTTP",

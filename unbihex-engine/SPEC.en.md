@@ -716,3 +716,5 @@ and a plaintext origin on disposable loopback listeners. This proves wire
 interoperability, not availability of any particular CDN. Format references:
 public Xray `transport/internet/splithttp/{config,xpadding}.go` and
 `infra/conf/transport_method.go`.
+
+Custom alphabets require a length and at least 2^31 possible IDs (counting distinct symbols); degenerate alphabets are rejected. Unrelated query bytes are preserved exactly; only transport-owned keys are replaced. Stale transport cookies/query keys cannot shadow new values. On loading saved state the client re-evaluates capability while preserving IDs, user labels and subscriptions.

@@ -50,6 +50,18 @@ fn set_header(headers: &mut Vec<(String, String)>, key: &str, value: String) {
     headers.push((key.to_string(), value));
 }
 
+fn set_query(query: &mut String, key: &str, value: &str) {
+    // Keep every byte of unrelated/signed query parameters, including flag-only
+    // fields, percent-escape case, non-UTF8 escapes and the original spacing.
+    let parts: Vec<&str> = query.split('&').filter(|part| {
+        url::form_urlencoded::parse(part.as_bytes()).next().is_none_or(|(k, _)| k != key)
+    }).collect();
+    let mut out = parts.join("&");
+    if !out.is_empty() { out.push('&'); }
+    out.push_str(&url::form_urlencoded::Serializer::new(String::new()).append_pair(key, value).finish());
+    *query = out;
+}
+
 fn huffman_bits(c: u8) -> usize {
     // RFC 7541 appendix B, restricted to the base62 alphabet used by Xray.
     match c {
@@ -255,7 +267,7 @@ impl XhttpClient {
     fn request_shape(&self, session: Option<&str>, seq: Option<u64>, stream_body: bool) -> RequestShape {
         let mut t = self.path.clone();
         let mut h = browser_headers(&self.cfg.headers);
-        let mut query: Vec<(String, String)> = url::form_urlencoded::parse(self.query.as_bytes()).into_owned().collect();
+        let mut query = self.query.clone();
         let mut put = |placement: &str, key: &str, value: &str, target: &mut String, headers: &mut Vec<(String, String)>| {
             match placement {
                 "path" => {
@@ -263,13 +275,14 @@ impl XhttpClient {
                     target.push_str(value);
                 }
                 "query" => {
-                    query.retain(|(k, _)| k != key);
-                    query.push((key.to_string(), value.to_string()));
+                    set_query(&mut query, key, value);
                 }
                 "header" => set_header(headers, key, value.to_string()),
                 "cookie" => {
                     let old = headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
-                        .map(|(_, v)| v.as_str()).collect::<Vec<_>>().join("; ");
+                        .flat_map(|(_, v)| v.split(';')).map(str::trim)
+                        .filter(|c| !c.is_empty() && c.split_once('=').is_none_or(|(name, _)| name.trim() != key))
+                        .collect::<Vec<_>>().join("; ");
                     let value = if old.is_empty() { format!("{key}={value}") } else { format!("{old}; {key}={value}") };
                     set_header(headers, "Cookie", value);
                 }
@@ -294,7 +307,7 @@ impl XhttpClient {
         }
         if !query.is_empty() {
             t.push('?');
-            t.push_str(&url::form_urlencoded::Serializer::new(String::new()).extend_pairs(query).finish());
+            t.push_str(&query);
         }
         if stream_body && !self.cfg.no_grpc_header {
             set_header(&mut h, "Content-Type", "application/grpc".into());
@@ -768,5 +781,23 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn original_query_is_byte_preserved_and_only_transport_keys_are_replaced() {
+        let raw = "flag&token=a%20b&sig=a%2fb&opaque=%FF";
+        let c = client(XhttpConfig {path:format!("/api?{raw}"),..Default::default()});
+        assert_eq!(c.request_shape(Some("abc"),Some(0),false).target,format!("/api/abc/0?{raw}"));
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "path":format!("/api?{raw}&x%5fseq=old&x_seq=stale"), "seqPlacement":"query"
+        })).unwrap();
+        let c=client(cfg);
+        assert_eq!(c.request_shape(Some("abc"),Some(2),false).target,format!("/api/abc?{raw}&x_seq=2"));
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "sessionIDPlacement":"cookie", "headers":{"Cookie":"keep=1; x_session=old; x_session=stale"}
+        })).unwrap();
+        let c=client(cfg);
+        let shape=c.request_shape(Some("new"),None,false);
+        assert_eq!(shape.headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("cookie")).unwrap().1,"keep=1; x_session=new");
     }
 }
