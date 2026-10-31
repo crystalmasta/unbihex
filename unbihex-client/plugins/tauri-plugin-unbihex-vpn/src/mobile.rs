@@ -37,6 +37,11 @@ impl<R: Runtime> UnbihexVpn<R> {
             .map_err(Into::into)
     }
 
+    /// Android: the pipe that signals activity resumes (see [`UiSignalResponse`]).
+    pub fn ui_signal(&self) -> crate::Result<UiSignalResponse> {
+        self.0.run_mobile_plugin("uiSignal", ()).map_err(Into::into)
+    }
+
     /// Current OS-level VPN state.
     pub fn status(&self) -> crate::Result<StatusResponse> {
         self.0.run_mobile_plugin("status", ()).map_err(Into::into)

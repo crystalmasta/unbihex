@@ -144,8 +144,47 @@ fn watch_vpn_stop(app: AppHandle, mut signal: std::fs::File, session: Connection
                 tracing::info!("the VPN was switched off outside the app");
                 state.client.disconnect().await;
                 notify(&app);
+                // Swiped away earlier: nothing keeps the process any more.
+                if app.get_webview_window("main").is_none() {
+                    app.exit(0);
+                }
             }
         });
+    });
+}
+
+/// Android: creates the window again when the app is opened after it was swiped
+/// away with the VPN on. Tauri creates windows only at start and reports activity
+/// resumes only to existing windows, so the new activity would stay blank; the VPN
+/// plugin signals every activity resume through a pipe instead.
+#[cfg(target_os = "android")]
+fn watch_activities(app: AppHandle) {
+    use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+        let fd = match app.unbihex_vpn().ui_signal() {
+            Ok(r) => r.fd,
+            Err(e) => {
+                tracing::warn!("activity signal: {e}");
+                None
+            }
+        };
+        let Some(fd) = fd else {
+            return;
+        };
+        // SAFETY: the plugin detached this descriptor for us; nothing else owns it.
+        let mut pipe = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut buf = [0u8; 64];
+        while matches!(pipe.read(&mut buf), Ok(n) if n > 0) {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if handle.get_webview_window("main").is_none() {
+                    tracing::info!("the app was opened again: creating its window");
+                    show_window(&handle);
+                }
+            });
+        }
     });
 }
 
@@ -510,6 +549,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 fn start_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
+        #[cfg(target_os = "android")]
+        watch_activities(app.clone());
         let state = app.state::<AppState>();
         let auto = state.client.settings().auto_connect;
         if auto && state.client.selected_server().is_ok() {
@@ -618,15 +659,11 @@ pub fn run() {
         }
         // Android: swiping the app away destroys its only window, and Tauri would end
         // the process, the engine with it. While the VPN is on the process stays
-        // (the foreground VPN service keeps Android from killing it), and the window
-        // comes back when the app is opened again.
+        // (the foreground VPN service keeps Android from killing it); `watch_activities`
+        // creates the window again when the app is opened.
         #[cfg(target_os = "android")]
         tauri::RunEvent::ExitRequested { code: None, api, .. } if vpn_connected(app) => {
             api.prevent_exit();
-        }
-        #[cfg(target_os = "android")]
-        tauri::RunEvent::Resumed if app.get_webview_window("main").is_none() => {
-            show_window(app);
         }
         tauri::RunEvent::Exit => {
             // Restore the system proxy and routes before the process ends.

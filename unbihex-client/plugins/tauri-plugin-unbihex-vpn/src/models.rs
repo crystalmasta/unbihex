@@ -36,6 +36,15 @@ pub struct StartResponse {
     pub stop_fd: Option<i32>,
 }
 
+/// Result of `ui_signal`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiSignalResponse {
+    /// Android: the read end of a pipe that gets a byte whenever an activity of the
+    /// app comes to the front; ours to close. `None` after the first call.
+    pub fd: Option<i32>,
+}
+
 /// VPN state reported by the OS.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

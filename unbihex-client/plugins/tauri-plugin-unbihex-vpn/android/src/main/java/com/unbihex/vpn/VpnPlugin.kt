@@ -42,6 +42,10 @@ class StartArgs {
 class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     private var pendingArgs: StartArgs? = null
 
+    init {
+        UiSignal.watch(activity.application)
+    }
+
     @Command
     fun start(invoke: Invoke) {
         val args = invoke.parseArgs(StartArgs::class.java)
@@ -90,7 +94,9 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             putExtra(UnbihexVpnService.EXTRA_NOTIFICATION, args.notification)
         }
         try {
-            activity.startService(intent)
+            // The application context: Tauri keeps handing plugins the first activity,
+            // which is gone once the app was swiped away with the VPN on.
+            activity.applicationContext.startService(intent)
         } catch (e: Exception) {
             UnbihexVpnService.onEstablished = null
             invoke.reject("Не удалось запустить VPN-сервис: ${e.message}")
@@ -106,8 +112,12 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     private fun askNotificationPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
         val permission = Manifest.permission.POST_NOTIFICATIONS
+        if (activity.isDestroyed) return
         if (activity.checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
-            activity.requestPermissions(arrayOf(permission), 0)
+            try {
+                activity.requestPermissions(arrayOf(permission), 0)
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -123,6 +133,14 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             // The service is not running: nothing to stop.
         }
         invoke.resolve()
+    }
+
+    /** The read end of [UiSignal]'s pipe, once; the Rust side owns it after this. */
+    @Command
+    fun uiSignal(invoke: Invoke) {
+        val res = JSObject()
+        res.put("fd", UiSignal.takeReader())
+        invoke.resolve(res)
     }
 
     @Command
