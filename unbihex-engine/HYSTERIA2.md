@@ -46,7 +46,9 @@ flags and Salamander are preserved; unsupported verification/transport options
 produce an unsupported profile rather than silently weakening it. Xray's single
 `finalmask.udp` Salamander entry maps to the same native envelope. Unknown mask
 chains and nonempty TCP masks are not translated. A sing-box public-key pin is
-not confused with a leaf-certificate pin.
+not confused with a leaf-certificate pin. Configured Xray certificate pins are
+explicitly refused too: their independent leaf/CA trust policy is not equivalent
+to native additional-leaf pins; an empty pin string is not dropped as absent.
 
 Xray HY2 outbounds with additional top-level dial options (for example
 `sendThrough`, `proxySettings` or `mux`) are explicitly refused instead of losing

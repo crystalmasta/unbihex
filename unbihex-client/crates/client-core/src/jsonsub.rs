@@ -170,13 +170,10 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
                 || unknown_fields(&t,&["serverName","alpn","allowInsecure","fingerprint","pinnedPeerCertSha256"])
                 || invalid_string(&t,"serverName") || invalid_string(&t,"fingerprint") || invalid_alpn(&t));
             if let Some(pins)=t.get("pinnedPeerCertSha256").filter(|p|!p.is_null()) {
-                match pins.as_array() {
-                    Some(pins)=>for pin in pins {
-                        if let Some(pin)=pin.as_str() {params.push(("pinSHA256",pin.into()));}
-                        else {mark_unsupported(&mut params,true);}
-                    },
-                    None=>mark_unsupported(&mut params,true),
-                }
+                // Xray pins can establish trust (including a CA), whereas
+                // native pins only narrow WebPKI trust to a leaf certificate.
+                // Do not translate different policies or discard an empty pin.
+                mark_unsupported(&mut params,!pins.as_array().is_some_and(|a|a.is_empty()));
             }
             if let Some(m)=stream.get("finalmask").filter(|v|!v.is_null()) {
                 let udp=m.get("udp").and_then(Value::as_array);
@@ -474,6 +471,23 @@ mod tests {
             let links=links_from_json(&json!({"outbounds":[configured]}).to_string()).unwrap();
             assert!(!parse_server(&links[0]).unwrap().is_supported(),"silently dropped {key}");
         }
+    }
+
+    #[test]
+    fn xray_hysteria2_does_not_drop_empty_certificate_pin() {
+        let mut outbound=json!({"protocol":"hysteria","tag":"HY2",
+            "settings":{"address":"198.51.100.10","port":443,"version":2},
+            "streamSettings":{"network":"hysteria","security":"tls",
+                "hysteriaSettings":{"version":2,"auth":"user:password"},
+                "tlsSettings":{}}});
+        for pins in [json!([""]),json!(["ab".repeat(32)]),json!("ab".repeat(32)),json!(123)] {
+            outbound["streamSettings"]["tlsSettings"]["pinnedPeerCertSha256"]=pins;
+            let links=links_from_json(&json!({"outbounds":[outbound.clone()]}).to_string()).unwrap();
+            assert!(!parse_server(&links[0]).unwrap().is_supported(),"silently changed certificate pin policy");
+        }
+        outbound["streamSettings"]["tlsSettings"]["pinnedPeerCertSha256"]=json!([]);
+        let links=links_from_json(&json!({"outbounds":[outbound]}).to_string()).unwrap();
+        assert!(parse_server(&links[0]).unwrap().is_supported());
     }
 
     #[test]
