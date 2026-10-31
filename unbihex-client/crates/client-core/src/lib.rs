@@ -3,6 +3,7 @@
 //! the Android app (same process) and, through the engine config JSON, the iOS
 //! Packet Tunnel extension.
 
+pub mod adblock;
 pub mod client;
 pub mod controller;
 pub mod error;
