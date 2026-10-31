@@ -9,6 +9,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
@@ -19,63 +20,57 @@ use crate::error::{Error, Result};
 /// `VpnService.protect(fd)`: returns `false` when the socket could not be protected.
 pub type ProtectFn = Arc<dyn Fn(i32) -> bool + Send + Sync>;
 
-// By Pavel Shakhmin (github.com/pshakhmin), PR #18.
-/// Send/receive buffer every proxy-side TCP socket asks the kernel for.
+// By Pavel Shakhmin (github.com/pshakhmin), PR #20.
+/// Default for [`set_socket_buffer`]: leave the buffers to the kernel.
 ///
-/// The kernel does not grow this on its own when the peer is window-limited:
-/// with the default (~87 KB) the tunnel is stuck at `buffer / RTT`, which on a
-/// 50 ms path is ~1 MB/s. Measured on the comparison stand: 0.9 MB/s with the
-/// default and 108 MB/s with a 4 MiB buffer, same binaries, one sysctl changed.
-/// 4 MiB is the cap here, not an allocation: the kernel fills it on demand.
-pub(crate) const SOCKET_BUFFER: usize = 4 * 1024 * 1024;
+/// Linux autotunes the receive buffer up to `net.ipv4.tcp_rmem[2]`, growing the
+/// window as fast as the application drains the socket. Pinning `SO_RCVBUF` turns
+/// that off: on a shaped 50 ms path (MTU 1500) a fixed 4 MiB gave 55 MB/s against
+/// 64 and sometimes collapsed to 1 MB/s, when the kernel's estimate of the
+/// application's appetite (`rcv_space`) fell from 5 MB to 56 KB. The loopback
+/// profile that once favoured 4 MiB has MTU 65536, where the initial window
+/// (36 KB) is smaller than one segment, which no real link has.
+pub const DEFAULT_SOCKET_BUFFER: usize = 0;
+/// Smallest configurable value: below this the cap binds on any real path.
+pub const MIN_SOCKET_BUFFER: usize = 64 * 1024;
+/// Largest configurable value. The kernel clamps to `net.core.{r,w}mem_max`
+/// anyway; this only keeps a typo from asking for gigabytes per socket.
+pub const MAX_SOCKET_BUFFER: usize = 16 * 1024 * 1024;
 
-// By Pavel Shakhmin (github.com/pshakhmin), PR #18.
-/// Applies what every TCP socket carrying tunnel traffic needs: no Nagle, and a
-/// buffer large enough for a long fat path. Failures are ignored on purpose —
+// By Pavel Shakhmin (github.com/pshakhmin), PR #20.
+/// Process-wide value, set once from `limits.socket_buffer` before any socket
+/// exists: inbounds tune their sockets before a session exists and have no config.
+static SOCKET_BUFFER: AtomicUsize = AtomicUsize::new(DEFAULT_SOCKET_BUFFER);
+
+/// Sets the buffer every later [`tune_tcp`] call asks for; `0` leaves sockets at
+/// the kernel default.
+pub fn set_socket_buffer(bytes: usize) {
+    SOCKET_BUFFER.store(bytes, Ordering::Relaxed);
+}
+
+/// The value [`tune_tcp`] currently applies.
+pub fn socket_buffer() -> usize {
+    SOCKET_BUFFER.load(Ordering::Relaxed)
+}
+
+// By Pavel Shakhmin (github.com/pshakhmin), PR #18 and #20.
+/// Applies what every TCP socket carrying tunnel traffic needs: no Nagle, and the
+/// configured buffer (`limits.socket_buffer`). Failures are ignored on purpose —
 /// this is an optimization, and some platforms cap or refuse the size (the
 /// effective value stays visible via `getsockopt`, so it is not silent).
 pub fn tune_tcp(stream: &TcpStream) {
+    tune_tcp_with(stream, socket_buffer());
+}
+
+// By Pavel Shakhmin (github.com/pshakhmin), PR #20.
+/// [`tune_tcp`] with an explicit buffer size; `0` only disables Nagle.
+pub fn tune_tcp_with(stream: &TcpStream, buffer: usize) {
     let sref = SockRef::from(stream);
     let _ = sref.set_tcp_nodelay(true);
-    let (recv, send) = fixed_buffers();
-    if recv {
-        let _ = sref.set_recv_buffer_size(SOCKET_BUFFER);
+    if buffer > 0 {
+        let _ = sref.set_recv_buffer_size(buffer);
+        let _ = sref.set_send_buffer_size(buffer);
     }
-    if send {
-        let _ = sref.set_send_buffer_size(SOCKET_BUFFER);
-    }
-}
-
-/// Whether to ask for [`SOCKET_BUFFER`] as the (receive, send) buffer.
-///
-/// On Linux and Android an explicit size turns the kernel's autotuning off and is
-/// capped at `net.core.{r,w}mem_max` (208 KiB by default): there a fixed buffer only
-/// pays off when the cap admits the whole of it, otherwise autotuning (up to
-/// `tcp_{r,w}mem`, 6 / 4 MiB by default) does better. Unreadable caps count as low.
-/// Elsewhere the size is always set.
-fn fixed_buffers() -> (bool, bool) {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        static CAPS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
-        *CAPS.get_or_init(|| {
-            let cap = |name: &str| {
-                std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
-                    .ok()
-                    .and_then(|s| s.trim().parse::<usize>().ok())
-            };
-            (admits(cap("rmem_max")), admits(cap("wmem_max")))
-        })
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    {
-        (true, true)
-    }
-}
-
-/// Whether a kernel cap of `cap` bytes admits the whole [`SOCKET_BUFFER`].
-#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
-fn admits(cap: Option<usize>) -> bool {
-    cap.is_some_and(|c| c >= SOCKET_BUFFER)
 }
 
 /// The physical interface outgoing sockets are bound to.
@@ -291,15 +286,42 @@ fn bind_to_interface(_sock: &Socket, _b: &InterfaceBinding, _v6: bool) -> io::Re
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
 
-    #[test]
-    fn fixed_buffers_only_when_the_cap_admits_them() {
-        assert!(!admits(None), "unreadable cap: keep autotuning");
-        assert!(!admits(Some(212_992)), "default Linux rmem_max");
-        assert!(!admits(Some(SOCKET_BUFFER - 1)));
-        assert!(admits(Some(SOCKET_BUFFER)));
-        assert!(admits(Some(16 * 1024 * 1024)));
+    async fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #20.
+    #[tokio::test]
+    async fn zero_buffer_keeps_the_kernel_default() {
+        let (client, _server) = pair().await;
+        let (untuned, _other) = pair().await;
+        let before = SockRef::from(&untuned).recv_buffer_size().unwrap();
+        tune_tcp_with(&client, 0);
+        assert_eq!(
+            SockRef::from(&client).recv_buffer_size().unwrap(),
+            before,
+            "0 must leave SO_RCVBUF at the kernel default"
+        );
+        assert!(SockRef::from(&client).tcp_nodelay().unwrap(), "Nagle is off all the same");
+    }
+
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #20.
+    #[tokio::test]
+    async fn explicit_buffer_reaches_the_kernel() {
+        let (client, _server) = pair().await;
+        let (untuned, _other) = pair().await;
+        tune_tcp_with(&client, 128 * 1024);
+        let tuned = SockRef::from(&client).recv_buffer_size().unwrap();
+        let default = SockRef::from(&untuned).recv_buffer_size().unwrap();
+        assert!(tuned >= default, "tuned {tuned} < default {default}");
     }
 }

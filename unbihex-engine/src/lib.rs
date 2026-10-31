@@ -108,6 +108,9 @@ impl Instance {
     /// Validates `config`, builds outbounds and starts every inbound.
     pub async fn start(config: Config, hooks: PlatformHooks) -> Result<Instance> {
         config.validate()?;
+        // By Pavel Shakhmin (github.com/pshakhmin), PR #20.
+        // Process-wide: inbounds tune their sockets before any session exists.
+        net::socket::set_socket_buffer(config.limits.socket_buffer);
         let binding = match &config.route.default_interface {
             Some(name) => Some(net::find_interface(name)?),
             None => hooks.bind_interface.clone(),

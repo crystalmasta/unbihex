@@ -217,7 +217,8 @@ If any step fails, undo what has been done and return the error.
     "upstream": ["1.1.1.1:53", "8.8.8.8:53"],
     "ttl": 10
   },
-  "limits": { "max_connections": 4096, "tcp_idle_secs": 300, "udp_idle_secs": 60, "handshake_timeout_secs": 10 }
+  "limits": { "max_connections": 4096, "tcp_idle_secs": 300, "udp_idle_secs": 60,
+              "handshake_timeout_secs": 10, "socket_buffer": 0 }
 }
 ```
 
@@ -229,6 +230,7 @@ If any step fails, undo what has been done and return the error.
 - TLS has **no** option to disable certificate verification.
 - Mobile (`tun_fd` set): a tun inbound ignores `name`, `auto_route` and the addresses, which the OS manages. At most one tun inbound is allowed.
 - The `limits` defaults are the values in the example.
+- `limits.socket_buffer` is how many bytes to ask the kernel for in `SO_RCVBUF`/`SO_SNDBUF` of every TCP socket carrying tunnel traffic. The default is `0`: the sockets are left alone and the kernel tunes the buffer (on Linux an explicit size turns autotuning off; on a 50 ms path with MTU 1500 autotuning gave 64 MB/s against 55, without the drops to 1 MB/s that 4 MiB sometimes had). An explicit value is a cap, not an allocation: 65536 to 16777216 bytes, anything else is a config error; the kernel still clamps it to `net.core.{r,w}mem_max`.
 
 ### 5.3 `tun` defaults
 
@@ -341,7 +343,7 @@ works too) every outgoing socket is bound to; it replaces the platform layer's b
 fails the start. `route.default_mark` is `SO_MARK` (needs `CAP_NET_ADMIN`) for policy routing
 (`ip rule add fwmark …`); Linux only, 0 is not allowed. Neither can change in a hot reload.
 
-TCP: `TCP_NODELAY` = true, keepalive 30 s. Receive and send buffers of 4 MiB (accepted inbound connections too); on Linux and Android only when `net.core.rmem_max` / `wmem_max` is at least 4 MiB: an explicit size there turns the kernel's buffer autotuning off, and under the default cap (208 KiB) that is worse than none.
+TCP: `TCP_NODELAY` = true, keepalive 30 s. Socket buffers: `limits.socket_buffer` (§5).
 
 ---
 

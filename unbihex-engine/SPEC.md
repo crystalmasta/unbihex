@@ -217,7 +217,8 @@ pub struct PlatformHooks {
     "upstream": ["1.1.1.1:53", "8.8.8.8:53"],
     "ttl": 10
   },
-  "limits": { "max_connections": 4096, "tcp_idle_secs": 300, "udp_idle_secs": 60, "handshake_timeout_secs": 10 }
+  "limits": { "max_connections": 4096, "tcp_idle_secs": 300, "udp_idle_secs": 60,
+              "handshake_timeout_secs": 10, "socket_buffer": 0 }
 }
 ```
 
@@ -229,6 +230,7 @@ pub struct PlatformHooks {
 - В TLS **нет** опции отключения проверки сертификата.
 - Mobile (`tun_fd` задан): у tun-inbound-а игнорируются `name`, `auto_route` и адреса, ими управляет ОС. Допускается не более одного tun-inbound-а.
 - Значения `limits` по умолчанию — те, что в примере.
+- `limits.socket_buffer` — сколько байт просить у ядра под `SO_RCVBUF`/`SO_SNDBUF` каждого TCP-сокета с трафиком туннеля. По умолчанию `0`: сокеты не трогаются, буфер подстраивает ядро (на Linux явный размер отключает автонастройку; на пути 50 мс с MTU 1500 автонастройка дала 64 MB/s против 55 и без провалов до 1 MB/s, которые бывали с 4 МиБ). Явное значение — потолок, а не выделение памяти: от 65536 до 16777216 байт, иначе ошибка конфигурации; ядро всё равно ограничивает его `net.core.{r,w}mem_max`.
 
 ### 5.3 Значения по умолчанию для `tun`
 
@@ -341,7 +343,7 @@ impl SocketFactory {
 интерфейс — ошибка старта. `route.default_mark` — `SO_MARK` (нужен `CAP_NET_ADMIN`) для policy routing
 (`ip rule add fwmark …`); только Linux, 0 запрещён. Оба поля не меняются при hot reload.
 
-TCP: `TCP_NODELAY` = true, keepalive 30 с. Буферы приёма и отправки 4 МиБ (и у принятых inbound-соединений); на Linux и Android — только если `net.core.rmem_max` / `wmem_max` не меньше 4 МиБ: явный размер там отключает автонастройку буфера ядром, и при стандартном пределе (208 КиБ) это хуже, чем без него.
+TCP: `TCP_NODELAY` = true, keepalive 30 с. Буферы сокетов — `limits.socket_buffer` (§5).
 
 ---
 

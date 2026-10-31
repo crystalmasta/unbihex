@@ -844,6 +844,13 @@ pub struct Limits {
     /// Limit for proxy handshakes and outbound connects, in seconds.
     #[serde(default = "default_handshake_timeout")]
     pub handshake_timeout_secs: u64,
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #20.
+    /// Buffer every TCP socket carrying tunnel traffic asks the kernel for
+    /// (`SO_RCVBUF` / `SO_SNDBUF`), in bytes. `0`, the default, leaves the sockets
+    /// alone and the kernel autotunes them; an explicit value is a cap, not an
+    /// allocation.
+    #[serde(default = "default_socket_buffer")]
+    pub socket_buffer: usize,
 }
 
 impl Default for Limits {
@@ -853,6 +860,7 @@ impl Default for Limits {
             tcp_idle_secs: default_tcp_idle(),
             udp_idle_secs: default_udp_idle(),
             handshake_timeout_secs: default_handshake_timeout(),
+            socket_buffer: default_socket_buffer(),
         }
     }
 }
@@ -868,6 +876,9 @@ fn default_udp_idle() -> u64 {
 }
 fn default_handshake_timeout() -> u64 {
     10
+}
+fn default_socket_buffer() -> usize {
+    crate::net::socket::DEFAULT_SOCKET_BUFFER
 }
 
 impl Config {
@@ -1067,6 +1078,17 @@ impl Config {
         if self.limits.max_connections == 0 {
             return Err(Error::config("limits.max_connections must be positive"));
         }
+        let buffer = self.limits.socket_buffer;
+        if buffer != 0
+            && !(crate::net::socket::MIN_SOCKET_BUFFER..=crate::net::socket::MAX_SOCKET_BUFFER)
+                .contains(&buffer)
+        {
+            return Err(Error::config(format!(
+                "limits.socket_buffer must be 0 (kernel default) or between {} and {} bytes, got {buffer}",
+                crate::net::socket::MIN_SOCKET_BUFFER,
+                crate::net::socket::MAX_SOCKET_BUFFER
+            )));
+        }
         Ok(())
     }
 }
@@ -1229,5 +1251,24 @@ mod tests {
         let c = Config::from_link("vless://x@h:1").unwrap();
         assert!(c.tun().is_some());
         assert_eq!(c.final_outbound(), "proxy");
+    }
+
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #20.
+    #[test]
+    fn socket_buffer_limit() {
+        let cfg = |limits: &str| {
+            Config::from_json(&format!(
+                r#"{{"outbounds":[{{"type":"direct","tag":"d"}}],"limits":{{{limits}}}}}"#
+            ))
+        };
+        assert_eq!(cfg("").unwrap().limits.socket_buffer, 0, "absent: the kernel decides");
+        assert_eq!(cfg(r#""socket_buffer":131072"#).unwrap().limits.socket_buffer, 131_072);
+        assert_eq!(cfg(r#""socket_buffer":0"#).unwrap().limits.socket_buffer, 0);
+        for bad in ["1024", "33554432"] {
+            let err = cfg(&format!(r#""socket_buffer":{bad}"#)).unwrap_err();
+            assert!(err.to_string().contains("limits.socket_buffer"), "{bad}: {err}");
+        }
+        let c = cfg(r#""socket_buffer":131072"#).unwrap();
+        assert_eq!(c.limits.max_connections, 4096, "the other limits keep their defaults");
     }
 }
