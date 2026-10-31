@@ -248,6 +248,20 @@ pub struct PlatformHooks {
 
 ---
 
+### 5.5 Hysteria 2 (нативный outbound)
+
+`type: "hysteria2"`: `tag`, `server`, `port`, `password` (полная строка аутентификации),
+необязательные `sni`, `pinned_sha256`, `salamander_password`. Обязательные TLS 1.3 / ALPN `h3`,
+WebPKI-проверка и дополнительные leaf-пины; отключения проверки нет. QUIC-сокет создаёт
+`SocketFactory`, затем при необходимости оборачивается Salamander. Поддерживаются TCP,
+UDP с демультиплексированием и ограниченной сборкой фрагментов, общая аутентифицированная
+QUIC-сессия и переподключение для новых потоков. `hysteria2://` и `hy2://` используют порт 443
+по умолчанию, IPv6 и percent-encoded auth. Сохраняются SNI/TLS/Salamander при импорте Xray
+и sing-box; не реализованные wire/verification опции отклоняются, а не теряются.
+`fp` в ссылках панелей — TCP/uTLS-подсказка: QUIC-отпечаток браузера не обещается.
+Hysteria 1, hopping, ECH, Brutal/BBR-настройки и insecure TLS не реализованы.
+Полный контракт, лимиты и команды проверки: [HYSTERIA2.md](HYSTERIA2.md).
+
 ## 6. Маршрутизация
 
 - Правило — объект с необязательными полями-условиями и обязательным `outbound`. Поля: `domain` (точное совпадение), `domain_suffix`, `domain_keyword` (подстрока), `ip_cidr` (IPv4/IPv6), `ip_private` (bool), `port` (список u16 или строк `"1000-2000"`), `network` (`"tcp"` | `"udp"`), `inbound` (список тегов).

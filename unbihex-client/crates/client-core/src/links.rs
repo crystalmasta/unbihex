@@ -1,5 +1,5 @@
 //! Share links: display metadata for any common scheme, and the outbound the
-//! engine needs for the ones it supports (`vless://`, `ss://`, `socks://`).
+//! engine needs for the ones it supports (`vless://`, `ss://`, `socks://`, `hy2://`).
 
 use base64::Engine as _;
 use percent_encoding::percent_decode_str;
@@ -58,6 +58,21 @@ pub fn parse_server(link: &str) -> Result<Server> {
         server.name = format!("{}:{}", server.host, server.port);
     }
     Ok(server)
+}
+
+/// Capability is derived from the current engine, not a permanent property of
+/// saved state. Preserve identity, user labels and subscription membership.
+pub(crate) fn refresh_support(server: &mut Server) -> bool {
+    let Ok(parsed) = parse_server(&server.link) else { return false; };
+    let changed = server.unsupported != parsed.unsupported || server.host != parsed.host
+        || server.port != parsed.port || server.protocol != parsed.protocol || server.transport != parsed.transport;
+    if changed {
+        server.unsupported=parsed.unsupported;
+        server.host=parsed.host; server.port=parsed.port;
+        server.protocol=parsed.protocol; server.transport=parsed.transport;
+        server.ping_ms=None; server.ping_error=None;
+    }
+    changed
 }
 
 fn blank(protocol: &str) -> Server {
@@ -141,9 +156,20 @@ fn parse_generic(link: &str, scheme: &str) -> Result<Server> {
     let (host, port) = split_host_port(&pct(&hostport));
     s.host = host;
     s.port = port;
+    if scheme == "hysteria2" || scheme == "hy2" {
+        // Use the engine's strict parser for the effective address/default port
+        // instead of showing port 0 for the standard optional :443 URI form.
+        if let Ok(OutboundConfig::Hysteria2(h)) = unbihex_engine::link::parse_link(link, "proxy") {
+            s.host = h.server;
+            s.port = h.port;
+        } else if s.port == 0 && !hostport.contains(':') {
+            s.port = 443;
+        }
+    }
     s.transport = match scheme {
         "ss" => "shadowsocks".into(),
         "socks" | "socks5" => "socks5".into(),
+        "hysteria2" | "hy2" => "quic+tls".into(),
         "vless" | "trojan" => {
             let net = param("type");
             let net = if net.is_empty() { "tcp".to_string() } else { net };
@@ -181,7 +207,7 @@ fn split_host_port(s: &str) -> (String, u16) {
 /// Why the engine cannot use `link`, in Russian; `None` when it can.
 fn support_problem(link: &str, scheme: &str) -> Option<String> {
     match scheme {
-        "vless" | "ss" => match unbihex_engine::link::parse_link(link, "proxy") {
+        "vless" | "ss" | "hysteria2" | "hy2" => match unbihex_engine::link::parse_link(link, "proxy") {
             Ok(OutboundConfig::Vless(v)) if v.is_plaintext() => {
                 Some("VLESS без TLS передаёт UUID и трафик открыто".into())
             }
@@ -191,7 +217,7 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
         "socks" | "socks5" => socks_parts(link).err().map(|e| e.to_string()),
         "vmess" => Some("VMess пока не поддерживается ядром".into()),
         "trojan" => Some("Trojan пока не поддерживается ядром".into()),
-        "hysteria" | "hysteria2" | "hy2" => Some("Hysteria пока не поддерживается ядром".into()),
+        "hysteria" => Some("Hysteria 1 пока не поддерживается ядром".into()),
         "tuic" => Some("TUIC пока не поддерживается ядром".into()),
         "wireguard" | "wg" => Some("WireGuard пока не поддерживается ядром".into()),
         other => Some(format!("{other} пока не поддерживается ядром")),
@@ -280,7 +306,7 @@ pub fn outbound_json(server: &Server) -> Result<Value> {
         return Err(ClientError::Unsupported(why.clone()));
     }
     match server.protocol.as_str() {
-        "vless" | "ss" => Ok(json!({ "type": "link", "tag": "proxy", "url": server.link })),
+        "vless" | "ss" | "hysteria2" => Ok(json!({ "type": "link", "tag": "proxy", "url": server.link })),
         "socks" => {
             let p = socks_parts(&server.link)?;
             let mut v = json!({ "type": "socks", "tag": "proxy", "server": p.host, "port": p.port });
@@ -350,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn vmess_trojan_hy2_are_listed_but_unsupported() {
+    fn vmess_trojan_and_legacy_hysteria_remain_unsupported() {
         let j = r#"{"v":"2","ps":"VM","add":"vm.example","port":"443","id":"x","net":"ws","tls":"tls"}"#;
         let l = format!(
             "vmess://{}",
@@ -365,6 +391,28 @@ mod tests {
         assert!(!s.is_supported());
         let s = parse_server("hy2://pw@[2001:db8::1]:8443#H").unwrap();
         assert_eq!((s.protocol.as_str(), s.host.as_str(), s.port), ("hysteria2", "2001:db8::1", 8443));
+        assert!(s.is_supported());
+        let s=parse_server("hysteria://pw@legacy.example:443").unwrap();
+        assert!(!s.is_supported());
+    }
+
+    #[test]
+    fn hysteria2_links_use_native_core_and_refuse_unimplemented_options() {
+        for uri in ["hy2://user%3Apw@hy.example/?sni=edge.example", "hysteria2://pw@[2001:db8::1]"] {
+            let s=parse_server(uri).unwrap();
+            assert!(s.is_supported(),"{:?}",s.unsupported);
+            assert_eq!(s.port,443);
+            let out=outbound_json(&s).unwrap();
+            assert_eq!(out["type"],"link");
+            assert_eq!(out["url"],uri);
+        }
+        let s=parse_server("hysteria2://pw@hy.example:443?security=tls&alpn=h3&fp=chrome&obfs=salamander&obfs-password=test-password").unwrap();
+        assert!(s.is_supported(),"{:?}",s.unsupported);
+        for query in ["insecure=1","obfs=salamander&obfs-password=pw","mport=1000-2000","upmbps=50"] {
+            let s=parse_server(&format!("hy2://pw@hy.example:443?{query}")).unwrap();
+            assert!(!s.is_supported());
+            assert!(outbound_json(&s).is_err());
+        }
     }
 
     #[test]

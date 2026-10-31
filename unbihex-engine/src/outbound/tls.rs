@@ -34,6 +34,19 @@ impl std::fmt::Debug for TlsClient {
 }
 
 impl TlsClient {
+    /// QUIC uses the same roots and pinning policy, but not the TCP-only
+    /// ClientHello rewriter. ALPN is fixed by the Hysteria 2 protocol.
+    pub(crate) fn quic_config(
+        cfg: &TlsConfig,
+        default_sni: &str,
+        extra_roots: Vec<CertificateDer<'static>>,
+    ) -> Result<Arc<ClientConfig>> {
+        let mut cfg = cfg.clone();
+        cfg.fingerprint = Some("none".into());
+        cfg.alpn = vec!["h3".into()];
+        Ok(Self::build(&cfg, default_sni, extra_roots)?.config)
+    }
+
     /// Builds a client trusting the bundled WebPKI roots.
     pub fn new(cfg: &TlsConfig, default_sni: &str) -> Result<TlsClient> {
         Self::build(cfg, default_sni, Vec::new())

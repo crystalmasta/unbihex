@@ -5,7 +5,7 @@ use percent_encoding::percent_decode_str;
 
 use crate::address::TargetAddr;
 use crate::config::{
-    FLOW_VISION, OutboundConfig, RealityConfig, Secret, ShadowsocksConfig, TlsConfig, VlessConfig,
+    FLOW_VISION, Hysteria2Config, OutboundConfig, RealityConfig, Secret, ShadowsocksConfig, TlsConfig, VlessConfig,
 };
 use crate::error::{Error, Result};
 
@@ -16,15 +16,70 @@ pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
         parse_vless(rest, tag)
     } else if let Some(rest) = strip_scheme(url, "ss://") {
         parse_ss(rest, tag)
+    } else if let Some(rest) = strip_scheme(url, "hysteria2://").or_else(|| strip_scheme(url, "hy2://")) {
+        parse_hysteria2(rest, tag)
     } else {
         Err(Error::Unsupported(
-            "only vless:// and ss:// links are supported".into(),
+            "only vless://, ss://, hysteria2:// and hy2:// links are supported".into(),
         ))
     }
 }
 
+fn parse_hysteria2(rest: &str, tag: &str) -> Result<OutboundConfig> {
+    let (body, query) = split_parts(rest);
+    let (auth, endpoint) = body.trim_end_matches('/').rsplit_once('@')
+        .ok_or_else(|| Error::config("hysteria2 link: missing authentication"))?;
+    let endpoint = if endpoint.starts_with('[') {
+        if endpoint.ends_with(']') { format!("{endpoint}:443") } else { endpoint.to_string() }
+    } else if !endpoint.contains(':') {
+        format!("{endpoint}:443")
+    } else { endpoint.to_string() };
+    let (server, port) = host_port(&endpoint)?;
+    let mut cfg = Hysteria2Config {
+        tag: tag.to_string(), server, port, password: Secret(decode(auth)?),
+        sni: None, pinned_sha256: Vec::new(), salamander_password: None,
+    };
+    let mut obfs=String::new();
+    let mut obfs_password=None;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "sni" | "peer" | "serverName" if !value.is_empty() => cfg.sni = Some(value.into_owned()),
+            "insecure" | "allowInsecure" => match value.as_ref() {
+                "" | "0" | "false" => {},
+                "1" | "true" => return Err(Error::Unsupported("hysteria2: insecure TLS is not supported".into())),
+                _ => return Err(Error::config("hysteria2: invalid insecure flag")),
+            },
+            "pinSHA256" | "pinsha256" if !value.is_empty() => cfg.pinned_sha256.push(value.into_owned()),
+            "alpn" if value.is_empty() || value == "h3" => {},
+            "obfs" => obfs=value.into_owned(),
+            "obfs-password" | "obfsPassword" if !value.is_empty() => obfs_password=Some(Secret(value.into_owned())),
+            // Panels add their TCP/uTLS hint to all protocols. It is not a
+            // Hysteria/QUIC wire parameter; no QUIC browser emulation is claimed.
+            "fp" | "fingerprint" => {},
+            "security" if value == "tls" || value.is_empty() => {},
+            // Do not claim support after discarding parameters which change
+            // the handshake, peer verification, port or congestion behaviour.
+            "alpn" | "obfs-password" | "obfsPassword" | "mport" | "ports"
+            | "hopInterval" | "hop-interval" | "upmbps" | "downmbps" | "up" | "down"
+            | "ech" | "echConfigList" | "ca" | "security" => {
+                if !value.is_empty() {
+                    return Err(Error::Unsupported(format!("hysteria2: parameter {key} is not supported yet")));
+                }
+            },
+            _ => return Err(Error::Unsupported("hysteria2: unknown link parameter".into())),
+        }
+    }
+    match obfs.as_str() {
+        "salamander" => cfg.salamander_password=Some(obfs_password.ok_or_else(|| Error::config("hysteria2: Salamander requires obfs-password"))?),
+        "" | "none" if obfs_password.is_none() => {},
+        _ => return Err(Error::Unsupported("hysteria2: unsupported obfuscation settings".into())),
+    }
+    cfg.validate()?;
+    Ok(OutboundConfig::Hysteria2(cfg))
+}
+
 fn strip_scheme<'a>(url: &'a str, scheme: &str) -> Option<&'a str> {
-    if url.len() >= scheme.len() && url[..scheme.len()].eq_ignore_ascii_case(scheme) {
+    if url.get(..scheme.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme)) {
         Some(&url[scheme.len()..])
     } else {
         None
@@ -226,6 +281,19 @@ fn parse_ss(rest: &str, tag: &str) -> Result<OutboundConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hysteria2_share_links() {
+        for scheme in ["hy2", "hysteria2", "HY2"] {
+            let c = parse_link(&format!("{scheme}://user%3Ap%40ss@[2001:db8::1]/?sni=hy.example&insecure=0#test"), "proxy").unwrap();
+            assert_eq!(c.server(), Some(("2001:db8::1", 443)));
+            assert!(!format!("{c:?}").contains("user:p@ss"));
+        }
+        assert!(parse_link("🦄🦄🦄", "proxy").is_err());
+        for query in ["insecure=1", "alpn=h2", "obfs=salamander", "mport=443-444", "upmbps=20", "pinSHA256=nope", "unknown=1"] {
+            assert!(parse_link(&format!("hy2://pw@hy.example:443?{query}"),"proxy").is_err(),"{query}");
+        }
+    }
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 
