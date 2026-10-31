@@ -53,6 +53,10 @@ pub struct PlatformHooks {
     pub protect: Option<ProtectFn>,
     /// Desktop: the physical interface outgoing sockets are pinned to.
     pub bind_interface: Option<InterfaceBinding>,
+    /// The OS resolver of this process is not captured by the TUN (Android: the VPN
+    /// service excludes the app). Server names and direct targets then resolve
+    /// through it first and through `dns.upstream` only if it fails.
+    pub system_dns_bypasses_tun: bool,
 }
 
 /// A running engine.
@@ -119,7 +123,12 @@ impl Instance {
             ));
         }
         let dns_client = Arc::new(DnsClient::new(config.dns.upstream.clone(), sockets.clone()));
-        let upstream = Arc::new(Resolver::Upstream(dns_client.clone()));
+        let upstream = Arc::new(if hooks.system_dns_bypasses_tun {
+            // Works where the network blocks the upstream servers (issue #14).
+            Resolver::SystemThenUpstream(dns_client.clone())
+        } else {
+            Resolver::Upstream(dns_client.clone())
+        });
         let system = Arc::new(Resolver::System);
         let fakeip = tun_cfg.as_ref().map(|_| {
             // Clients may cache an answer for its whole TTL (and often longer).

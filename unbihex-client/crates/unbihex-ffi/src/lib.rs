@@ -116,6 +116,7 @@ fn start_inner(json: &str, tun_fd: i32, protect: ProtectCb, ctx: Ctx) -> i32 {
         tun_fd: (tun_fd >= 0).then_some(tun_fd),
         protect: protect_fn,
         bind_interface: None,
+        system_dns_bypasses_tun: false,
     };
     match runtime.block_on(Instance::start(config, hooks)) {
         Ok(instance) => {

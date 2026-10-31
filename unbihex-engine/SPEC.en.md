@@ -159,6 +159,7 @@ pub struct PlatformHooks {
     pub tun_fd: Option<i32>,                                         // mobile: the fd given by the OS; desktop: None (Unbihex creates the TUN itself)
     pub protect: Option<Arc<dyn Fn(i32) -> bool + Send + Sync>>,     // Android VpnService.protect
     pub bind_interface: Option<InterfaceBinding>,                    // desktop: the physical interface (§9)
+    pub system_dns_bypasses_tun: bool,                               // the process's system DNS skips the TUN (Android)
 }
 ```
 
@@ -168,7 +169,7 @@ No runtime requirement: the `ipstack` in `vendor/ipstack` closes a TCP stream wi
 
 1. Validate the config.
 2. Create the `SocketFactory`.
-3. Resolve proxy server names **before** capturing traffic: through the system resolver on desktop, through the DNS upstream on mobile. Cache the IPs.
+3. Resolve proxy server names **before** capturing traffic: through the system resolver on desktop, through the DNS upstream on mobile. Cache the IPs. With `system_dns_bypasses_tun` (Android: the VPN service excludes the app itself, so its system DNS bypasses the tunnel), server names and direct targets resolve through the system resolver first (up to 3 s) and through `dns.upstream` only if it fails: networks that block 1.1.1.1 and 8.8.8.8 otherwise keep the tunnel from even starting (issue #14).
 4. Build the outbounds, router, dispatcher and fake DNS.
 5. Start the inbounds.
 

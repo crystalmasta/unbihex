@@ -159,6 +159,7 @@ pub struct PlatformHooks {
     pub tun_fd: Option<i32>,                                         // mobile: fd, выданный ОС; desktop: None (Unbihex создаёт TUN сам)
     pub protect: Option<Arc<dyn Fn(i32) -> bool + Send + Sync>>,     // Android VpnService.protect
     pub bind_interface: Option<InterfaceBinding>,                    // desktop: физический интерфейс (§9)
+    pub system_dns_bypasses_tun: bool,                               // системный DNS процесса не идёт в TUN (Android)
 }
 ```
 
@@ -168,7 +169,7 @@ pub struct PlatformHooks {
 
 1. Валидировать конфиг.
 2. Создать `SocketFactory`.
-3. Резолвить имена прокси-серверов **до** перехвата трафика: через системный резолвер на десктопе, через DNS-upstream на мобильных. Закешировать IP.
+3. Резолвить имена прокси-серверов **до** перехвата трафика: через системный резолвер на десктопе, через DNS-upstream на мобильных. Закешировать IP. Если `system_dns_bypasses_tun` (Android: VPN-служба исключает само приложение, его системный DNS идёт мимо туннеля), имена серверов и цели direct резолвятся сначала системным резолвером (до 3 с) и только при ошибке — через `dns.upstream`: сети, где 1.1.1.1 и 8.8.8.8 недоступны, иначе не дают даже запустить туннель (issue #14).
 4. Собрать outbound-ы, router, dispatcher и fake-DNS.
 5. Запустить inbound-ы.
 

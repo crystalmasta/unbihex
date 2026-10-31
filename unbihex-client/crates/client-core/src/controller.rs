@@ -305,6 +305,9 @@ impl Controller {
             tun_fd: Some(tun_fd),
             protect: protect.clone(),
             bind_interface: None,
+            // UnbihexVpnService excludes the app from its own VPN: the system resolver
+            // works for the engine even where 1.1.1.1 / 8.8.8.8 are blocked (issue #14).
+            system_dns_bypasses_tun: cfg!(target_os = "android"),
         };
         let instance = Instance::start(config, hooks).await.map_err(explain_start)?;
         self.set_ping_env(PingEnv {
