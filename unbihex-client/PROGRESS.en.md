@@ -127,6 +127,17 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - Linux / Android: the 4 MiB socket buffer is set only when `rmem_max`/`wmem_max` admit it; otherwise the OS
   sizes the buffer itself.
 
+## 31.10 — client 0.2.5, engine 0.1.5: protocol speed
+- TLS without Vision is read in bulk (up to 64 KB per `read`, rustls deframes the records from memory), and a TLS
+  record leaves in one `write` instead of two. By Pavel Shakhmin (github.com/pshakhmin), PR #25.
+- A read started before the first write no longer waits out the 5 ms timer: a write that sends the VLESS header
+  (the Shadowsocks address) with its data wakes it at once. The header still leaves with the first data. Found by
+  Pavel Shakhmin (PR #25).
+- `limits.socket_buffer`: by default the OS tunes the socket buffers (on Linux a fixed 4 MiB turned autotuning off
+  and dropped to 1 MB/s at times); a size can be set in the config. By Pavel Shakhmin, PR #20.
+- Android: the window comes back when the app is reopened after being swiped away with the VPN on (0.2.4 showed a
+  blank screen; the 0.2.4 APK was already replaced).
+
 ## Next
 1. Fuzzing and benchmarks, the engine README as an SDK.
 2. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).

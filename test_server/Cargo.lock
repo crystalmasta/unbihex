@@ -1878,15 +1878,15 @@ dependencies = [
 
 [[package]]
 name = "route_manager"
-version = "0.2.17"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "694798681cd69a10928204225a680ad9416b081d9e9f8718d7a61e2d134da323"
+checksum = "0a9574baeb2df5827a7bf633474a73105c2b19ff9e37bdbf4b9aea73601e1520"
 dependencies = [
  "flume",
  "libc",
  "netlink-packet-core 0.9.0",
  "netlink-packet-route 0.33.0",
- "netlink-sys 0.9.0",
+ "netlink-sys 0.8.8",
  "windows-sys 0.61.2",
 ]
 
@@ -2480,7 +2480,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "unbihex-engine"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "arc-swap",
