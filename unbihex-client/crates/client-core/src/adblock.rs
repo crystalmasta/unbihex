@@ -2,9 +2,6 @@
 
 use std::net::IpAddr;
 
-const SINKHOLE_V4: &str = "0.0.0.0";
-const SINKHOLE_V6: &str = "::";
-
 /// Служебные имена, которые никогда не блокируем.
 const SERVICE_NAMES: &[&str] = &[
     "localhost",
@@ -50,16 +47,19 @@ pub fn parse_hosts(text: &str) -> Vec<String> {
             words.collect()
         } else if first.parse::<IpAddr>().is_ok() {
             continue;
-        } else {
+        } else if words.next().is_none() {
             // одиночный домен (или мусор — отфильтруем позже)
-            std::iter::once(first).chain(words).collect()
+            vec![first]
+        } else {
+            // Несколько слов без адреса — не формат hosts.
+            continue;
         };
 
         for d in domains {
-            if let Some(norm) = normalize_domain(d) {
-                if !is_service_name(&norm) {
-                    out.push(norm);
-                }
+            if let Some(norm) = normalize_domain(d)
+                && !is_service_name(&norm)
+            {
+                out.push(norm);
             }
         }
     }
@@ -110,4 +110,60 @@ fn normalize_domain(raw: &str) -> Option<String> {
 
 fn is_service_name(d: &str) -> bool {
     SERVICE_NAMES.contains(&d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_lines() {
+        let text = "\
+# AdAway default blocklist
+127.0.0.1 localhost
+::1 localhost
+0.0.0.0 ads.example.com
+127.0.0.1\tTracker.Example.NET.   # trailing comment
+0.0.0.0 a.example.org b.example.org
+:: v6.example.com
+
+0.0.0.0 ads.example.com
+";
+        assert_eq!(
+            parse_hosts(text),
+            ["a.example.org", "ads.example.com", "b.example.org", "tracker.example.net", "v6.example.com"]
+        );
+    }
+
+    #[test]
+    fn plain_domain_lines() {
+        assert_eq!(parse_hosts("ads.example.com\n# c\nTRACK.example.com\n"), ["ads.example.com", "track.example.com"]);
+    }
+
+    #[test]
+    fn redirects_and_junk_are_skipped() {
+        let text = "\
+192.168.1.10 nas.example.com
+0.0.0.0 1.2.3.4
+0.0.0.0 nodot
+0.0.0.0 bad_.ex@mple.com
+0.0.0.0 -bad.example.com
+0.0.0.0 broadcasthost
+0.0.0.0 ip6-allnodes
+0.0.0.0 0.0.0.0
+";
+        assert_eq!(parse_hosts(text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn several_words_without_an_address_are_not_hosts() {
+        assert!(parse_hosts("ads.example.com tracker.example.com").is_empty());
+    }
+
+    #[test]
+    fn long_labels_are_skipped() {
+        let label = "a".repeat(64);
+        assert!(parse_hosts(&format!("0.0.0.0 {label}.com")).is_empty());
+        assert_eq!(parse_hosts(&format!("0.0.0.0 {}.com", "a".repeat(63))).len(), 1);
+    }
 }
