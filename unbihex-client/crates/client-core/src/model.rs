@@ -86,7 +86,7 @@ impl Subscription {
 /// One server (share link) from a subscription or added by hand.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Server {
-    /// Stable id (kept across subscription updates while the link is unchanged).
+    /// Stable id (kept across subscription updates while the server is there).
     pub id: Uuid,
     /// Owning subscription; `None` for servers added by hand.
     pub subscription_id: Option<Uuid>,
@@ -328,7 +328,11 @@ impl AppData {
     }
 
     /// Replaces the servers of `sub_id` with `fresh`, keeping ids and pings of
-    /// links that did not change so the selection survives an update.
+    /// servers that are still there so the selection survives an update.
+    ///
+    /// Panels rewrite query parameters (`sid`, `spx`, …) and names on every
+    /// fetch, so servers are matched by protocol, host and port, and among
+    /// several candidates the closest one wins (issue #35).
     pub fn replace_servers(&mut self, sub_id: Uuid, fresh: Vec<Server>) {
         let mut old: Vec<Server> = Vec::new();
         self.servers.retain(|s| {
@@ -339,16 +343,30 @@ impl AppData {
                 true
             }
         });
-        let mut used = std::collections::HashSet::new();
-        for mut s in fresh {
-            if let Some(prev) = old
-                .iter()
-                .find(|o| o.link == s.link && !used.contains(&o.id))
-            {
-                used.insert(prev.id);
-                s.id = prev.id;
-                s.ping_ms = prev.ping_ms;
-                s.ping_error = prev.ping_error.clone();
+        let mut pairs = Vec::new();
+        for (i, f) in fresh.iter().enumerate() {
+            for (j, o) in old.iter().enumerate() {
+                if let Some(score) = match_score(o, f) {
+                    pairs.push((score, i, j));
+                }
+            }
+        }
+        // Best matches first; equal ones in list order.
+        pairs.sort_by_key(|&(score, i, j)| (std::cmp::Reverse(score), i, j));
+        let mut prev = vec![None; fresh.len()];
+        let mut used = vec![false; old.len()];
+        for (_, i, j) in pairs {
+            if prev[i].is_none() && !used[j] {
+                used[j] = true;
+                prev[i] = Some(j);
+            }
+        }
+        for (mut s, p) in fresh.into_iter().zip(prev) {
+            if let Some(j) = p {
+                let o = &old[j];
+                s.id = o.id;
+                s.ping_ms = o.ping_ms;
+                s.ping_error = o.ping_error.clone();
             }
             s.subscription_id = Some(sub_id);
             self.servers.push(s);
@@ -370,4 +388,40 @@ impl AppData {
                 .map(|s| s.id);
         }
     }
+}
+
+/// How alike two versions of a server are; `None` when they are different servers.
+fn match_score(old: &Server, new: &Server) -> Option<u8> {
+    if old.protocol != new.protocol
+        || old.port != new.port
+        || !old.host.eq_ignore_ascii_case(&new.host)
+    {
+        return None;
+    }
+    if old.link == new.link {
+        return Some(16);
+    }
+    let (old_auth, old_path) = link_parts(&old.link);
+    let (new_auth, new_path) = link_parts(&new.link);
+    Some(
+        u8::from(old.name == new.name) * 8
+            + u8::from(old_auth == new_auth) * 4
+            + u8::from(old_path == new_path) * 2
+            + u8::from(old.transport == new.transport),
+    )
+}
+
+/// Credentials and path of a share link, the parts panels do not rewrite.
+/// The path is the URL path plus the `path=` query parameter (ws, xhttp).
+fn link_parts(link: &str) -> (&str, (&str, &str)) {
+    let rest = link.split_once("://").map_or(link, |(_, r)| r);
+    let rest = rest.split_once('#').map_or(rest, |(r, _)| r);
+    let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let (auth, addr) = rest.rsplit_once('@').unwrap_or(("", rest));
+    let path = addr.find('/').map_or("", |i| &addr[i..]);
+    let param = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("path="))
+        .unwrap_or("");
+    (auth, (path, param))
 }

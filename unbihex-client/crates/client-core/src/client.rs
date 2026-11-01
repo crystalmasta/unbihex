@@ -582,6 +582,48 @@ mod tests {
     }
 
     #[test]
+    fn replace_follows_rewritten_links() {
+        // Issue #35: the panel changes sid/spx and names on every fetch.
+        let link = |host: &str, path: &str, sid: &str, name: &str| {
+            parse_server(&format!(
+                "vless://{UUID}@{host}:443?security=tls&type=ws&path={path}&sid={sid}#{name}"
+            ))
+            .unwrap()
+        };
+        let mut d = AppData::default();
+        let sub = Uuid::new_v4();
+        d.replace_servers(
+            sub,
+            vec![
+                link("a.com", "%2Fone", "1", "A"),
+                link("b.com", "%2Fone", "1", "B1"),
+                link("b.com", "%2Ftwo", "1", "B2"),
+            ],
+        );
+        let ids: Vec<Uuid> = d.servers.iter().map(|s| s.id).collect();
+        d.selected = Some(ids[2]);
+        d.servers[2].ping_ms = Some(70);
+        // Reordered, new sid everywhere, B2 renamed: the path still tells B1 from B2.
+        d.replace_servers(
+            sub,
+            vec![
+                link("b.com", "%2Ftwo", "2", "B2 🇩🇪"),
+                link("b.com", "%2Fone", "2", "B1"),
+                link("a.com", "%2Fone", "2", "A"),
+            ],
+        );
+        assert_eq!(d.selected, Some(ids[2]));
+        assert_eq!(d.servers[0].id, ids[2]);
+        assert_eq!(d.servers[0].ping_ms, Some(70));
+        assert_eq!(d.servers[1].id, ids[1]);
+        assert_eq!(d.servers[2].id, ids[0]);
+        // The selected server is gone: the selection is dropped, not moved to a neighbour.
+        d.replace_servers(sub, vec![link("a.com", "%2Fone", "3", "A")]);
+        assert_eq!(d.servers[0].id, ids[0]);
+        assert_eq!(d.selected, None);
+    }
+
+    #[test]
     fn lan_credentials_survive_restarts_and_empty_input() {
         let dir = tmp();
         // A state file from a version without LAN credentials.
