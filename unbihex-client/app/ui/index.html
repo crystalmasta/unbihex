@@ -130,6 +130,15 @@
             <label>geoip.dat<input name="geoip_url" /></label>
             <label class="check"><input name="geo_auto_update" type="checkbox" /> Обновлять раз в неделю</label>
           </fieldset>
+          <fieldset>
+            <legend>Блокировка рекламы</legend>
+            <label class="check"><input name="adblock" type="checkbox" /> Блокировать рекламу и трекеры</label>
+            <p class="hint">Домены из списков (формат hosts) не открываются, а в режиме TUN и на Android их имена не находятся. Сайты из «Всегда через VPN» и «Всегда напрямую» не блокируются. Списки скачиваются у авторов после сохранения и обновляются раз в неделю.</p>
+            <div id="adblock-presets"></div>
+            <label>Свои списки (https://, по одному на строку)<textarea name="adblock_custom" rows="2" placeholder="https://example.com/hosts.txt"></textarea></label>
+            <p class="hint" id="adblock-status">Не скачаны.</p>
+            <div class="form-actions"><button type="button" class="btn" id="adblock-update">Скачать / обновить списки</button></div>
+          </fieldset>
           <fieldset class="desktop-only">
             <legend>Локальный прокси</legend>
             <div class="row">

@@ -87,6 +87,8 @@ function render() {
   renderServers();
   renderSubs();
   renderAbout();
+  // Lists download in the background after saving: the status follows.
+  renderAdblock();
 }
 
 function selectedServer() {
@@ -412,6 +414,39 @@ function fillSettings() {
   f.fragment_length.value = s.fragment_length;
   f.fragment_interval.value = s.fragment_interval;
   renderGeo();
+  fillAdblock(s);
+}
+
+// Ad-blocking lists offered by the client: [{ name, url, license }].
+let adblockPresets = [];
+
+function fillAdblock(s) {
+  const f = $("#settings-form");
+  $("#adblock-presets").replaceChildren(...adblockPresets.map((p) => {
+    const label = document.createElement("label");
+    label.className = "check";
+    label.title = p.url;
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.url = p.url;
+    input.checked = s.adblock_lists.includes(p.url);
+    label.append(input, ` ${p.name} · ${p.license}`);
+    return label;
+  }));
+  const known = new Set(adblockPresets.map((p) => p.url));
+  f.adblock.checked = s.adblock;
+  f.adblock_custom.value = s.adblock_lists.filter((u) => !known.has(u)).join("\n");
+  renderAdblock();
+}
+
+function renderAdblock() {
+  const el = $("#adblock-status");
+  if (!el || !S) return;
+  const a = S.data.adblock;
+  el.textContent = a.updated_at
+    ? `Обновлено ${fmtAgo(a.updated_at)}: доменов ${a.domains.toLocaleString("ru-RU")}`
+    : "Не скачаны.";
+  if (a.last_error) el.textContent += ` · ошибка: ${a.last_error}`;
 }
 
 function renderGeo() {
@@ -456,6 +491,11 @@ function readSettings() {
     geosite_url: f.geosite_url.value.trim(),
     geoip_url: f.geoip_url.value.trim(),
     geo_auto_update: f.geo_auto_update.checked,
+    adblock: f.adblock.checked,
+    adblock_lists: [
+      ...$$("#adblock-presets input:checked").map((i) => i.dataset.url),
+      ...lines(f.adblock_custom.value),
+    ],
     fragment: f.fragment.checked,
     fragment_length: f.fragment_length.value.trim() || "100-200",
     fragment_interval: f.fragment_interval.value.trim() || "10-20",
@@ -695,6 +735,22 @@ function bind() {
     }
   });
 
+  $("#adblock-update").addEventListener("click", async (e) => {
+    const btn = e.target;
+    btn.disabled = true;
+    btn.textContent = "Скачивание…";
+    try {
+      const st = await invoke("update_adblock");
+      toast(`Списки обновлены: доменов ${st.domains.toLocaleString("ru-RU")}`, "ok");
+    } catch (err) {
+      toast(String(err), "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Скачать / обновить списки";
+      await refresh();
+    }
+  });
+
   $("#logs-copy").addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText($("#logs").textContent);
@@ -737,5 +793,6 @@ async function tick() {
 }
 
 bind();
+invoke("adblock_presets").then((p) => { adblockPresets = p; }).catch(() => {});
 refresh().catch((e) => toast(String(e), "error"));
 setInterval(tick, 1000);

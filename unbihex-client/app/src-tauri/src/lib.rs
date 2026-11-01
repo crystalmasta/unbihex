@@ -386,6 +386,22 @@ async fn save_settings(
     logs::set_level(&state.level, &settings.log_level);
     state.client.set_settings(settings).map_err(err)?;
     notify(&app);
+    // Ad blocking just turned on or other lists picked: download them meanwhile.
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = handle.state::<AppState>();
+        match state.client.update_adblock_if_due().await {
+            Some(Ok(_)) => {
+                notify(&handle);
+                let _ = reconnect_if_connected(&handle, &state).await;
+            }
+            Some(Err(e)) => {
+                tracing::warn!("ad-blocking lists: {e}");
+                notify(&handle);
+            }
+            None => {}
+        }
+    });
     reconnect_if_connected(&app, &state).await
 }
 
@@ -422,6 +438,24 @@ async fn update_geodata(
     // New databases take effect without dropping connections.
     let _ = reconnect_if_connected(&app, &state).await;
     Ok(status)
+}
+
+#[tauri::command]
+async fn update_adblock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<unbihex_client_core::AdblockStatus, String> {
+    let status = state.client.update_adblock().await;
+    notify(&app);
+    let status = status.map_err(err)?;
+    let _ = reconnect_if_connected(&app, &state).await;
+    Ok(status)
+}
+
+/// The ad-blocking lists offered in the settings.
+#[tauri::command]
+fn adblock_presets() -> &'static [unbihex_client_core::adblock::Preset] {
+    unbihex_client_core::adblock::PRESETS
 }
 
 #[tauri::command]
@@ -569,6 +603,14 @@ fn start_background(app: AppHandle) {
                     Err(e) => tracing::warn!("rule databases: {e}"),
                 }
             }
+            if let Some(r) = state.client.update_adblock_if_due().await {
+                match r {
+                    Ok(_) => {
+                        let _ = reconnect_if_connected(&app, &state).await;
+                    }
+                    Err(e) => tracing::warn!("ad-blocking lists: {e}"),
+                }
+            }
             for (_, r) in state.client.update_all(false).await {
                 if let Err(e) = r {
                     tracing::warn!("subscription update: {e}");
@@ -638,6 +680,8 @@ pub fn run() {
             get_logs,
             clear_logs,
             update_geodata,
+            update_adblock,
+            adblock_presets,
             relaunch_admin,
             store_apps_loopback,
         ]);

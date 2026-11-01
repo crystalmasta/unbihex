@@ -33,6 +33,8 @@ pub struct Geo {
     pub sites: Vec<String>,
     /// Available codes (lowercase).
     pub ips: Vec<String>,
+    /// The merged ad-blocking domains (`adblock.txt`), when downloaded.
+    pub adblock: Option<PathBuf>,
 }
 
 impl Geo {
@@ -40,11 +42,13 @@ impl Geo {
     pub fn from_status(dir: &Path, status: &GeoStatus) -> Geo {
         let site = dir.join("geosite.dat");
         let ip = dir.join("geoip.dat");
+        let adblock = dir.join(crate::adblock::FILE);
         Geo {
             geosite: site.exists().then_some(site),
             geoip: ip.exists().then_some(ip),
             sites: status.sites.clone(),
             ips: status.ips.clone(),
+            adblock: adblock.exists().then_some(adblock),
         }
     }
 
@@ -82,7 +86,8 @@ fn with_causes(e: &reqwest::Error) -> String {
     msg
 }
 
-async fn download(url: &str, dest: &Path) -> Result<()> {
+/// Downloads `url` (https only) to `dest`, resuming broken transfers.
+pub(crate) async fn download(url: &str, dest: &Path) -> Result<()> {
     let parsed = url::Url::parse(url.trim())
         .map_err(|_| ClientError::Subscription(format!("{url}: неверный адрес")))?;
     if !is_safe_url(&parsed) {

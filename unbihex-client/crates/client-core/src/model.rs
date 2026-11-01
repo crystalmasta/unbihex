@@ -227,6 +227,10 @@ pub struct Settings {
     pub geoip_url: String,
     /// Refresh the rule databases once a week.
     pub geo_auto_update: bool,
+    /// Block ads and trackers listed in the downloaded hosts lists (issue #28).
+    pub adblock: bool,
+    /// Hosts-format lists to download, by URL.
+    pub adblock_lists: Vec<String>,
     /// Split the TLS ClientHello into small records (VLESS over TLS/REALITY).
     pub fragment: bool,
     /// Record sizes, `"from-to"` bytes.
@@ -272,6 +276,8 @@ impl Default for Settings {
             geosite_url: crate::geo::DEFAULT_GEOSITE_URL.into(),
             geoip_url: crate::geo::DEFAULT_GEOIP_URL.into(),
             geo_auto_update: true,
+            adblock: false,
+            adblock_lists: crate::adblock::DEFAULT_LISTS.iter().map(|u| u.to_string()).collect(),
             fragment: false,
             fragment_length: "100-200".into(),
             fragment_interval: "10-20".into(),
@@ -294,6 +300,22 @@ pub struct AppData {
     pub settings: Settings,
     /// Downloaded rule databases.
     pub geo: GeoStatus,
+    /// Downloaded ad-blocking lists.
+    pub adblock: AdblockStatus,
+}
+
+/// State of the downloaded ad-blocking lists.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdblockStatus {
+    /// Last successful download, Unix seconds.
+    pub updated_at: Option<u64>,
+    /// Domains blocked, all lists together.
+    pub domains: usize,
+    /// The lists that download came from.
+    pub lists: Vec<String>,
+    /// Error of the last download.
+    pub last_error: Option<String>,
 }
 
 /// State of the downloaded `geosite.dat` / `geoip.dat`.

@@ -719,6 +719,9 @@ async fn connect(client: &Client) -> String {
     if let Some(Err(e)) = client.update_geodata_if_due().await {
         tracing::warn!("rule databases: {e}");
     }
+    if let Some(Err(e)) = client.update_adblock_if_due().await {
+        tracing::warn!("ad-blocking lists: {e}");
+    }
     match client.connect().await {
         Ok(info) => format!("подключено: {} ({})", info.server_name, info.mode),
         Err(e) => format!("ошибка подключения: {e}"),

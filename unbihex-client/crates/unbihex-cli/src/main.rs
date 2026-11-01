@@ -39,6 +39,8 @@ usage: unbihex-cli [--dir <folder>] [<command>]
       --interface <name|auto>   bind the engine's own connections to this interface
       --lan / --no-lan          open the proxy ports to the local network (a NAS,
                                 a home server); devices log in with the printed password
+      --adblock / --no-adblock  block ads and trackers from hosts lists (AdAway by
+                                default; downloaded before connecting, weekly)
       --mark <n|off>            Linux: SO_MARK of the engine's own connections
                                 (for `ip rule fwmark`); connect options are saved
   settings                 show the connection settings
@@ -308,6 +310,8 @@ async fn run(client: &Client, cmd: &str, args: &[String]) -> Result<(), String> 
                     "--routes" => settings.tun_routes = true,
                     "--lan" => settings.allow_lan = true,
                     "--no-lan" => settings.allow_lan = false,
+                    "--adblock" => settings.adblock = true,
+                    "--no-adblock" => settings.adblock = false,
                     "--tun-name" => settings.tun_name = value()?,
                     "--interface" => {
                         let v = value()?;
@@ -332,6 +336,11 @@ async fn run(client: &Client, cmd: &str, args: &[String]) -> Result<(), String> 
                 && let Err(e) = r
             {
                 tracing::warn!("rule databases: {e}");
+            }
+            if let Some(r) = client.update_adblock_if_due().await
+                && let Err(e) = r
+            {
+                tracing::warn!("ad-blocking lists: {e}");
             }
             let info = client.connect().await.map_err(|e| e.to_string())?;
             println!("connected: {} ({})", info.server_name, info.mode);
@@ -387,6 +396,13 @@ async fn run(client: &Client, cmd: &str, args: &[String]) -> Result<(), String> 
             );
             println!("socks      127.0.0.1:{}", s.socks_port);
             println!("http       127.0.0.1:{}", s.http_port);
+            let a = client.snapshot().adblock;
+            let lists = if a.updated_at.is_some() {
+                format!("{} domains", a.domains)
+            } else {
+                "not downloaded".into()
+            };
+            println!("adblock    {} ({lists})", if s.adblock { "on" } else { "off" });
         }
         "version" => println!(
             "unbihex-cli {} (engine {})",

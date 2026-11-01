@@ -492,6 +492,32 @@ impl Client {
         }
     }
 
+    /// Downloads the ad-blocking lists.
+    pub async fn update_adblock(&self) -> Result<crate::model::AdblockStatus> {
+        let settings = self.settings();
+        match crate::adblock::update(&self.dir, &settings).await {
+            Ok(status) => {
+                self.mutate(|d| d.adblock = status.clone())?;
+                Ok(status)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                self.mutate(|d| d.adblock.last_error = Some(msg))?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Downloads the lists when ad blocking is on and they are missing, a week old
+    /// or other lists were picked.
+    pub async fn update_adblock_if_due(&self) -> Option<Result<crate::model::AdblockStatus>> {
+        let due = {
+            let d = self.data.read();
+            d.settings.adblock && crate::adblock::is_due(&d.adblock, &d.settings, now_secs())
+        };
+        if due { Some(self.update_adblock().await) } else { None }
+    }
+
     /// Disconnects.
     pub async fn disconnect(&self) {
         self.controller.disconnect().await;

@@ -42,6 +42,10 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   plus your own "through VPN / direct / block" lists. Rule databases: geosite.dat / geoip.dat (v2fly) and `.srs`
   (sing-box), updated weekly.
   QUIC (UDP/443) is blocked in TUN so that browsers fall back to TCP through the tunnel, which is faster.
+- Ad and tracker blocking (off by default): hosts-format lists — AdAway (CC BY 3.0), StevenBlack (MIT),
+  Peter Lowe or your own over https:// — are downloaded from their authors and refreshed weekly.
+  In TUN and on Android blocked names get NXDOMAIN. Sites in the "through VPN / direct" lists are not blocked.
+  The console client: `connect --adblock`.
   IPv6 also goes into the tunnel in TUN mode, and on Windows an NRPT rule sends all DNS queries to the tunnel's DNS only.
 - Speed and traffic statistics, a log, a tray icon, auto-connect.
 - Safe rollback: changes to routes, DNS and the system proxy are written to a journal first

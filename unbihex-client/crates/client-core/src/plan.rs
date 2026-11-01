@@ -213,6 +213,16 @@ fn routing_rules(
     rules.push(json!({ "ip_private": true, "outbound": "direct" }));
     push_list(&mut rules, geo, list(&settings.proxy_list), "proxy")?;
     push_list(&mut rules, geo, list(&settings.direct_list), "direct")?;
+    // After the user's own lists: a site sent direct or through the proxy stays
+    // reachable. Exact names, as hosts lists mean them.
+    if settings.adblock
+        && let Some(path) = &geo.adblock
+    {
+        let domains = crate::adblock::load(path);
+        if !domains.is_empty() {
+            rules.push(json!({ "domain": domains, "outbound": "block" }));
+        }
+    }
     match settings.routing {
         RoutingMode::BypassRu => {
             push_list(&mut rules, geo, RU_TLDS.iter().chain(RU_SERVICES).copied(), "direct")?;
@@ -502,6 +512,7 @@ mod tests {
             geoip: Some(dir.join("geoip.dat")),
             sites: vec!["category-ru".into(), "ru-blocked".into()],
             ips: vec!["ru".into()],
+            adblock: None,
         };
         let mut s = Settings {
             routing: RoutingMode::BypassRu,
@@ -524,6 +535,37 @@ mod tests {
         s.routing = RoutingMode::Global;
         s.proxy_list = vec!["geoip:cn".into()];
         assert!(build_config_json(&server(), &s, &geo, Target::Mobile).is_err());
+    }
+
+    #[test]
+    fn adblock_rule_follows_the_users_lists() {
+        let dir = std::env::temp_dir().join(format!("unbihex-adblock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(crate::adblock::FILE);
+        std::fs::write(&path, "ads.example.com\ntracker.example.net\n").unwrap();
+        let geo = Geo {
+            adblock: Some(path),
+            ..Geo::default()
+        };
+        let mut s = Settings {
+            direct_list: vec!["shop.example".into()],
+            ..Default::default()
+        };
+        let cfg = build_config(&server(), &s, &geo, Target::DesktopTun).unwrap();
+        assert!(cfg.route.rules.iter().all(|r| r.domain.is_empty()), "off by default");
+        s.adblock = true;
+        let cfg = build_config(&server(), &s, &geo, Target::DesktopTun).unwrap();
+        let tags: Vec<&str> = cfg.route.rules.iter().map(|r| r.outbound.as_str()).collect();
+        assert_eq!(tags, ["direct", "direct", "block", "block"]);
+        assert_eq!(cfg.route.rules[2].domain, ["ads.example.com", "tracker.example.net"]);
+        // The DNS server of the TUN answers these names NXDOMAIN.
+        let router = unbihex_engine::router::Router::new(&cfg).unwrap();
+        assert_eq!(router.pick_by_name("ads.example.com", "tun-in"), Some("block"));
+        assert_eq!(router.pick_by_name("www.ads.example.com", "tun-in"), None);
+        // Not downloaded yet: connecting still works, without the rule.
+        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopTun).unwrap();
+        assert!(cfg.route.rules.iter().all(|r| r.domain.is_empty()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

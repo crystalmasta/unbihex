@@ -157,6 +157,12 @@ impl Rule {
         !self.domains.is_empty() || self.sites.is_some()
     }
 
+    /// Whether the domain group matches the normalized name `d`.
+    fn matches_name(&self, d: &str) -> bool {
+        (!self.domains.is_empty() && self.domains.matches(d))
+            || self.sites.as_ref().is_some_and(|l| l.matches(d))
+    }
+
     /// Whether this rule, having matched `s`, decided it by the domain name. A rule-set
     /// can only match a domain target through its domain items (or port/network-only
     /// and inverted entries, which matched the name as written too).
@@ -224,13 +230,8 @@ impl Rule {
         if !self.ports.is_empty() && !self.ports.iter().any(|r| r.contains(&s.target.port)) {
             return false;
         }
-        if self.has_domain_conditions() {
-            match s.domain() {
-                Some(d)
-                    if (!self.domains.is_empty() && self.domains.matches(d))
-                        || self.sites.as_ref().is_some_and(|l| l.matches(d)) => {}
-                _ => return false,
-            }
+        if self.has_domain_conditions() && !s.domain().is_some_and(|d| self.matches_name(d)) {
+            return false;
         }
         if self.has_ip_conditions() {
             let Address::Ip(ip) = s.target.addr else {
@@ -310,6 +311,32 @@ impl Router {
             .map_or((self.final_outbound.as_str(), false), |r| {
                 (r.outbound.as_str(), r.decided_by_domain(s))
             })
+    }
+
+    /// The outbound tag a domain rule picks for every session to the normalized
+    /// name `domain` from `inbound`, whatever its port and protocol. `None` when no
+    /// domain rule decides it, or a port, protocol or rule-set may still change the
+    /// choice. The DNS server answers names blocked this way with NXDOMAIN instead
+    /// of a fake address.
+    pub fn pick_by_name(&self, domain: &str, inbound: &str) -> Option<&str> {
+        for r in &self.rules {
+            if !r.inbound.is_empty() && !r.inbound.iter().any(|t| t == inbound) {
+                continue;
+            }
+            // IP rules never match a name: the domain rule below decides first.
+            if r.has_ip_conditions() {
+                continue;
+            }
+            let unrestricted = r.ports.is_empty() && r.network.is_none() && r.sets.is_empty();
+            if !r.has_domain_conditions() {
+                // A catch-all or port-only rule: not the name's decision.
+                return None;
+            }
+            if r.matches_name(domain) {
+                return unrestricted.then_some(r.outbound.as_str());
+            }
+        }
+        None
     }
 
     /// Whether any rule looks at destination IP addresses.
@@ -496,5 +523,32 @@ mod tests {
             assert_eq!(r.pick(&hit), "direct");
         }
         assert!(start.elapsed().as_secs_f64() < 2.0, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn names_decided_by_domain_rules_alone() {
+        let r = router(
+            r#"[{"domain":["ads.example"],"outbound":"block"},
+                {"ip_private":true,"outbound":"direct"},
+                {"domain_suffix":["shop.example"],"outbound":"direct"},
+                {"domain_suffix":["mixed.example"],"port":[80],"outbound":"block"},
+                {"domain_suffix":["late.example"],"inbound":["tun-in"],"outbound":"block"},
+                {"network":"udp","port":[443],"outbound":"block"},
+                {"domain":["after.example"],"outbound":"block"}]"#,
+        );
+        assert_eq!(r.pick_by_name("ads.example", "tun-in"), Some("block"));
+        assert_eq!(
+            r.pick_by_name("sub.ads.example", "tun-in"),
+            None,
+            "exact only"
+        );
+        assert_eq!(r.pick_by_name("a.shop.example", "tun-in"), Some("direct"));
+        // Port 80 only: other ports still go through.
+        assert_eq!(r.pick_by_name("mixed.example", "tun-in"), None);
+        assert_eq!(r.pick_by_name("late.example", "tun-in"), Some("block"));
+        assert_eq!(r.pick_by_name("late.example", "socks-in"), None);
+        // Behind a port-only rule, and `final` is no name's decision.
+        assert_eq!(r.pick_by_name("after.example", "tun-in"), None);
+        assert_eq!(r.pick_by_name("other.example", "tun-in"), None);
     }
 }

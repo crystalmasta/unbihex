@@ -249,6 +249,17 @@ impl Dispatcher {
         self.table.store(Arc::new(table));
     }
 
+    /// Whether every session to the normalized name `domain` from `inbound` is
+    /// blocked by a rule that decides by the name alone (ad-blocking lists).
+    pub fn blocks_name(&self, domain: &str, inbound: &str) -> bool {
+        let table = self.table.load();
+        table
+            .router
+            .pick_by_name(domain, inbound)
+            .and_then(|tag| table.outbounds.get(tag))
+            .is_some_and(|o| o.is_block())
+    }
+
     /// Picks the outbound. A session that would go direct is resolved here; when no
     /// domain rule decided it, the rules are matched again against its addresses
     /// (like Xray's IPIfNonMatch), so IP rules also hold for names. Sessions routed

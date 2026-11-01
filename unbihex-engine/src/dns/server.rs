@@ -2,7 +2,8 @@
 //!
 //! A → fake IP; AAAA, SVCB, HTTPS → empty NOERROR (keeps traffic on fake IPv4
 //! addresses); single-label names, `dns.fakeip_exclude` suffixes and other types →
-//! forwarded upstream.
+//! forwarded upstream. A name every session to which a rule blocks by the name
+//! alone (ad-blocking lists) gets NXDOMAIN.
 //!
 //! Forwarded queries are routed like any other UDP flow to the upstream server, so
 //! with a proxy as `final` they leave through the proxy instead of in the clear.
@@ -109,6 +110,15 @@ impl DnsServer {
         let domain = q.name().to_ascii().trim_end_matches('.').to_string();
         let local = !domain.contains('.');
         let qtype = q.query_type();
+        // Names a rule blocks outright (ad-blocking lists) do not exist: apps give
+        // up at once instead of retrying connections that are refused.
+        if !local
+            && let Some((d, tag)) = &self.via
+            && let Ok(name) = normalize_domain(&domain)
+            && d.blocks_name(&name, tag)
+        {
+            return error(&msg, ResponseCode::NXDomain);
+        }
         if !local
             && matches!(
                 qtype,
@@ -379,7 +389,8 @@ mod tests {
     async fn routed_server(upstream: std::net::SocketAddr, final_tag: &str) -> DnsServer {
         let cfg = crate::config::Config::from_json(&format!(
             r#"{{"outbounds":[{{"type":"direct","tag":"direct"}},{{"type":"block","tag":"block"}}],
-                 "route":{{"final":"{final_tag}"}}}}"#
+                 "route":{{"rules":[{{"domain":["ads.example"],"outbound":"block"}}],
+                           "final":"{final_tag}"}}}}"#
         ))
         .unwrap();
         let sockets: Arc<crate::net::SocketFactory> = Arc::default();
@@ -431,6 +442,39 @@ mod tests {
         .unwrap();
         assert_eq!(r.metadata.response_code, ResponseCode::ServFail);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn names_blocked_by_a_rule_do_not_exist() {
+        let (upstream, hits) = fake_upstream().await;
+        let s = routed_server(upstream, "direct").await;
+        for t in [
+            RecordType::A,
+            RecordType::AAAA,
+            RecordType::HTTPS,
+            RecordType::TXT,
+        ] {
+            let r = Message::from_vec(&s.handle(&query("Ads.Example.", t)).await.unwrap()).unwrap();
+            assert_eq!(r.metadata.response_code, ResponseCode::NXDomain, "{t:?}");
+            assert!(r.answers.is_empty());
+        }
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "not forwarded"
+        );
+        let r = Message::from_vec(
+            &s.handle(&query("www.ads.example.", RecordType::A))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(r.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(
+            r.answers.len(),
+            1,
+            "a fake address for names the rule does not cover"
+        );
     }
 
     #[tokio::test]
