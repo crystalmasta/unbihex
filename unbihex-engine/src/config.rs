@@ -492,6 +492,7 @@ impl VlessConfig {
         }
         if let Some(x) = &self.xhttp {
             x.validate()?;
+            x.check_uplink(x.mode.resolve(self.reality.is_some()))?;
             if self.is_vision() {
                 return Err(Error::config(format!(
                     "outbound {}: {FLOW_VISION} works only over raw TCP, not XHTTP",

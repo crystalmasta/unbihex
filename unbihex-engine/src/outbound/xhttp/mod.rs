@@ -26,6 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use h2::client::SendRequest;
 use h2::{RecvStream, SendStream};
+use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 
 pub use config::{Range, XhttpConfig, XhttpMode, XmuxConfig};
@@ -38,6 +39,101 @@ use crate::error::{Error, Result};
 use crate::net::SocketFactory;
 
 const PIPE: usize = 64 * 1024;
+
+// By dubr1k (github.com/dubr1k), PR #32: CDN request shapes (padding, session
+// and sequence placements, GET uploads).
+struct RequestShape {
+    target: String,
+    headers: Vec<(String, String)>,
+}
+
+fn set_header(headers: &mut Vec<(String, String)>, key: &str, value: String) {
+    headers.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+    headers.push((key.to_string(), value));
+}
+
+fn remove_query(query: &mut String, key: &str) {
+    // Keep every byte of unrelated/signed query parameters, including flag-only
+    // fields, percent-escape case, non-UTF8 escapes and the original spacing.
+    let parts: Vec<&str> = query
+        .split('&')
+        .filter(|part| {
+            url::form_urlencoded::parse(part.as_bytes())
+                .next()
+                .is_none_or(|(k, _)| k != key)
+        })
+        .collect();
+    *query = parts.join("&");
+}
+
+fn set_query(query: &mut String, key: &str, value: &str) {
+    remove_query(query, key);
+    let mut out = std::mem::take(query);
+    if !out.is_empty() {
+        out.push('&');
+    }
+    out.push_str(
+        &url::form_urlencoded::Serializer::new(String::new())
+            .append_pair(key, value)
+            .finish(),
+    );
+    *query = out;
+}
+
+fn remove_cookie(headers: &mut Vec<(String, String)>, key: &str) {
+    let value = headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, v)| v.split(';'))
+        .map(str::trim)
+        .filter(|c| !c.is_empty() && c.split_once('=').is_none_or(|(name, _)| name.trim() != key))
+        .collect::<Vec<_>>()
+        .join("; ");
+    headers.retain(|(k, _)| !k.eq_ignore_ascii_case("cookie"));
+    if !value.is_empty() {
+        headers.push(("Cookie".into(), value));
+    }
+}
+
+fn huffman_bits(c: u8) -> usize {
+    // RFC 7541 appendix B, restricted to the base62 alphabet used by Xray.
+    match c {
+        b'0'..=b'2' | b'a' | b'c' | b'e' | b'i' | b'o' | b's' | b't' => 5,
+        b'3'..=b'9'
+        | b'A'
+        | b'b'
+        | b'd'
+        | b'f'
+        | b'g'
+        | b'h'
+        | b'l'
+        | b'm'
+        | b'n'
+        | b'p'
+        | b'r'
+        | b'u' => 6,
+        b'X' | b'Z' => 8,
+        _ => 7,
+    }
+}
+
+fn padding(cfg: &XhttpConfig) -> String {
+    let length = cfg.padding().pick() as usize;
+    if !cfg.x_padding_obfs_mode || cfg.x_padding_method != "tokenish" {
+        return "X".repeat(length);
+    }
+    const TABLE: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut rng = rand::thread_rng();
+    let mut out = String::new();
+    let mut bits: usize = 0;
+    // The server validates the Huffman-encoded size, not the string length.
+    while bits.div_ceil(8) < length {
+        let c = TABLE[rng.gen_range(0..TABLE.len())];
+        bits += huffman_bits(c);
+        out.push(char::from(c));
+    }
+    out
+}
 
 fn h2_err(e: h2::Error) -> Error {
     Error::protocol(format!("xhttp: {e}"))
@@ -209,48 +305,139 @@ impl XhttpClient {
         self.mode
     }
 
-    /// Path and query of a request: `{path}[{session}[/{seq}]][?query]`.
-    fn target(&self, session: Option<&str>, seq: Option<u64>) -> String {
+    /// One shared wire-format builder for both HTTP/1.1 and HTTP/2.
+    fn request_shape(
+        &self,
+        session: Option<&str>,
+        seq: Option<u64>,
+        stream_body: bool,
+    ) -> RequestShape {
         let mut t = self.path.clone();
-        if let Some(s) = session {
-            t.push_str(s);
-            if let Some(n) = seq {
-                t.push('/');
-                t.push_str(&n.to_string());
+        let mut h = browser_headers(&self.cfg.headers);
+        let mut query = self.query.clone();
+        // A downlink has no sequence number. Remove stale transport-owned
+        // values even when this request will not replace them with a new one.
+        for (placement, key) in [
+            (self.cfg.session_placement(), self.cfg.session_key()),
+            (self.cfg.sequence_placement(), self.cfg.sequence_key()),
+        ] {
+            match placement {
+                "query" => remove_query(&mut query, key),
+                "cookie" => remove_cookie(&mut h, key),
+                "header" => h.retain(|(k, _)| !k.eq_ignore_ascii_case(key)),
+                _ => {}
             }
         }
-        if !self.query.is_empty() {
+        let mut put = |placement: &str,
+                       key: &str,
+                       value: &str,
+                       target: &mut String,
+                       headers: &mut Vec<(String, String)>| {
+            match placement {
+                "path" => {
+                    if !target.ends_with('/') {
+                        target.push('/');
+                    }
+                    target.push_str(value);
+                }
+                "query" => {
+                    set_query(&mut query, key, value);
+                }
+                "header" => set_header(headers, key, value.to_string()),
+                "cookie" => {
+                    // Leaves at most one Cookie header, without this key.
+                    remove_cookie(headers, key);
+                    let pair = format!("{key}={value}");
+                    let value = match headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+                    {
+                        Some((_, old)) => format!("{old}; {pair}"),
+                        None => pair,
+                    };
+                    set_header(headers, "Cookie", value);
+                }
+                _ => {}
+            }
+        };
+        let pad = padding(&self.cfg);
+        let placement = if self.cfg.x_padding_obfs_mode {
+            self.cfg.padding_placement()
+        } else {
+            "queryInHeader"
+        };
+        let key = if self.cfg.x_padding_obfs_mode {
+            self.cfg.padding_key()
+        } else {
+            "x_padding"
+        };
+        let header = if self.cfg.x_padding_obfs_mode {
+            self.cfg.padding_header()
+        } else {
+            "Referer"
+        };
+        if placement == "queryInHeader" {
+            let q = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair(key, &pad)
+                .finish();
+            set_header(
+                &mut h,
+                header,
+                format!("{}://{}{}?{q}", self.scheme, self.host, self.path),
+            );
+        } else {
+            put(
+                placement,
+                if placement == "header" { header } else { key },
+                &pad,
+                &mut t,
+                &mut h,
+            );
+        }
+        if let Some(s) = session {
+            put(
+                self.cfg.session_placement(),
+                self.cfg.session_key(),
+                s,
+                &mut t,
+                &mut h,
+            );
+        }
+        if let Some(n) = seq {
+            put(
+                self.cfg.sequence_placement(),
+                self.cfg.sequence_key(),
+                &n.to_string(),
+                &mut t,
+                &mut h,
+            );
+        }
+        if !query.is_empty() {
             t.push('?');
-            t.push_str(&self.query);
+            t.push_str(&query);
         }
-        t
-    }
-
-    /// Request headers: user and browser headers, and the padding in `Referer`.
-    fn headers(&self, stream_body: bool) -> Vec<(String, String)> {
-        let mut h = browser_headers(&self.cfg.headers);
-        let padding = "X".repeat(self.cfg.padding().pick() as usize);
-        h.push((
-            "Referer".into(),
-            format!("{}://{}{}?x_padding={padding}", self.scheme, self.host, self.path),
-        ));
         if stream_body && !self.cfg.no_grpc_header {
-            h.push(("Content-Type".into(), "application/grpc".into()));
+            set_header(&mut h, "Content-Type", "application/grpc".into());
         }
-        h
+        RequestShape {
+            target: t,
+            headers: h,
+        }
     }
 
     fn h2_request(
         &self,
         method: http::Method,
-        target: &str,
+        session: Option<&str>,
+        seq: Option<u64>,
         stream_body: bool,
         len: Option<usize>,
     ) -> Result<http::Request<()>> {
+        let shape = self.request_shape(session, seq, stream_body);
         let mut b = http::Request::builder()
             .method(method)
-            .uri(format!("{}://{}{}", self.scheme, self.host, target));
-        for (k, v) in self.headers(stream_body) {
+            .uri(format!("{}://{}{}", self.scheme, self.host, shape.target));
+        for (k, v) in shape.headers {
             b = b.header(k, v);
         }
         if let Some(n) = len {
@@ -297,7 +484,7 @@ impl XhttpClient {
         let (r, w) = tokio::io::split(inner);
         match self.mode {
             XhttpMode::StreamOne | XhttpMode::Auto => {
-                let req = self.h2_request(http::Method::POST, &self.target(None, None), true, None)?;
+                let req = self.h2_request(self.uplink_method(), None, None, true, None)?;
                 let (resp, tx) = lease
                     .request()
                     .ready()
@@ -314,10 +501,8 @@ impl XhttpClient {
                 });
             }
             XhttpMode::StreamUp | XhttpMode::PacketUp => {
-                let session = uuid::Builder::from_random_bytes(rand::random())
-                    .into_uuid()
-                    .to_string();
-                let get = self.h2_request(http::Method::GET, &self.target(Some(&session), None), false, None)?;
+                let session = self.cfg.new_session_id();
+                let get = self.h2_request(http::Method::GET, Some(&session), None, false, None)?;
                 let (resp, _) = lease
                     .request()
                     .ready()
@@ -326,7 +511,8 @@ impl XhttpClient {
                     .send_request(get, true)
                     .map_err(h2_err)?;
                 if self.mode == XhttpMode::StreamUp {
-                    let post = self.h2_request(http::Method::POST, &self.target(Some(&session), None), true, None)?;
+                    let post =
+                        self.h2_request(self.uplink_method(), Some(&session), None, true, None)?;
                     let (post_resp, tx) = lease
                         .request()
                         .ready()
@@ -403,7 +589,13 @@ impl XhttpClient {
             if n == 0 || failed.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let req = self.h2_request(http::Method::POST, &self.target(Some(session), Some(seq)), false, Some(n))?;
+            let req = self.h2_request(
+                self.uplink_method(),
+                Some(session),
+                Some(seq),
+                false,
+                Some(n),
+            )?;
             seq += 1;
             let (resp, mut tx) = lease
                 .request()
@@ -434,18 +626,17 @@ impl XhttpClient {
     }
 
     async fn open_h1(self: &Arc<Self>, inner: DuplexStream) -> Result<()> {
-        let session = uuid::Builder::from_random_bytes(rand::random())
-            .into_uuid()
-            .to_string();
+        let session = self.cfg.new_session_id();
         let io = self.dialer.dial().await?;
         let (rd, mut wr) = tokio::io::split(io);
         let mut rd = BufReader::new(rd);
+        let shape = self.request_shape(Some(&session), None, false);
         h1::write_request(
             &mut wr,
             "GET",
-            &self.target(Some(&session), None),
+            &shape.target,
             &self.host,
-            &self.headers(false),
+            &shape.headers,
             None,
         )
         .await?;
@@ -481,9 +672,8 @@ impl XhttpClient {
             if n == 0 {
                 return Ok(());
             }
-            let target = self.target(Some(session), Some(seq));
+            let shape = self.request_shape(Some(session), Some(seq), false);
             seq += 1;
-            let headers = self.headers(false);
             let mut attempt = 0;
             loop {
                 attempt += 1;
@@ -496,7 +686,15 @@ impl XhttpClient {
                     return Err(Error::protocol("xhttp: no upload connection"));
                 };
                 let sent = async {
-                    h1::write_request(cw, "POST", &target, &self.host, &headers, Some(&buf[..n])).await?;
+                    h1::write_request(
+                        cw,
+                        self.cfg.uplink_method(),
+                        &shape.target,
+                        &self.host,
+                        &shape.headers,
+                        Some(&buf[..n]),
+                    )
+                    .await?;
                     let head = h1::read_head(cr).await?;
                     h1::copy_body::<_, tokio::io::Sink>(cr, head.body, None).await?;
                     Ok::<_, Error>(head)
@@ -517,6 +715,17 @@ impl XhttpClient {
                     Err(e) => return Err(e),
                 }
             }
+        }
+    }
+
+    fn uplink_method(&self) -> http::Method {
+        // Validated by XhttpConfig; unknown methods never reach the wire.
+        match self.cfg.uplink_method() {
+            "GET" => http::Method::GET,
+            "PUT" => http::Method::PUT,
+            "PATCH" => http::Method::PATCH,
+            "DELETE" => http::Method::DELETE,
+            _ => http::Method::POST,
         }
     }
 }
@@ -614,9 +823,12 @@ mod tests {
         };
         let c = client(cfg);
         assert_eq!(c.mode(), XhttpMode::PacketUp);
-        assert_eq!(c.target(Some("s"), Some(3)), "/api/s/3?x=1");
-        assert_eq!(c.target(None, None), "/api/?x=1");
-        let h = c.headers(true);
+        assert_eq!(
+            c.request_shape(Some("s"), Some(3), false).target,
+            "/api/s/3?x=1"
+        );
+        assert_eq!(c.request_shape(None, None, false).target, "/api/?x=1");
+        let h = c.request_shape(None, None, true).headers;
         let get = |k: &str| h.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
         let referer = get("Referer");
         assert!(referer.starts_with("https://srv.example/api/?x_padding=X"));
@@ -624,9 +836,143 @@ mod tests {
         assert!((100..=1000).contains(&pad));
         assert_eq!(get("Content-Type"), "application/grpc");
         assert!(get("User-Agent").contains("Chrome/"));
-        let req = c.h2_request(http::Method::POST, "/api/s/0", false, Some(5)).unwrap();
-        assert_eq!(req.uri().to_string(), "https://srv.example/api/s/0");
+        let req = c
+            .h2_request(http::Method::POST, Some("s"), Some(0), false, Some(5))
+            .unwrap();
+        assert_eq!(req.uri().to_string(), "https://srv.example/api/s/0?x=1");
         assert_eq!(req.headers()["content-length"], "5");
         assert!(chrome_version() >= 144);
+    }
+
+    #[test]
+    fn cdn_request_has_sequence_and_token_in_query_not_path_or_referer() {
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "path": "/media/segment.ts?quality=hd", "mode": "packet-up",
+            "xPaddingObfsMode": true, "xPaddingPlacement": "query",
+            "xPaddingKey": "_token", "xPaddingMethod": "tokenish", "xPaddingBytes": "4-10",
+            "sessionIDTable": "abcdefgh............", "sessionIDLength": "16-24",
+            "seqPlacement": "query", "seqKey": "offset", "uplinkHTTPMethod": "GET"
+        }))
+        .unwrap();
+        let c = client(cfg);
+        for n in 0..128 {
+            let sid = c.cfg.new_session_id();
+            assert!((16..=24).contains(&sid.len()));
+            assert!(sid.bytes().all(|b| b"abcdefgh............".contains(&b)));
+            let req = c
+                .h2_request(c.uplink_method(), Some(&sid), Some(n), false, Some(100))
+                .unwrap();
+            assert_eq!(req.method(), http::Method::GET);
+            assert_eq!(req.uri().path(), format!("/media/segment.ts/{sid}"));
+            let q: std::collections::BTreeMap<_, _> =
+                url::form_urlencoded::parse(req.uri().query().unwrap().as_bytes())
+                    .into_owned()
+                    .collect();
+            assert_eq!(q["offset"], n.to_string());
+            assert_eq!(q["quality"], "hd");
+            let token = &q["_token"];
+            assert!(token.bytes().all(|b| b.is_ascii_alphanumeric()));
+            let encoded = token.bytes().map(huffman_bits).sum::<usize>().div_ceil(8);
+            assert!((4..=10).contains(&encoded));
+            assert!(!req.headers().contains_key("referer"));
+            assert_eq!(req.headers()["content-length"], "100");
+            let down = c.request_shape(Some(&sid), None, false);
+            assert!(!down.target.contains("offset="));
+        }
+    }
+
+    #[test]
+    fn metadata_and_padding_placements_share_one_builder() {
+        for (session, seq, pad) in [
+            ("query", "header", "cookie"),
+            ("header", "cookie", "queryInHeader"),
+            ("cookie", "query", "header"),
+        ] {
+            let cfg = XhttpConfig::from_xray(&serde_json::json!({
+                "path": "/api?keep=1", "sessionIDPlacement": session, "seqPlacement": seq,
+                "xPaddingObfsMode": true, "xPaddingPlacement": pad,
+                "xPaddingHeader": "X-Padding", "xPaddingKey": "pad", "xPaddingBytes": 8
+            }))
+            .unwrap();
+            let c = client(cfg);
+            let shape = c.request_shape(Some("abc"), Some(0), false);
+            assert!(shape.target.starts_with("/api?"));
+            assert!(shape.target.contains("keep=1"));
+            let h: std::collections::BTreeMap<_, _> = shape.headers.into_iter().collect();
+            match session {
+                "query" => assert!(shape.target.contains("x_session=abc")),
+                "header" => assert_eq!(h["X-Session"], "abc"),
+                "cookie" => assert!(h["Cookie"].contains("x_session=abc")),
+                _ => unreachable!(),
+            }
+            match seq {
+                "query" => assert!(shape.target.contains("x_seq=0")),
+                "header" => assert_eq!(h["X-Seq"], "0"),
+                "cookie" => assert!(h["Cookie"].contains("x_seq=0")),
+                _ => unreachable!(),
+            }
+            match pad {
+                "cookie" => assert!(h["Cookie"].contains("pad=XXXXXXXX")),
+                "header" => assert_eq!(h["X-Padding"], "XXXXXXXX"),
+                "queryInHeader" => {
+                    assert_eq!(h["X-Padding"], "https://srv.example/api?pad=XXXXXXXX")
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn original_query_is_byte_preserved_and_only_transport_keys_are_replaced() {
+        let raw = "flag&token=a%20b&sig=a%2fb&opaque=%FF";
+        let c = client(XhttpConfig {
+            path: format!("/api?{raw}"),
+            ..Default::default()
+        });
+        assert_eq!(
+            c.request_shape(Some("abc"), Some(0), false).target,
+            format!("/api/abc/0?{raw}")
+        );
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "path":format!("/api?{raw}&x%5fseq=old&x_seq=stale"), "seqPlacement":"query"
+        }))
+        .unwrap();
+        let c = client(cfg);
+        assert_eq!(
+            c.request_shape(Some("abc"), Some(2), false).target,
+            format!("/api/abc?{raw}&x_seq=2")
+        );
+        assert_eq!(
+            c.request_shape(Some("abc"), None, false).target,
+            format!("/api/abc?{raw}")
+        );
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "sessionIDPlacement":"cookie", "headers":{"Cookie":"keep=1; x_session=old; x_session=stale"}
+        })).unwrap();
+        let c = client(cfg);
+        let shape = c.request_shape(Some("new"), None, false);
+        assert_eq!(
+            shape
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+                .unwrap()
+                .1,
+            "keep=1; x_session=new"
+        );
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "seqPlacement":"cookie", "headers":{"Cookie":"keep=1; x_seq=old"}
+        }))
+        .unwrap();
+        let shape = client(cfg).request_shape(Some("abc"), None, false);
+        assert_eq!(
+            shape
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+                .unwrap()
+                .1,
+            "keep=1"
+        );
     }
 }

@@ -466,6 +466,45 @@ RFC 1928/1929: CONNECT, optionally with a username and password. Domains are sen
 
 `connect_tcp` and `connect_udp` return `Error::Blocked` at once. The incoming connection is closed (TCP RST if the stack allows it).
 
+### 11.7 XHTTP: extended CDN request format
+
+VLESS `xhttp` accepts Xray `extra`: `xPaddingObfsMode`, `xPaddingKey`,
+`xPaddingHeader`, `xPaddingPlacement` (`query`, `header`, `cookie`, `queryInHeader`),
+`xPaddingMethod` (`repeat-x`, `tokenish`), `sessionIDPlacement`, `sessionIDKey`,
+`sessionIDTable`, `sessionIDLength`, `seqPlacement`, `seqKey`, `uplinkHTTPMethod`.
+Session and sequence metadata can use path/query/header/cookie. `tokenish` is random
+base62 sized in HPACK Huffman bytes, not characters. Keys and alphabets are checked
+before sending. Named Xray alphabets are supported; custom alphabets are restricted
+to URL-safe ASCII and lengths to 1–256 (short dotted IDs are refused to avoid dot
+segments). Padding is capped at 65536 bytes. Reserved HTTP framing headers and
+colliding metadata/padding keys are refused.
+
+A shared builder produces the same request targets/headers for HTTP/1.1 and HTTP/2,
+preserves the query in `path`, and retains the request body even for GET uploads.
+GET requires `packet-up`; POST/PUT/PATCH/DELETE are also supported. Without obfs,
+the legacy `Referer: …?x_padding=…` stays unchanged. With obfs, Xray defaults are
+`queryInHeader`, `X-Padding`, `x_padding`, `repeat-x`.
+
+TLS, SNI, HTTP Host and the dial address remain separate: a CDN client uses TLS to
+the edge even when its origin accepts plaintext XHTTP on loopback. Plaintext VLESS
+share links remain refused. This does not add HTTP/3, `downloadSettings`, payload in
+cookies/headers, or insecure certificate verification. Unimplemented wire options
+continue to fail explicitly.
+
+Run `XRAY_BIN=/path/to/xray cargo test --test xray_interop
+xhttp_cdn_obfuscation_against_xray`: real TCP/UDP payloads over GET packet-up with
+query sequence, tokenish padding and custom session IDs; HTTP/2+TLS, HTTP/1.1+TLS
+and a plaintext origin on disposable loopback listeners. This proves wire
+interoperability, not availability of any particular CDN. Format references:
+public Xray `transport/internet/splithttp/{config,xpadding}.go` and
+`infra/conf/transport_method.go`.
+
+Custom alphabets require a length and at least 2^31 possible IDs (counting distinct
+symbols); degenerate alphabets are rejected. Unrelated query bytes are preserved
+exactly; only transport-owned keys are replaced. Stale transport cookies/query keys
+cannot shadow new values. On loading saved state the client re-evaluates capability
+while preserving IDs, user labels and subscriptions.
+
 ---
 
 ## 12. Desktop system network (feature `system-routes`, used only by `unbihex-cli`)

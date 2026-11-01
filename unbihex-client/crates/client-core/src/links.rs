@@ -60,6 +60,30 @@ pub fn parse_server(link: &str) -> Result<Server> {
     Ok(server)
 }
 
+// By dubr1k (github.com/dubr1k), PR #32.
+/// Capability is derived from the current engine, not a permanent property of
+/// saved state. Preserve identity, user labels and subscription membership.
+pub(crate) fn refresh_support(server: &mut Server) -> bool {
+    let Ok(parsed) = parse_server(&server.link) else {
+        return false;
+    };
+    let changed = server.unsupported != parsed.unsupported
+        || server.host != parsed.host
+        || server.port != parsed.port
+        || server.protocol != parsed.protocol
+        || server.transport != parsed.transport;
+    if changed {
+        server.unsupported = parsed.unsupported;
+        server.host = parsed.host;
+        server.port = parsed.port;
+        server.protocol = parsed.protocol;
+        server.transport = parsed.transport;
+        server.ping_ms = None;
+        server.ping_error = None;
+    }
+    changed
+}
+
 fn blank(protocol: &str) -> Server {
     Server {
         id: Uuid::new_v4(),

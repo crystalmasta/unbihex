@@ -466,6 +466,45 @@ RFC 1928/1929: CONNECT, опционально логин и пароль. До�
 
 `connect_tcp` и `connect_udp` сразу возвращают `Error::Blocked`. Входящее соединение закрывается (TCP RST, если стек это позволяет).
 
+### 11.7 XHTTP: расширенный формат запросов CDN
+
+`xhttp` в VLESS поддерживает Xray `extra`: `xPaddingObfsMode`, `xPaddingKey`,
+`xPaddingHeader`, `xPaddingPlacement` (`query`, `header`, `cookie`, `queryInHeader`),
+`xPaddingMethod` (`repeat-x`, `tokenish`); `sessionIDPlacement`, `sessionIDKey`,
+`sessionIDTable`, `sessionIDLength`, `seqPlacement`, `seqKey`, `uplinkHTTPMethod`.
+Метаданные сессии и последовательности размещаются в path/query/header/cookie.
+`tokenish` — случайный base62, длина которого измеряется в байтах HPACK Huffman,
+а не в символах. Имена/алфавиты проверяются до отправки. Генератор поддерживает
+именованные алфавиты Xray; пользовательский алфавит ограничен URL-safe ASCII,
+длина — 1–256; короткие алфавиты с точкой отклоняются во избежание dot-сегментов.
+Padding ограничен 65536 байтами. Зарезервированные имена заголовков HTTP и
+конфликтующие ключи метаданных/padding отклоняются.
+
+Общий построитель формирует одинаковые target и заголовки для HTTP/1.1 и HTTP/2,
+сохраняет query из `path` и передаёт тело также при `uplinkHTTPMethod=GET`.
+GET допустим только в `packet-up`. POST/PUT/PATCH/DELETE также поддерживаются.
+Без obfs сохраняется прежний `Referer: …?x_padding=…`; с obfs defaults Xray:
+`queryInHeader`, `X-Padding`, `x_padding`, `repeat-x`.
+
+TLS, SNI, HTTP Host и адрес сервера — независимые параметры: для CDN клиент
+использует TLS до edge, даже если origin принимает plaintext XHTTP на loopback.
+Plaintext VLESS по share-ссылке по-прежнему запрещён. Эти изменения не добавляют
+HTTP/3, `downloadSettings`, payload в cookie/header или обход проверки сертификата.
+Настройки, которые не реализованы, продолжают давать явный отказ.
+
+Проверка: `XRAY_BIN=/path/to/xray cargo test --test xray_interop
+xhttp_cdn_obfuscation_against_xray` — реальные TCP и UDP payload через GET packet-up,
+query sequence, tokenish padding, custom session ID; HTTP/2+TLS, HTTP/1.1+TLS и
+plaintext origin на одноразовых loopback-listener-ах. Это проверка wire-совместимости,
+не доступности конкретного CDN. Формат соответствует публичным исходникам Xray
+`transport/internet/splithttp/{config,xpadding}.go` и `infra/conf/transport_method.go`.
+
+При пользовательском алфавите требуется длина и пространство не менее 2^31 ID (по
+уникальным символам); вырожденные алфавиты отклоняются. Query сохраняется побайтно,
+кроме заменяемых ключей транспорта. Старые значения транспортных cookie/query не могут
+подменять новые. При открытии сохранённого состояния клиент пересчитывает доступность,
+сохраняя ID, пользовательские названия и подписки.
+
 ---
 
 ## 12. Системная сеть на десктопе (feature `system-routes`, используется только `unbihex-cli`)

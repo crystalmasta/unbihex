@@ -49,6 +49,14 @@ fn xray_bin() -> Option<String> {
     std::env::var("XRAY_BIN").ok().filter(|p| !p.is_empty())
 }
 
+fn loopback_freedom() -> serde_json::Value {
+    // Recent Xray blocks private targets by default. Only this disposable test
+    // server may reach the loopback echo destinations; production is untouched.
+    serde_json::json!({"protocol":"freedom", "settings":{"finalRules":[{
+        "ip":["127.0.0.0/8", "::1/128"], "action":"allow"
+    }]}})
+}
+
 struct Pem {
     cert_pem: String,
     key_pem: String,
@@ -319,7 +327,7 @@ async fn vision_and_reality_against_xray() {
                 }
             }
         ],
-        "outbounds": [{ "protocol": "freedom" }]
+        "outbounds": [loopback_freedom()]
     });
     let xray = start_xray(&bin, config).await;
     let uuid = *uuid::Uuid::parse_str(UUID).unwrap().as_bytes();
@@ -425,6 +433,97 @@ fn xhttp(path: &str, mode: &str, xmux: Option<serde_json::Value>) -> XhttpConfig
     XhttpConfig::from_xray(&v).unwrap()
 }
 
+/// CDN-style GET packet uploads, custom session IDs and tokenish query padding.
+/// All listeners and destinations are loopback; no running server is modified.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn xhttp_cdn_obfuscation_against_xray() {
+    let Some(bin) = xray_bin() else {
+        eprintln!("XRAY_BIN is not set: skipping the Xray interop test");
+        return;
+    };
+    init_tracing();
+    let outer = cert("cdn.test");
+    let echo = tcp_echo().await;
+    let uecho = udp_echo().await;
+    let dir = std::env::temp_dir().join(format!("unbihex-cdn-pem-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("cert.pem"), &outer.cert_pem).unwrap();
+    std::fs::write(dir.join("key.pem"), &outer.key_pem).unwrap();
+    let (tls_port, plain_port) = (free_port(), free_port());
+    let xs = serde_json::json!({
+        "path": "/media/segment.ts", "mode": "packet-up",
+        "xPaddingBytes": "4-10", "xPaddingObfsMode": true,
+        "xPaddingKey": "_token", "xPaddingHeader": "X-Client-Version",
+        "xPaddingPlacement": "query", "xPaddingMethod": "tokenish",
+        "sessionIDPlacement": "path", "sessionIDKey": "sid",
+        "sessionIDTable": "abcdefgh............", "sessionIDLength": "16-24",
+        "seqPlacement": "query", "seqKey": "offset",
+        "uplinkDataPlacement": "body", "uplinkHTTPMethod": "GET",
+        "scMaxEachPostBytes": "500000-1000000", "scMaxBufferedPosts": 50,
+        "scMinPostsIntervalMs": "50-150",
+        "xmux": {"maxConnections": "4-8", "hKeepAlivePeriod": 0}
+    });
+    let mut secure = serde_json::json!({
+        "listen":"127.0.0.1", "port":tls_port, "protocol":"vless",
+        "settings":{"clients":[{"id":UUID}], "decryption":"none"},
+        "streamSettings":{"network":"xhttp", "xhttpSettings":xs, "security":"tls",
+            "tlsSettings":{"alpn":["h2","http/1.1"], "certificates":[{
+                "certificateFile":dir.join("cert.pem"), "keyFile":dir.join("key.pem")
+            }]}}
+    });
+    let mut plain = secure.clone();
+    plain["port"] = serde_json::json!(plain_port);
+    plain["streamSettings"]["security"] = serde_json::json!("none");
+    plain["streamSettings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tlsSettings");
+    // Put client-only buffering options into the same shape exported by panels.
+    secure["tag"] = serde_json::json!("cdn-tls");
+    let _xray = start_xray(
+        &bin,
+        serde_json::json!({
+            "log":{"loglevel":"debug"}, "inbounds":[secure,plain],
+            "outbounds":[loopback_freedom()]
+        }),
+    )
+    .await;
+    let cfg = XhttpConfig::from_xray(&xs).unwrap();
+    let sockets = Arc::new(SocketFactory::default());
+    let id = *uuid::Uuid::parse_str(UUID).unwrap().as_bytes();
+    for alpn in [Some("h2"), Some("http/1.1"), None] {
+        eprintln!("CDN XHTTP ALPN: {alpn:?}");
+        let port = if alpn.is_some() { tls_port } else { plain_port };
+        let protocols: Vec<String> = alpn.into_iter().map(str::to_string).collect();
+        let tls = alpn.map(|_| {
+            let tc = unbihex_engine::config::TlsConfig {
+                enabled: true,
+                sni: Some("cdn.test".into()),
+                alpn: protocols.clone(),
+                pinned_sha256: Vec::new(),
+                fingerprint: Some("none".into()),
+            };
+            TlsClient::with_extra_roots(&tc, "cdn.test", vec![outer.cert_der.clone()]).unwrap()
+        });
+        let x = XhttpClient::new(
+            &cfg,
+            endpoint(port),
+            sockets.clone(),
+            tls,
+            &protocols,
+            Some("cdn.test"),
+            None,
+            None,
+        )
+        .unwrap();
+        let ob = VlessOutbound::from_parts("cdn", id, endpoint(port), None, sockets.clone())
+            .with_xhttp(Some(Arc::new(x)));
+        plain_roundtrip(&ob, echo).await;
+        udp_roundtrip(&ob, uecho).await;
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn xhttp_against_xray() {
     let Some(bin) = xray_bin() else {
@@ -479,7 +578,7 @@ async fn xhttp_against_xray() {
                 "streamSettings": { "network": "xhttp", "xhttpSettings": xs }
             }
         ],
-        "outbounds": [{ "protocol": "freedom" }]
+        "outbounds": [loopback_freedom()]
     });
     let xray = start_xray(&bin, config).await;
     let uuid = *uuid::Uuid::parse_str(UUID).unwrap().as_bytes();
