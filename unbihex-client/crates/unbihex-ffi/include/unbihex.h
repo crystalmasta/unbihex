@@ -1,4 +1,4 @@
-/* Unbihex engine C ABI (SPEC §14.1). Used by the iOS Packet Tunnel extension. */
+/* Unbihex engine C ABI (SPEC §13.2). Used by the iOS Packet Tunnel extension. */
 #ifndef UNBIHEX_H
 #define UNBIHEX_H
 

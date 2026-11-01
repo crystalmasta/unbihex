@@ -1,4 +1,4 @@
-//! TLS client (SPEC §11.4): rustls + ring + webpki roots, optional leaf pinning, and a
+//! TLS client (SPEC §11.2): rustls + ring + webpki roots, optional leaf pinning, and a
 //! browser ClientHello (`fingerprint`). Certificate verification can never be disabled.
 
 use std::sync::Arc;

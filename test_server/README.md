@@ -27,7 +27,7 @@ test_server x25519 [-i ключ]                пара ключей REALITY и
 test_server version
 ```
 
-Конфиг — JSON ядра ([`../unbihex-engine/SPEC.md`](../unbihex-engine/SPEC.md), §5 и §17) с inbound'ом `vless`.
+Конфиг — JSON ядра ([`../unbihex-engine/SPEC.md`](../unbihex-engine/SPEC.md), §5 и §16) с inbound'ом `vless`.
 Примеры: [`config.example.json`](config.example.json) (TLS) и [`config.reality.example.json`](config.reality.example.json) (REALITY).
 
 ## Быстрый старт с REALITY

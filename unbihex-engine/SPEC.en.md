@@ -1,138 +1,112 @@
-# Unbihex — functional specification (clean room)
+# Unbihex Engine — specification
 
 [Русский](SPEC.md) · **English**
 
-> This is the original MVP specification (0.1). Since then the engine has gained much of what is listed below as
-> "non-goals": REALITY, XTLS Vision, XHTTP, XUDP (mux), geosite/geoip and `.srs` databases, hot reload, a mixed inbound.
-> For tests and measurements there is a test server, described in §17.
-> The layout in §2 is the original plan; the engine is now a single `unbihex-engine` crate.
-> What has been done is in [`../unbihex-client/PROGRESS.en.md`](../unbihex-client/PROGRESS.en.md).
-
-Specification version: 0.1 (MVP). Implementation language: Rust (edition 2021, stable).
-This document describes **behaviour and interfaces**. Wire formats come from public specifications, linked in each section. The clean-room rules are described in `docs/CLEANROOM.md`.
+Engine 0.1.6, crate `unbihex-engine`, Rust edition 2024 (stable, ≥ 1.88).
+This document describes the **behaviour and interfaces** of the engine. Wire formats come from public specifications,
+linked in each section. A change of engine behaviour updates this document and its Russian version first.
 
 ---
 
-## 1. Goal
+## 1. Purpose
 
-Unbihex is a client proxy engine. It captures **all of the device's traffic** through a virtual network interface (TUN), routes connections by rules and sends them directly or through a remote proxy server. The MVP supports VLESS over TLS, Shadowsocks AEAD and SOCKS5.
+Unbihex is a client proxy engine. It takes traffic in (a TUN with all of the device's traffic, local SOCKS5/HTTP
+ports), routes connections by rules and sends them directly, blocks them or passes them through a proxy server.
 
-Target platforms:
+Protocols: VLESS (TLS, REALITY, XTLS Vision, XHTTP, XUDP), Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
+TLS and REALITY send a Chrome ClientHello. Rules understand domains, addresses, ports, geosite/geoip databases and
+sing-box rule-sets. Routing and outbounds can be replaced on the fly without dropping open connections.
 
-| Platform | How it runs | Who sets up routes and DNS |
+Where it runs (engine hosts: §13):
+
+| Platform | Who runs the engine | Who sets up routes and DNS |
 |---|---|---|
-| Linux | CLI `unbihex` (root / CAP_NET_ADMIN) | Unbihex itself (`ip`, `resolvectl`) |
-| Windows 10+ | CLI `unbihex.exe` (administrator, `wintun.dll` next to it) | Unbihex itself (`netsh`, `route`) |
-| macOS | CLI `unbihex` (root) | Unbihex itself (`route`, `networksetup`) |
-| Android 7+ | the `libunbihex.so` library (JNI) inside a `VpnService` | the app, through `VpnService.Builder` |
-| iOS 15+ | the `libunbihex.a` static library (C ABI) inside an `NEPacketTunnelProvider` | the app, through `NEPacketTunnelNetworkSettings` |
-
-Non-goals of the MVP: REALITY, XTLS Vision, WebSocket, gRPC, XHTTP, mux, Shadowsocks 2022, geoip/geosite databases, GUI. The architecture must not prevent adding them later.
+| Windows 10+ | the `unbihex-client` app (Tauri) or `unbihex-cli`; TUN mode as administrator, with `wintun.dll` next to it | the client (§12) |
+| Linux | `unbihex-cli` (root / CAP_NET_ADMIN for TUN) | the client (§12) or the administrator (`--no-routes`) |
+| macOS | `unbihex-cli` (root for TUN) | the client (§12) |
+| Android 7+ | the `unbihex-client` app: the engine in-process, the TUN from `VpnService` | `VpnService.Builder` |
+| iOS 15+ | a static library (`unbihex-ffi`, C ABI) in `NEPacketTunnelProvider` | `NEPacketTunnelNetworkSettings` |
 
 ---
 
-## 2. Repository layout
+## 2. Crate layout
 
 ```
-unbihex/
-├─ Cargo.toml                 # [workspace], shared dependency versions in [workspace.dependencies]
-├─ crates/
-│  ├─ unbihex-engine/              # lib: all the logic, no main and no FFI
-│  │  └─ src/
-│  │     ├─ lib.rs            # pub mod ...; pub use; struct Instance (see §4)
-│  │     ├─ error.rs          # enum Error (thiserror), type Result<T>
-│  │     ├─ address.rs        # Address, TargetAddr
-│  │     ├─ session.rs        # Session, Network
-│  │     ├─ config.rs         # serde config structs (§5) + validation
-│  │     ├─ link.rs           # parsing vless://, ss://, hy2:// (§5.4, §5.5)
-│  │     ├─ router.rs         # rules (§6)
-│  │     ├─ dispatcher.rs     # outbound choice + relay (§7)
-│  │     ├─ relay.rs          # bidirectional copy with timeouts
-│  │     ├─ net/
-│  │     │  ├─ mod.rs
-│  │     │  └─ socket.rs      # SocketFactory: binding to the physical interface / protect (§9)
-│  │     ├─ dns/
-│  │     │  ├─ mod.rs
-│  │     │  ├─ fakeip.rs      # fake-IP pool (§8.1)
-│  │     │  ├─ server.rs      # handling DNS queries from the TUN (§8.2)
-│  │     │  └─ client.rs      # a minimal UDP DNS client to the upstream (§8.3)
-│  │     ├─ inbound/
-│  │     │  ├─ mod.rs
-│  │     │  ├─ socks.rs       # SOCKS5 server (§10.1)
-│  │     │  ├─ http.rs        # HTTP proxy (§10.2)
-│  │     │  └─ tun.rs         # TUN + userspace TCP/IP stack (§10.3)
-│  │     ├─ outbound/
-│  │     │  ├─ mod.rs         # trait Outbound, PacketStream, factory from the config
-│  │     │  ├─ direct.rs
-│  │     │  ├─ block.rs
-│  │     │  ├─ socks.rs       # SOCKS5 client (§11.3)
-│  │     │  ├─ tls.rs         # rustls client wrapper (§11.4)
-│  │     │  ├─ xhttp/         # XHTTP: HTTP/1.1 and HTTP/2, CDN format (§11.7)
-│  │     │  ├─ hysteria2/     # Hysteria 2: QUIC, HTTP/3, Salamander (§11.8)
-│  │     │  ├─ vless.rs       # §11.1
-│  │     │  └─ shadowsocks.rs # §11.2
-│  │     └─ platform/         # desktop system routes/DNS (§12), behind the "system-routes" feature
-│  │        ├─ mod.rs         # trait SystemNetwork + RouteGuard (RAII rollback)
-│  │        ├─ linux.rs
-│  │        ├─ macos.rs
-│  │        └─ windows.rs
-│  ├─ unbihex-cli/               # bin "unbihex" (§13)
-│  └─ unbihex-ffi/               # cdylib + staticlib "unbihex": C ABI + JNI (§14), include/unbihex.h
-├─ examples/
-│  ├─ config.tun.json
-│  ├─ config.socks.json
-│  ├─ android/UnbihexVpnService.kt
-│  └─ ios/PacketTunnelProvider.swift
-├─ docs/  (SPEC.md, CLEANROOM.md, cleanroom-log.md)
-└─ .github/workflows/ci.yml   # §16
+unbihex-engine/
+├─ Cargo.toml        # features: server (test server, §16), test-util (test helpers)
+├─ SPEC.md, SPEC.en.md, HYSTERIA2.md, README*.md, LICENSE
+├─ vendor/
+│  ├─ rustls/        # rustls 0.23.46 + a ClientHello rewrite hook (UNBIHEX-PATCH.md)
+│  └─ ipstack/       # ipstack 1.0.1 + 5 TCP stack changes (UNBIHEX-PATCH.md)
+├─ src/
+│  ├─ lib.rs         # Instance, PlatformHooks (§4)
+│  ├─ address.rs     # Address, TargetAddr, SOCKS5-style addresses
+│  ├─ session.rs     # Session, Network
+│  ├─ config.rs      # config (§5) and checks
+│  ├─ link.rs        # vless://, ss://, hy2:// share links (§5.4)
+│  ├─ router.rs      # rules (§6)
+│  ├─ rules/         # geosite/geoip (geodata.rs), .srs (srs.rs), succinct trie, IP sets (§6.2)
+│  ├─ dispatcher.rs  # outbound choice, address checks, hot table swap (§7)
+│  ├─ relay.rs       # bidirectional copying (§7)
+│  ├─ stats.rs       # traffic counters: proxied and direct
+│  ├─ sniff.rs       # name from TLS SNI / HTTP Host (§10.3)
+│  ├─ net/socket.rs  # SocketFactory (§9)
+│  ├─ dns/           # fake IP (§8.1), TUN DNS server (§8.2), upstream client and resolvers (§8.3)
+│  ├─ inbound/       # socks, http, mixed, tun (§10); vless, reality, reality_shape, mux: `server` feature only (§16)
+│  └─ outbound/      # vless, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
+│                    # hysteria2/, shadowsocks, socks, direct, block (§11)
+└─ tests/            # integration.rs, xray_interop.rs, hysteria2_interop.rs (§15)
 ```
 
-### 2.1 Dependencies (versions: the latest compatible at implementation time)
+The client (`../unbihex-client`) and the test server (`../test_server`) use the engine by relative path and carry the
+same `[patch.crates-io]` for `vendor/rustls` and `vendor/ipstack`.
 
-`tokio` (rt-multi-thread, net, io-util, time, sync, macros, signal), `async-trait`, `bytes`, `serde` + `serde_json`, `thiserror`, `anyhow` (cli/ffi only), `tracing` + `tracing-subscriber`, `clap` (derive, cli only), `uuid`, `url`, `percent-encoding`, `base64`, `idna`, `ipnet`, `rand`, `lru`.
+### 2.1 Dependencies
 
-- Network: `socket2`, `netdev` (detecting the physical interface and the default gateway), `tun-rs` (async), `ipstack` (userspace TCP/IP).
+- Async and data: `tokio`, `tokio-util`, `async-trait`, `bytes`, `arc-swap`, `parking_lot`, `serde` + `serde_json`,
+  `thiserror`, `tracing`, `uuid`, `url`, `percent-encoding`, `base64`, `hex`, `idna`, `ipnet`, `rand`, `lru`,
+  `regex-lite`, `flate2`.
+- Network: `socket2`, `netdev` (physical interface and gateway), `tun-rs`, `ipstack` (userspace TCP/IP, patched).
 - DNS: `hickory-proto`.
-- TLS: `tokio-rustls` / `rustls` 0.23 **with the `ring` provider**, without `aws-lc-rs` (it needs cmake and nasm), plus `webpki-roots`.
-- Cryptography: `aes-gcm`, `chacha20poly1305`, `hkdf`, `sha1`, `md-5`.
+- TLS: `rustls` 0.23 (patched) / `tokio-rustls` **with the `ring` provider**, without `aws-lc-rs` (it needs cmake and
+  nasm); `webpki-roots`; `ml-kem` + `x25519-dalek` (X25519MLKEM768), `hmac`, `sha2`.
+- HTTP: `h2`, `http` (XHTTP).
 - QUIC (Hysteria 2): `quinn` (runtime-tokio, rustls-ring), `h3`, `h3-quinn`; Salamander: `blake2`.
-- FFI: `jni` (only `cfg(target_os = "android")`).
+- Shadowsocks cryptography: `aes-gcm`, `chacha20poly1305`, `hkdf`, `sha1`, `md-5`.
+- Platform: `libc` (unix), `windows-sys` (Windows, `IP_UNICAST_IF`).
 
-Platform dependencies go under `[target.'cfg(...)'.dependencies]`.
+### 2.2 Code rules
+
+- `unsafe_code = "deny"`. Exceptions with `#[allow(unsafe_code)]` and a comment: only `net/socket.rs` (setsockopt on
+  Windows) and `inbound/tun.rs` (taking the fd from the OS).
+- `clippy::unwrap_used = "deny"`, `expect_used = "warn"`: no panics on network data.
+- Public items must be documented (`missing_docs = "warn"`).
 
 ---
 
-## 3. Base types (the interfaces are mandatory, the names are fixed)
+## 3. Core types
 
 ```rust
 // address.rs
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Address { Ip(std::net::IpAddr), Domain(String) }   // Domain is always ASCII lowercase (punycode)
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TargetAddr { pub addr: Address, pub port: u16 }
-// impl Display ("host:port", IPv6 in square brackets), FromStr, From<SocketAddr>
+pub struct TargetAddr { pub addr: Address, pub port: u16 }  // Display: "host:port", IPv6 in brackets
 
 // session.rs
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Network { Tcp, Udp }
-
-#[derive(Clone, Debug)]
 pub struct Session {
     pub network: Network,
     pub source: Option<std::net::SocketAddr>,
     pub target: TargetAddr,          // after the domain is restored from a fake IP
     pub inbound_tag: String,
+    pub sniffed: Option<String>,     // TUN: the SNI / Host name of a connection to a real IP (§10.3)
 }
+// Session::domain(): the target's domain, else the sniffed name; domain rule conditions see it.
 
 // outbound/mod.rs
-pub trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
-impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> AsyncStream for T {}
-pub type BoxStream = Box<dyn AsyncStream>;
+pub type BoxStream = Box<dyn AsyncStream>;                   // AsyncRead + AsyncWrite + Unpin + Send
 
-/// A UDP "stream" to ONE fixed destination address (session.target).
 #[async_trait::async_trait]
-pub trait PacketStream: Send + Sync {
+pub trait PacketStream: Send + Sync {                        // a UDP flow to ONE destination (session.target)
     async fn send(&self, payload: &[u8]) -> Result<()>;
     async fn recv(&self, buf: &mut [u8]) -> Result<usize>;
 }
@@ -142,47 +116,59 @@ pub trait Outbound: Send + Sync {
     fn tag(&self) -> &str;
     async fn connect_tcp(&self, sess: &Session) -> Result<BoxStream>;
     async fn connect_udp(&self, sess: &Session) -> Result<Box<dyn PacketStream>>;  // may return Error::Unsupported
+    fn server(&self) -> Option<&ServerEndpoint> { None }     // the proxy server: its addresses stay off the TUN
+    fn is_direct(&self) -> bool { false }
+    fn is_block(&self) -> bool { false }
+    async fn connect_tcp_resolved(&self, sess: &Session, ips: &[IpAddr]) -> Result<BoxStream>;   // connect_tcp by default
+    async fn connect_udp_resolved(&self, sess: &Session, ips: &[IpAddr]) -> Result<Box<dyn PacketStream>>;
 }
 ```
 
-- Every outbound receives an `Arc<SocketFactory>` (§9) and creates network sockets **only** through it.
-- Inbounds know nothing about specific outbounds and hand connections to the `Dispatcher` (§7).
+- Every outbound gets an `OutboundContext`: the `SocketFactory` (§9), a resolver for destinations, a resolver for
+  server names and the fake-IP pool. Network sockets are created **only** through the `SocketFactory`.
+- Inbounds know nothing about particular outbounds and hand connections to the `Dispatcher` (§7).
 
 ---
 
 ## 4. Lifecycle
 
 ```rust
-pub struct Instance { /* ... */ }
-impl Instance {
-    pub async fn start(config: Config, platform: PlatformHooks) -> Result<Instance>;
-    pub async fn shutdown(self);        // stops all inbounds, waits for tasks to finish (at most 5 s)
-}
 pub struct PlatformHooks {
-    pub tun_fd: Option<i32>,                                         // mobile: the fd given by the OS; desktop: None (Unbihex creates the TUN itself)
-    pub protect: Option<Arc<dyn Fn(i32) -> bool + Send + Sync>>,     // Android VpnService.protect
-    pub bind_interface: Option<InterfaceBinding>,                    // desktop: the physical interface (§9)
-    pub system_dns_bypasses_tun: bool,                               // the process's system DNS skips the TUN (Android)
+    pub tun_fd: Option<i32>,                 // mobile: the fd from the OS; desktop: None (the engine creates the device)
+    pub protect: Option<ProtectFn>,          // Android: VpnService.protect(fd)
+    pub bind_interface: Option<InterfaceBinding>,  // desktop: the physical interface (§9)
+    pub system_dns_bypasses_tun: bool,       // the process's system DNS bypasses the TUN (Android)
+}
+impl Instance {
+    pub async fn start(config: Config, hooks: PlatformHooks) -> Result<Instance>;
+    pub async fn reload(&self, config: Config) -> Result<()>;   // hot reload
+    pub fn tun_info(&self) -> Option<&TunInfo>;                 // interface name, index, addresses, DNS, MTU
+    pub fn server_ips(&self) -> Vec<IpAddr>;                    // proxy server addresses (routes around the TUN, §12)
+    pub fn counters(&self) -> Arc<stats::Counters>;             // proxy_up/down, direct_up/down
+    pub async fn shutdown(self);                                // stops the inbounds, waits up to 5 s for the tasks
 }
 ```
 
-No runtime requirement: the `ipstack` in `vendor/ipstack` closes a TCP stream without blocking (in stock 1.0.1 its `Drop` called `block_in_place`, so a tun inbound needed a multi-threaded tokio runtime). It also scales the TCP window (RFC 7323) when the app's SYN offers it: windows past 64 KB both ways; it takes no more than `read_buffer_size` (1 MiB) of unread data from an app: the window closes, and after a read the stack announces the new window itself; it resends lost data on a timer, not only on the app's next packet, and resets (RST) a stream out of retransmissions (`vendor/ipstack/UNBIHEX-PATCH.md`). The stack's packets wait for room in a full device queue instead of being dropped: ipstack has no congestion control.
+The `start` order:
 
-`start` order:
+1. Check the config (§5.2). Set `limits.socket_buffer` for the whole process.
+2. Create the `SocketFactory`: binding from `route.default_interface`, else `hooks.bind_interface`; `route.default_mark`.
+3. Pick the resolvers (§8.3). Proxy server names are resolved **before** traffic is captured: with the system resolver
+   on desktop, through `dns.upstream` on mobile (with `system_dns_bypasses_tun`, the system resolver first, issue #14).
+4. Build the outbounds, the router (geosite/geoip/rule-sets go into a cache), the Dispatcher and the TUN DNS server.
+5. Start the inbounds. Any error rolls back what was started and is returned from `start`.
 
-1. Validate the config.
-2. Create the `SocketFactory`.
-3. Resolve proxy server names **before** capturing traffic: through the system resolver on desktop, through the DNS upstream on mobile. Cache the IPs. With `system_dns_bypasses_tun` (Android: the VPN service excludes the app itself, so its system DNS bypasses the tunnel), server names and direct targets resolve through the system resolver first (up to 3 s) and through `dns.upstream` only if it fails: networks that block 1.1.1.1 and 8.8.8.8 otherwise keep the tunnel from even starting (issue #14).
-4. Build the outbounds, router, dispatcher and fake DNS.
-5. Start the inbounds.
-
-If any step fails, undo what has been done and return the error.
+**Hot reload.** `reload` checks the config again, builds outbounds and the router and swaps the Dispatcher's table
+atomically (`arc-swap`). Open connections stay on their old outbounds; new ones use the new table at once. Inbounds,
+`dns`, `limits`, `route.default_interface` and `route.default_mark` cannot change this way: when they differ, `reload`
+returns an error and changes nothing. Server names on reload resolve through the engine's own DNS client (with the TUN
+up, the system resolver answers with fake IPs). Loaded geosite/geoip data is reused.
 
 ---
 
 ## 5. Configuration (JSON)
 
-### 5.1 Full example
+### 5.1 Example
 
 ```json
 {
@@ -190,103 +176,143 @@ If any step fails, undo what has been done and return the error.
   "inbounds": [
     { "type": "tun", "tag": "tun-in", "name": "unbihex0", "mtu": 1500,
       "ipv4": "10.199.233.1/30", "ipv6": "fdb5:2f3c:9a17::1/126",
-      "auto_route": true, "dns_hijack": true },
-    { "type": "socks", "tag": "socks-in", "listen": "127.0.0.1:1080" },
-    { "type": "http",  "tag": "http-in",  "listen": "127.0.0.1:8080" }
+      "auto_route": true, "dns_hijack": true, "sniff": true },
+    { "type": "mixed", "tag": "socks-in", "listen": "127.0.0.1:10808" },
+    { "type": "http",  "tag": "http-in",  "listen": "127.0.0.1:10809" }
   ],
   "outbounds": [
     { "type": "vless", "tag": "proxy", "server": "example.com", "port": 443,
-      "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
-      "tls": { "enabled": true, "sni": "example.com", "alpn": ["http/1.1"] } },
+      "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811", "flow": "xtls-rprx-vision",
+      "reality": { "server_name": "www.example.org", "public_key": "<base64url>", "short_id": "6ba85179e30d4fc2" } },
+    { "type": "link", "tag": "cdn", "url": "vless://...type=xhttp&mode=packet-up&security=tls...#name" },
+    { "type": "hysteria2", "tag": "hy2", "server": "hy.example", "port": 443, "password": "user:pass",
+      "salamander_password": "obfs-key" },
     { "type": "shadowsocks", "tag": "ss", "server": "1.2.3.4", "port": 8388,
       "method": "chacha20-ietf-poly1305", "password": "secret" },
-    { "type": "socks", "tag": "socks-out", "server": "10.0.0.5", "port": 1080,
-      "username": "u", "password": "p" },
-    { "type": "link", "tag": "from-link", "url": "vless://...#name" },
+    { "type": "socks", "tag": "socks-out", "server": "10.0.0.5", "port": 1080, "username": "u", "password": "p" },
     { "type": "direct", "tag": "direct" },
     { "type": "block",  "tag": "block" }
   ],
   "route": {
+    "geosite": "geosite.dat", "geoip": "geoip.dat",
+    "rule_sets": [ { "tag": "ads", "path": "ads.srs" } ],
     "rules": [
+      { "domain": ["ads.example.com"], "outbound": "block" },
       { "ip_private": true, "outbound": "direct" },
-      { "domain_suffix": ["ru", "рф"], "outbound": "direct" },
-      { "domain_keyword": ["doubleclick"], "outbound": "block" },
+      { "geosite": ["category-ru"], "outbound": "direct" },
+      { "rule_set": ["ads"], "outbound": "block" },
       { "network": "udp", "port": [443], "outbound": "block" }
     ],
     "final": "proxy"
   },
-  "dns": {
-    "fakeip_range": "198.18.0.0/15",
-    "upstream": ["1.1.1.1:53", "8.8.8.8:53"],
-    "ttl": 10
-  },
+  "dns": { "fakeip_range": "198.18.0.0/15", "upstream": ["1.1.1.1:53", "8.8.8.8:53"], "ttl": 10,
+           "allow_private_answers": ["plex.direct"] },
   "limits": { "max_connections": 4096, "tcp_idle_secs": 300, "udp_idle_secs": 60,
               "handshake_timeout_secs": 10, "socket_buffer": 0 }
 }
 ```
 
+Outbound fields are described in §11, rules in §6, DNS in §8.
+
 ### 5.2 Validation rules
 
-- Inbound and outbound tags are unique within their lists. Every `outbound` in the rules and `route.final` refers to an existing tag.
-- If `route.final` is not set, the first outbound is used.
-- Unknown fields are an error (`#[serde(deny_unknown_fields)]`), so typos do not pass silently.
+- At least one outbound is required. Inbound and outbound tags are non-empty and unique within their list; rule
+  `outbound` values and `route.final` refer to existing tags; a rule's `rule_set` refers to a tag in `route.rule_sets`;
+  a rule with `geosite` or `geoip` needs `route.geosite` / `route.geoip`.
+- Without `route.final` the first outbound is used.
+- Unknown fields are an error (`deny_unknown_fields`), so typos do not pass silently. The JSON may start with a BOM.
 - TLS has **no** option to disable certificate verification.
-- Mobile (`tun_fd` set): a tun inbound ignores `name`, `auto_route` and the addresses, which the OS manages. At most one tun inbound is allowed.
-- The `limits` defaults are the values in the example.
-- `limits.socket_buffer` is how many bytes to ask the kernel for in `SO_RCVBUF`/`SO_SNDBUF` of every TCP socket carrying tunnel traffic. The default is `0`: the sockets are left alone and the kernel tunes the buffer (on Linux an explicit size turns autotuning off; on a 50 ms path with MTU 1500 autotuning gave 64 MB/s against 55, without the drops to 1 MB/s that 4 MiB sometimes had). An explicit value is a cap, not an allocation: 65536 to 16777216 bytes, anything else is a config error; the kernel still clamps it to `net.core.{r,w}mem_max`.
+- A SOCKS/HTTP/mixed inbound without `users` is allowed only on a loopback address: otherwise it is an open proxy.
+- VLESS without TLS or REALITY is refused unless `allow_plaintext: true` (§11.1). Vision needs TLS or REALITY and does
+  not work over XHTTP. `tls` and `reality` together are an error.
+- At most one tun inbound; `ipv4` is /30 or shorter; `mtu` ≥ 576. Mobile (`tun_fd`): `name`, `auto_route` and the
+  addresses are ignored, the OS manages them; `tun_fd` without a tun inbound is an error.
+- `route.default_interface` is not empty; `route.default_mark` is not 0 and Linux only.
+- `limits.socket_buffer` is 0 (the OS tunes the buffers: on Linux an explicit size turns autotuning off; on a 50 ms
+  path with MTU 1500 autotuning gave 64 MB/s against 55, without the drops to 1 MB/s seen with 4 MiB) or
+  65,536…16,777,216 bytes; it is a ceiling for `SO_RCVBUF`/`SO_SNDBUF`, and the OS caps it by `net.core.{r,w}mem_max`.
+- `limits` defaults are as in the example.
 
 ### 5.3 `tun` defaults
 
-`name` = `unbihex0` (on macOS `utunN`, chosen by the OS), `mtu` = 1500, `ipv4` = `10.199.233.1/30`, no `ipv6`, `auto_route` = true, `dns_hijack` = true, `sniff` = true. The fake-DNS server address inside the TUN is **the second address of the ipv4 subnet** (for `/30` that is `10.199.233.2`).
+`name` = `unbihex0` (on macOS `utunN`, picked by the OS), `mtu` = 1500, `ipv4` = `10.199.233.1/30`, no `ipv6`,
+`auto_route` = true, `dns_hijack` = true, `sniff` = true. The DNS server inside the TUN is at the **second address of
+the ipv4 subnet** (`10.199.233.2` for a `/30`).
 
 ### 5.4 Share links (`type: "link"`)
 
-- `vless://<uuid>@<host>:<port>?security=tls&sni=<sni>&alpn=<a,b>&type=tcp&encryption=none#<name>`
-  - Supported: `type=tcp|raw` (or none) and `type=xhttp|splithttp` (with `path`, `host`, `mode`, `extra`, §11.7),
-    `security=tls|reality|none` (REALITY takes `pbk`, `sid`, `sni`, `fp`) and `flow=xtls-rprx-vision` (`-udp443` too).
-    Other `type` values (`ws`, `grpc`, …), `flow`, `encryption` and `headerType` give a clear `Unsupported("...")` error.
-  - If `sni` is not set, the host is used.
-  - The host may be IPv6 in brackets.
-  - Parameters are percent-decoded.
-- `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002), and the legacy form `ss://<base64(method:password@host:port)>#name`. Base64 is accepted with and without padding.
-- Plugins (`?plugin=`) are not supported; they are an error.
-- `hysteria2://` and `hy2://`: §5.5.
+The `{"type": "link", "tag", "url", "allow_plaintext"?, "fragment"?}` outbound parses the link when the outbound is
+built; `allow_plaintext` and `fragment` are carried into VLESS. Parsing (`link.rs`): all parameters are
+percent-decoded, the host may be IPv6 in brackets.
+
+- `vless://<uuid>@<host>:<port>?…#<name>`:
+  - `security=tls|reality|none`; `sni` / `serverName` (the host by default), `alpn`, `fp` / `fingerprint` (§11.2);
+    REALITY takes `pbk` / `publicKey`, `sid` / `shortId`;
+  - `type=tcp|raw` (or none), or `type=xhttp|splithttp` with `path`, `host`, `mode`, `extra` (Xray settings JSON, §11.5);
+  - `flow=xtls-rprx-vision` (`-udp443` too);
+  - other `type` values (`ws`, `grpc`, …), `flow`, `encryption`, `headerType` and `security` values give a clear
+    `Unsupported("...")` error.
+- `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002) and the legacy
+  `ss://<base64(method:password@host:port)>#name`; base64 with or without padding. Plugins (`?plugin=`) are an error.
+- `hysteria2://` / `hy2://<auth>@<host>[:port]/?…#<name>` (§11.7): the whole percent-decoded userinfo is the
+  authentication string (including `user:password`); the default port is 443. Parameters: `sni` / `peer` /
+  `serverName`, `pinSHA256`, `obfs=salamander` + `obfs-password`, `insecure=0`. Refused: `insecure=1`,
+  `allowInsecure=1`, `skip-cert-verify=1`, `alpn` other than `h3`, `security` other than `tls`, port hopping
+  (`mport`, `ports`, `hopInterval`), `ech`, `ca`, other obfs. Skipped: `fp` (a TCP/uTLS hint; there is no browser QUIC
+  fingerprint), bandwidth (`up`, `down`, `upmbps`, `downmbps` ask for Brutal, which is absent) and other unknown
+  parameters.
 
 ---
 
-### 5.5 Native Hysteria 2 outbound
-
-`type: "hysteria2"`: `tag`, `server`, `port`, `password` (the entire auth string),
-optional `sni`, `pinned_sha256`, `salamander_password`. TLS 1.3 / ALPN `h3` and WebPKI
-verification are mandatory; optional leaf pins are additional checks, not a bypass.
-`SocketFactory` creates/protects the QUIC socket before optional Salamander wrapping.
-TCP, demultiplexed UDP with bounded reassembly, shared authenticated connections and
-reconnection for new flows are supported. `hysteria2://` / `hy2://` default to port 443
-and support IPv6 and percent-encoded auth. Xray/sing-box import preserves TLS/SNI/obfs;
-unimplemented wire/verification options are refused rather than dropped.
-Panel `fp` values are TCP/uTLS hints, not a promise of browser QUIC emulation.
-Hysteria 1, hopping, ECH and insecure TLS are not implemented; such links are refused.
-Bandwidth (`up`/`down`, `upmbps`/`downmbps`) asks for Brutal, which is absent: it is
-skipped and QUIC's own congestion control works. Unknown link parameters are skipped too.
-See [HYSTERIA2.md](HYSTERIA2.md) for the full contract, limits and verification commands.
-
 ## 6. Routing
 
-- A rule is an object with optional condition fields and a mandatory `outbound`. Fields: `domain` (exact match), `domain_suffix`, `domain_keyword` (substring), `ip_cidr` (IPv4/IPv6), `ip_private` (bool), `port` (a list of u16 or `"1000-2000"` strings), `network` (`"tcp"` | `"udp"`), `inbound` (a list of tags).
-- The fields form groups: domain (`domain`, `domain_suffix`, `domain_keyword`), IP (`ip_cidr`, `ip_private`), `port`, `network`, `inbound`. A rule matches if **all** the groups it sets match (AND). Within a group one match is enough (OR). The first matching rule wins. If none matches, `final` is used.
-- Consecutive rules with the same outbound and only domain (or only CIDR) conditions are merged into one. The matching order does not change.
-- `domain_suffix: "example.com"` matches `example.com` and `a.example.com`, but not `badexample.com`. A leading dot in the config is allowed and ignored.
-- All domains in the config are converted to ASCII lowercase through IDNA (`рф` → `xn--p1ai`).
-- If the target is an IP address, domain conditions are false. If the target is a domain, IP conditions are false on the first pick.
-- A decision by the name alone (`Router::pick_by_name`): the first rule with domain conditions that matches the name and
-  has no port, protocol or rule-set conditions decides for every connection to it. IP-only rules are skipped (they do
-  not concern names); a rule without domain conditions before it, and `final`, make no such decision. The TUN DNS
-  server answers NXDOMAIN by it (§8.2).
-- If `direct` is picked, the target is a domain and the decision was not made by a domain rule, the Dispatcher resolves the domain itself (with the same resolver as direct) and runs the rules again for each address (like IPIfNonMatch in Xray). If any address hits `block`, the session is blocked; if the first address leads to the proxy, the session goes to the proxy with the domain; otherwise direct connects only to the checked addresses (without resolving again, so that DNS rebinding cannot bypass the check). Sessions picked for the proxy are never resolved locally: that would leak the name to the local DNS.
-- DNS rebinding protection: when a direct session with a domain gets private addresses (`ip_private`), they are dropped, whatever rule picked the session. With no addresses left the session is blocked. Exceptions: single-label names, `localhost`, and the suffixes in `dns.fakeip_exclude` and `dns.allow_private_answers`. On the test server (with a VLESS inbound) the only exceptions are `dns.allow_private_answers`: a server has no LAN of its own, and `metadata` or `metadata.google.internal` lead to the cloud's metadata service.
-- Direct does not connect to the engine's own listen addresses (a loop), nor to the host's loopback addresses (127/8, ::1, 0.0.0.0, ::) when the client is not on this host (the source is not loopback and the inbound is not TUN).
-- `ip_private` covers: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, 100.64/10, 224/4, 255.255.255.255/32, ::1/128, fc00::/7, fe80::/10, ff00::/8.
-- Performance: keep suffixes in a `HashSet` and check them label by label from the right; CIDRs in a sorted list. A test with 10,000 rules must perform 100,000 matches in under 1 s in release.
+### 6.1 Rules
+
+- A rule is an object with optional conditions and a mandatory `outbound`. Conditions: `domain` (exact name),
+  `domain_suffix`, `domain_keyword` (substring), `geosite`, `ip_cidr`, `ip_private` (bool), `geoip`, `port` (u16 or a
+  `"1000-2000"` string), `network` (`"tcp"` | `"udp"`), `inbound` (tags), `rule_set` (tags).
+- Groups: domain (`domain`, `domain_suffix`, `domain_keyword`, `geosite`), IP (`ip_cidr`, `ip_private`, `geoip`),
+  `port`, `network`, `inbound`, `rule_set`. A rule matches when **all** its groups match (AND); one match inside a
+  group is enough (OR). The first matching rule wins, else `final`.
+- Consecutive rules with the same outbound and only domain (or only CIDR) conditions are merged into one: large lists
+  cost one lookup. The order of matching does not change.
+- `domain_suffix: "example.com"` matches `example.com` and `a.example.com`, not `badexample.com`; a leading dot is
+  allowed. All domains are converted to ASCII lowercase through IDNA (`рф` → `xn--p1ai`).
+- Domain conditions look at `Session::domain()`: the target's domain or the sniffed name (§10.3). With only an IP and
+  no name, domain conditions are false. When the target is a domain, IP conditions are false on the first pick.
+- When `direct` is picked, the target is a domain and no domain rule made the choice, the Dispatcher resolves the
+  domain itself and matches the rules again against each address (like Xray's IPIfNonMatch): any address that hits
+  `block` blocks the session; if the first address leads to a proxy, the session goes there with the domain;
+  otherwise direct connects only to the checked addresses (no second lookup, so DNS rebinding cannot slip past the
+  check). Sessions picked for a proxy are never resolved locally: that would leak the name to local DNS.
+- **A decision by the name alone** (`Router::pick_by_name`): the first rule with domain conditions that matches the
+  name decides for every connection to it, if it has no port, protocol or rule-set conditions. Rules of other inbounds
+  and IP-only rules are skipped (they do not concern names); a rule without domain conditions before it, and `final`,
+  make no such decision. The TUN DNS server answers names blocked this way with NXDOMAIN (§8.2).
+- DNS rebinding protection: when a direct session with a domain got private addresses (`ip_private`), they are
+  dropped whatever rule picked the session; with none left the session is blocked. Exceptions: single-label names,
+  `localhost`, `dns.fakeip_exclude` and `dns.allow_private_answers` suffixes. On the test server (a VLESS inbound
+  exists) only `dns.allow_private_answers` is an exception: a server has no LAN of its own, while `metadata` or
+  `metadata.google.internal` lead to the cloud's metadata service.
+- Direct does not connect to the engine's own listen addresses (a loop) or to the host's loopback addresses (127/8,
+  ::1, 0.0.0.0, ::) unless the client is on this host (a loopback source or the TUN inbound).
+- `ip_private`: 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, 100.64/10, 224/4, 255.255.255.255/32, ::1/128,
+  fc00::/7, fe80::/10, ff00::/8.
+- Performance: exact names and suffixes live in a `HashSet`, suffixes are checked label by label from the right;
+  10,000 merged rules take 100,000 matches in under 2 s even in debug.
+
+### 6.2 Large lists: geosite, geoip, rule-sets
+
+- `route.geosite` / `route.geoip` are `geosite.dat` / `geoip.dat` files (v2fly/Xray protobuf). They are streamed:
+  only the categories the rules mention are decoded. `geosite: ["google@cn"]` is a category with an attribute.
+  Domains are stored in a succinct trie (LOUDS, as in sing-box `.srs`), addresses in sorted merged ranges with binary
+  search.
+- `route.rule_sets: [{ "tag", "path" }]` are sing-box binary rule-sets (`.srs`, versions 1–4): domains (trie),
+  keyword, regex, IP networks, ports, network, logical rules (`and`/`or`) and inversion. Items that make no sense for
+  a proxy client (processes, Wi-Fi, `source_*`, AdGuard rules, network type) are refused on load instead of being
+  ignored silently: a rule must not match more traffic than its author intended. Only rule-sets referenced by rules
+  are loaded.
+- Everything is kept compact so that big lists fit the memory budget of mobile VPN extensions.
 
 ---
 
@@ -295,16 +321,25 @@ See [HYSTERIA2.md](HYSTERIA2.md) for the full contract, limits and verification 
 ```rust
 impl Dispatcher {
     pub async fn dispatch_tcp(&self, sess: Session, inbound: BoxStream);
+    pub async fn dispatch_tcp_sniffing(&self, sess: Session, inbound: BoxStream);   // TUN, §10.3
     pub async fn dispatch_udp(&self, sess: Session, inbound: Box<dyn PacketStream>);
+    pub fn blocks_name(&self, domain: &str, inbound: &str) -> bool;                 // §6.1, §8.2
+    pub fn swap_table(&self, table: Table);                                          // hot reload, §4
 }
 ```
 
-1. Acquire a permit from `Semaphore(max_connections)`. If the limit is reached, close the incoming connection and log at `warn` (at most once a second).
-2. `router.pick(&sess)` → outbound.
-3. Connect through `connect_*` with the `handshake_timeout_secs` timeout.
-4. TCP relay: bidirectional copy. When one side closes (EOF), `shutdown()` the write half of the other side and wait for the second side, but no longer than 10 s. If there is no traffic in either direction for `tcp_idle_secs`, close both ends. The buffer of a direction is 16 KB; once a read fills it (a bulk transfer) it grows to 64 KB: that nearly doubles the throughput, while quiet connections stay at 16 KB.
-5. UDP relay: two tasks (up and down). If there are no packets for `udp_idle_secs`, close. The buffer is 65,535 bytes.
-6. `debug` logs per connection (at `info` they would build up a browsing history): `inbound_tag network source -> target via outbound_tag`. Connection errors are logged at `debug`, so that blocking does not flood the log.
+1. Take a `Semaphore(max_connections)` permit. With the limit reached, close the incoming connection and log at `warn`
+   (at most once a second).
+2. Pick the outbound (§6) from the current table; for direct, resolve and check the addresses (§6.1).
+3. Connect with the `handshake_timeout_secs` timeout.
+4. TCP relay: bidirectional copying. When one side closes (EOF), `shutdown()` the write half of the other and wait for
+   it at most 10 s. With no traffic for `tcp_idle_secs`, close both ends. The buffer per direction is 16 KB; when a read
+   fills it completely (a bulk flow), it grows to 64 KB: that almost doubles the speed, while idle connections stay at
+   16 KB.
+5. UDP relay: two tasks, up and down. With no packets for `udp_idle_secs`, close. The buffer is 65,535 bytes.
+6. Bytes are counted in `stats::Counters`: proxied or direct (`Outbound::is_direct`).
+7. Per-connection logs are at `debug` (at `info` they would add up to a browsing history):
+   `inbound_tag network source -> target via outbound_tag`. Connection errors are at `debug` too.
 
 ---
 
@@ -312,64 +347,80 @@ impl Dispatcher {
 
 ### 8.1 Fake-IP pool
 
-- The range comes from `dns.fakeip_range`, `198.18.0.0/15` by default, IPv4 only. The first and last 2 addresses are not handed out.
-- domain↔ip mappings live in a bidirectional LRU with capacity `min(range size, 65536)`. On eviction the oldest pair is freed, but only if its address has not been used for at least `max(300 s, 4 × dns.ttl)`: otherwise a client with the old address cached would reach another domain. If all addresses are fresh, the A query gets SERVFAIL.
-- A domain always gets the same IP while the pair is alive in the LRU.
-- `lookup_ip(ip) -> Option<String>` and `is_fake(ip) -> bool`. The structure is thread-safe (`Mutex`/`parking_lot`), with short critical sections.
+- The `dns.fakeip_range` range, `198.18.0.0/15` by default, IPv4 only. The first and last 2 addresses are not handed out.
+- domain ↔ ip mappings live in a bidirectional LRU of capacity `min(range size, 65536)`. Eviction frees the oldest pair,
+  but only if its address was unused for at least `max(300 s, 4 × dns.ttl)`: otherwise a client with the old address
+  cached would reach another domain. If all addresses are fresh, the A query gets SERVFAIL.
+- A domain keeps the same IP while its pair lives. `lookup_ip(ip)` and `is_fake(ip)`; critical sections are short.
 
 ### 8.2 DNS server inside the TUN (`dns_hijack: true`)
 
-- **All** UDP datagrams to port 53 are captured, whatever the destination IP. DNS over TCP/53 is captured the same way (RFC 7766: messages with a two-byte length), so queries to the router do not go direct in the clear; at most 64 such connections at once.
-- Parsing with `hickory-proto`. Behaviour:
-  - A → a fake IP, TTL = `dns.ttl`, rcode NOERROR.
-  - AAAA → NOERROR with no answers. This is deliberate: no IPv6 traffic appears that bypasses the fake IPs.
-  - If the name alone is decided by a rule with domain conditions leading to `block` (no port, protocol or rule-set conditions; IP-only rules are skipped, a rule without domain conditions before it takes the decision away), a query of any type gets NXDOMAIN without being forwarded: this is how ad-blocking lists work, apps give up at once instead of retrying connections. `final` = `block` does not decide names.
-  - Other types (MX, TXT, PTR …) and single-label names are forwarded to the upstream as an ordinary UDP session through the Dispatcher (the inbound is the TUN tag): with `final` = proxy the query goes through the proxy, not in the clear. For an outbound without UDP (SOCKS5) the query goes over TCP. The ID is replaced with a random one and restored in the answer; only an answer with the same ID, the QR flag and the same question is accepted. HTTPS/SVCB (types 65/64) may instead be answered with an empty NOERROR, so that browsers do not get ECH/IP hints that bypass the fake IPs. **Chosen:** 64/65 → empty NOERROR.
-  - A malformed packet → FORMERR if the ID can be read, otherwise the packet is dropped.
-- `dns.fakeip_exclude` is a list of domain suffixes (the domain itself and all subdomains match; leading `.`/`*.` are ignored; an invalid entry is a config error) for which A/AAAA/HTTPS/SVCB get no fake answer and are forwarded to the upstream like the other types. Default: `msftconnecttest.com`, `msftncsi.com` (the Windows connectivity check, NCSI, compares real addresses; with fake IPs the network icon shows "no internet"), `local`, `lan`, `localdomain`, `home.arpa`, `internal`, `localhost` (local names must not get fake IPs). An empty list disables the exclusions.
-- When a TCP or UDP session from the TUN arrives at a fake IP, `Session.target` becomes `Domain(lookup_ip)` with the same port. If the mapping is not found (it expired), the TCP connection is reset, the UDP packet is dropped, and a `debug` line is logged.
+- **All** UDP datagrams to port 53 are captured whatever their destination IP, and DNS over TCP/53 (RFC 7766, messages
+  with a two-byte length), so queries to the router do not go direct in the clear; at most 64 TCP connections at once.
+- Parsing with `hickory-proto`. Behaviour, in order:
+  1. A name that a rule with domain conditions leading to `block` decides on its own (§6.1) gets **NXDOMAIN** for a
+     query of any type, without forwarding. This is how ad-blocking lists work: apps give up at once instead of
+     retrying connections that would be reset anyway.
+  2. `dns.fakeip_exclude` names (the domain and its subdomains; leading `.` / `*.` are ignored; an invalid entry is a
+     config error) get the real upstream answer for A/AAAA/HTTPS/SVCB, like other types. Default: `msftconnecttest.com`,
+     `msftncsi.com` (the Windows connectivity check compares real addresses; with fake IPs the network icon shows "no
+     internet"), `local`, `lan`, `localdomain`, `home.arpa`, `internal`, `localhost`. An empty list disables the
+     exclusions.
+  3. A → a fake IP, TTL = `dns.ttl`, NOERROR, also for names leading to `direct`: direct resolves the real address
+     itself (§11.10).
+  4. AAAA, HTTPS, SVCB (28/65/64) → NOERROR with no answers: no IPv6 and no ECH/IP hints that bypass the fake IPs.
+  5. Other types (MX, TXT, PTR …) and single-label names are forwarded to the upstream as a UDP session through the
+     Dispatcher (the inbound is the TUN tag): with a proxy as `final` the query goes through the proxy, not in the
+     clear. For an outbound without UDP (SOCKS5) the query goes over TCP. The ID is replaced with a random one and
+     restored in the answer; only an answer with the same ID, the QR flag and the same question is accepted.
+  6. A malformed packet → FORMERR if the ID can be read, otherwise the packet is dropped.
+- When a TCP or UDP session from the TUN arrives at a fake IP, `Session.target` becomes `Domain(lookup_ip)` with the
+  same port. Without a mapping (it expired) TCP is reset and the UDP packet dropped, with a `debug` line.
 
-### 8.3 DNS client to the upstream
+### 8.3 Upstream DNS client and resolvers
 
-- A minimal client: a UDP socket **from the SocketFactory** (§9), the query built with hickory-proto, a random ID, the ID and question checked in the answer.
-- A 2 s timeout per server. The server that answered last is asked first; while there is no answer, the next one joins in parallel every 300 ms (at once when every running attempt has already failed), and the first answer wins. Without an answer the query is sent to the same server again every 700 ms (one lost datagram must not cost the whole timeout). If the answer is truncated (TC), retry over TCP (a u16 length prefix, RFC 1035 §4.2.2).
-- Queries forwarded from the TUN through the Dispatcher (§8.2) ask the servers the same way, but with a 5 s timeout per server, a 1 s stagger and a resend after 1 s (a flow through a proxy takes a few RTTs to open). The resend goes out alongside the receive, never by cancelling it: UDP over TCP (VLESS) must not lose a half-read packet.
-- A TTL-aware cache: up to 4096 entries, minimum TTL 5 s, maximum 1 h.
-- `resolve(domain) -> Vec<IpAddr>`: A first, AAAA only if the device has an IPv6 route. In the MVP, A only.
+- The client: a UDP socket **from the SocketFactory** (§9), a random ID, the ID and question checked in the answer.
+- 2 s timeout per server. The server that answered last is asked first; while there is no answer, the next one joins
+  in parallel every 300 ms (at once when all running attempts already failed), and the first answer wins. Without an
+  answer the query is resent to the same server every 700 ms. A truncated answer (TC) is retried over TCP (u16 length
+  prefix, RFC 1035 §4.2.2).
+- Queries forwarded from the TUN through the Dispatcher (§8.2) race the servers the same way, with a 5 s timeout, a
+  1 s stagger and a resend after 1 s (a flow through a proxy takes a few RTTs to open). The resend runs alongside the
+  receive loop, never by cancelling it: UDP over TCP (VLESS) must not lose a half-read packet.
+- A TTL-aware cache: up to 4096 entries, TTL from 5 s to 1 h. `resolve(domain)` asks for A.
+- Resolvers: `System` (the OS resolver), `Upstream` (the client above), `SystemThenUpstream` (the OS first, up to 3 s,
+  the upstream on failure; Android, where the VPN excludes the app itself). With a TUN, direct destinations resolve
+  through the upstream: the system resolver would answer with fake IPs.
 
 ---
 
 ## 9. SocketFactory and routing-loop protection
 
-When all traffic is captured, Unbihex's own connections (to the proxy server, direct, the DNS upstream) **must not** enter the TUN again.
+With all traffic captured, the engine's own connections (to the proxy server, direct, DNS upstream) **must not** enter
+the TUN again.
 
 ```rust
 pub struct InterfaceBinding { pub name: String, pub index: u32 }
-pub struct SocketFactory { /* binding, protect */ }
 impl SocketFactory {
     pub async fn tcp_connect(&self, addr: SocketAddr) -> Result<tokio::net::TcpStream>;
-    pub async fn udp_bind(&self, family_v6: bool) -> Result<tokio::net::UdpSocket>;
+    pub async fn udp_bind(&self, family_v6: bool) -> Result<tokio::net::UdpSocket>;   // QUIC too (§11.7)
 }
 ```
 
-The socket is created with `socket2`, configured **before** `connect`/`bind`, then converted to tokio:
+The socket is created with `socket2` and configured **before** `connect`/`bind`, then handed to tokio:
 
 | OS | Mechanism |
 |---|---|
-| Linux / Android | `SO_BINDTODEVICE` (`socket2::Socket::bind_device`) if `Name` is set |
-| macOS / iOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` (`bind_device_by_index_v4/v6`) |
-| Windows | `setsockopt(IPPROTO_IP, IP_UNICAST_IF, htonl(index))` for IPv4 and `setsockopt(IPPROTO_IPV6, IPV6_UNICAST_IF, index)` (host order) for IPv6, through `windows-sys` |
-| Android | if `protect` is set, call `protect(raw_fd)`; `false` → `Error::Protect` |
-| iOS | nothing needed: Network Extension sockets are not routed into its own tunnel |
+| Linux / Android | `SO_BINDTODEVICE` when a binding is set; `SO_MARK` from `route.default_mark` |
+| macOS / iOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` |
+| Windows | `IP_UNICAST_IF` (index in network order) and `IPV6_UNICAST_IF` (host order) through `windows-sys` |
+| Android | `protect(fd)`; `false` → `Error::Protect`, there is no unprotected fallback socket |
+| iOS | nothing: Network Extension sockets do not enter their own tunnel |
 
-On desktop (§12) host routes to the proxy server IPs through the original gateway are added as well.
-
-From the config (as in sing-box): `route.default_interface` is the interface name (on Windows the friendly name
-works too) every outgoing socket is bound to; it replaces the platform layer's binding, and a missing interface
-fails the start. `route.default_mark` is `SO_MARK` (needs `CAP_NET_ADMIN`) for policy routing
-(`ip rule add fwmark …`); Linux only, 0 is not allowed. Neither can change in a hot reload.
-
-TCP: `TCP_NODELAY` = true, keepalive 30 s. Socket buffers: `limits.socket_buffer` (§5).
+- `route.default_interface` is an interface name (a "friendly" name on Windows) that every outgoing socket is bound
+  to; it replaces the platform's binding, and a missing interface fails the start.
+- TCP: `TCP_NODELAY`, keepalive 30 s (interval 10 s), buffers from `limits.socket_buffer` (§5.2).
+- On desktop the client also routes the proxy server addresses around the TUN (§12).
 
 ---
 
@@ -377,51 +428,57 @@ TCP: `TCP_NODELAY` = true, keepalive 30 s. Socket buffers: `limits.socket_buffer
 
 ### 10.1 SOCKS5 (RFC 1928, RFC 1929)
 
-- Authentication methods: `0x00` (none); `0x02` (username and password) if the config sets `users: [{"username","password"}]`. Constant-time comparison.
-- Commands:
-  - CONNECT → `dispatch_tcp`. The `0x00` reply is sent right after the outbound is picked, without waiting for the remote connection: this lowers latency. If the connection fails, the client connection is closed.
-  - UDP ASSOCIATE in the MVP → reply `0x07` (command not supported).
-  - BIND → `0x07`.
-- ATYP 1 (IPv4), 3 (domain, length 1..=255), 4 (IPv6).
-- Handshake timeout: `handshake_timeout_secs`.
+- Authentication: `0x00` none; `0x02` (username and password) when `users: [{"username", "password"}]` are set;
+  constant-time comparison. `loopback_without_auth: true` lets clients from a loopback address in without a password
+  (local apps and the system proxy cannot send one), others still log in.
+- CONNECT → `dispatch_tcp`. Reply `0x00` goes out right after the outbound is picked, without waiting for the remote
+  connection; if connecting fails, the connection is closed. UDP ASSOCIATE and BIND → `0x07`.
+- ATYP 1 (IPv4), 3 (domain 1..=255), 4 (IPv6). The handshake timeout is `handshake_timeout_secs`.
 
 ### 10.2 HTTP proxy (RFC 9110)
 
-- `CONNECT host:port HTTP/1.1` → `HTTP/1.1 200 Connection Established\r\n\r\n`, then relay.
-- An ordinary request with an absolute URI, `GET http://host[:port]/path HTTP/1.1`:
-  - the request line is rewritten into origin form;
-  - `Proxy-Connection` and `Proxy-Authorization` are removed;
-  - the connection goes to `dispatch_tcp`, and the rewritten request is sent first;
-  - `Connection` and `Keep-Alive` are removed and `Connection: close` is added (except `Connection: Upgrade` for WebSocket);
-  - the client may send exactly one request body (by `Content-Length` or chunked); the next request on the same connection closes it. Otherwise a browser reuses the connection for another host and hands this server someone else's cookies and `Proxy-Authorization`.
-  - An ambiguous body length (`Content-Length` together with `Transfer-Encoding`, different `Content-Length` values, `chunked` not last), bare CR/LF and spaces in header names → `400`.
-- Header limit 16 KB, otherwise `431`. A malformed request → `400`.
-- Optional Basic authentication (`users`); without it → `407`.
-- Concurrent unfinished SOCKS/HTTP handshakes are limited to `max_connections`; extra connections are closed at once.
+- `CONNECT host:port` → `HTTP/1.1 200 Connection Established`, then relay.
+- A request with an absolute URI (`GET http://host[:port]/path`): the request line is rewritten to origin form;
+  `Proxy-Connection`, `Proxy-Authorization`, `Connection`, `Keep-Alive` are removed; `Connection: close` is added
+  (except `Connection: Upgrade`). The client may send exactly one request body (`Content-Length` or chunked); the
+  next request on the same connection closes it: otherwise a browser would send this server requests, cookies and
+  `Proxy-Authorization` meant for another host.
+- An ambiguous body length (`Content-Length` with `Transfer-Encoding`, differing `Content-Length`s, `chunked` not
+  last), bare CR/LF and spaces in header names → `400`. Headers over 16 KB → `431`.
+- Basic authentication by `users` (`407` without it), `loopback_without_auth` as for SOCKS.
+- At most `max_connections` unfinished SOCKS/HTTP handshakes at once; extra connections are closed.
 
 ### 10.3 TUN
 
-- **Desktop:** the device is created with `tun-rs` from `name`, `mtu`, `ipv4`, `ipv6`. On Windows wintun is used: `wintun.dll` sits next to the exe; if it is missing, a clear error links to https://www.wintun.net.
-- The engine itself never changes the system's routes or DNS: `auto_route` tells the platform layer (the client,
-  §12) what to do. With `auto_route: false` the client only brings the interface up (a "clean tunnel" for routers
-  and servers), and the admin sets up routing.
-- **Mobile:** the device is opened from `tun_fd`. The fd belongs to the OS layer and Unbihex does not close it: on Android the owner is a ParcelFileDescriptor, on iOS the fd is found by scanning (see the example).
-- Packets are parsed by the `ipstack` userspace stack, MTU = the device MTU.
-  - A TCP connection → `Session{network: Tcp, source, target: dst (with the fake IP restored), inbound_tag}` → `dispatch_tcp`.
-  - A UDP flow → if `dns_hijack` and the destination port is 53, handling per §8.2, otherwise `dispatch_udp` (a PacketStream over the stack's UDP flow).
-  - ICMP: an echo request to a fake IP or any address is dropped in the MVP (the stack may not support it).
-- Traffic to the TUN's own address (other than the fake DNS) is dropped.
-- **Sniffing** (`sniff`, true by default). A TCP connection to a real IP rather than a fake IP happens when an app
+- **Desktop:** the device is created with `tun-rs` (`name`, `mtu`, `ipv4`, `ipv6`). On Windows it is wintun:
+  `wintun.dll` next to the exe, otherwise a clear error with a link to https://www.wintun.net. The engine does not
+  change system routes or DNS: `auto_route` is a hint to the client (§12); with `false` the client only brings the
+  interface up (a "clean tunnel" for routers and servers).
+- **Mobile:** the device is opened from `tun_fd`. The fd belongs to the OS layer; the engine never closes it.
+- Packets are handled by the userspace stack `ipstack` (`vendor/ipstack`, `UNBIHEX-PATCH.md`), MTU = device MTU:
+  - TCP window scaling (RFC 7323) when the app's SYN offers it; a 1 MiB read window, a 256 KiB send window,
+    MSS = MTU − 60;
+  - it accepts at most 1 MiB of unread data: the window closes and reopens by itself after a read;
+  - lost segments are retransmitted on a timer, not only on the app's next packet; out of retries → RST;
+  - closing a stream does not block tokio threads (no multi-threaded runtime required);
+  - packets from the stack to the device wait for room when the queue is full instead of being dropped (ipstack has no
+    congestion control).
+- A TCP connection → `Session{Tcp, source, target (with the fake IP restored), inbound_tag}` → Dispatcher. A UDP flow
+  to port 53 with `dns_hijack` → §8.2, otherwise `dispatch_udp`. ICMP is dropped. Traffic to the TUN's own address
+  (except DNS) is dropped.
+- **Sniffing** (`sniff`, true by default). A TCP connection to a real IP instead of a fake one happens when an app
   resolves the name itself: browser DoH, AdGuard or an antivirus filtering DNS, a cache. Its first bytes (up to
-  300 ms and 16 KB) are read: the name from the SNI of a TLS ClientHello (also one split over several records) or
-  from the `Host` header of HTTP/1.x. The name goes to `Session.sniffed` and only domain conditions of rules (and
-  rule-sets) see it. IP conditions look at the real address, and the connection goes to the original IP (like
-  Xray's `routeOnly`). The bytes read are passed on unchanged. Ports where the server speaks first
-  (21, 25, 110, 143, 587, 3306, 5900) are not waited on. UDP (QUIC) is not parsed.
+  300 ms and 16 KB) are read: the name from the SNI of a TLS ClientHello (including one split across records) or from
+  `Host` in HTTP/1.x. The name goes to `Session.sniffed` and only domain conditions of rules (and rule-sets) see it;
+  IP conditions look at the real address, and the connection goes to the original IP (like Xray's `routeOnly`). The
+  bytes read are passed on unchanged. On ports where the server speaks first (21, 25, 110, 143, 587, 3306, 5900)
+  there is no wait. UDP (QUIC) is not parsed.
 
 ### 10.4 Mixed (SOCKS5 + HTTP on one port)
 
-- `"type": "mixed"` with the same fields as `socks` and `http` (`listen`, `users`, `loopback_without_auth`). The first byte of the connection is read with `peek`, without consuming it: `0x05` → a SOCKS5 handshake (§10.1), otherwise an HTTP proxy (§10.2). Authentication rules, timeout and handshake limit are shared with them. A connection closed before its first byte is simply closed. It is needed by clients that take `HTTP_PROXY` from the environment and send HTTP to the SOCKS port.
+`"type": "mixed"` with the `socks`/`http` fields (`listen`, `users`, `loopback_without_auth`). The first byte is read
+with `peek`: `0x05` → SOCKS5 (§10.1), otherwise HTTP (§10.2); authentication, the timeout and the handshake limit
+are shared. It serves clients that take `HTTP_PROXY` from the environment and send HTTP to the SOCKS port.
 
 ---
 
@@ -431,6 +488,12 @@ TCP: `TCP_NODELAY` = true, keepalive 30 s. Socket buffers: `limits.socket_buffer
 
 Public specification: https://xtls.github.io/en/development/protocols/vless.html
 
+```json
+{ "type": "vless", "tag": "proxy", "server": "example.com", "port": 443, "uuid": "<uuid>",
+  "tls": { "sni": "example.com", "alpn": ["h2"], "fingerprint": "chrome", "pinned_sha256": [] },
+  "reality": null, "flow": "xtls-rprx-vision", "xhttp": null, "fragment": null, "allow_plaintext": false }
+```
+
 The client request, once at the start of the stream:
 
 ```
@@ -438,287 +501,294 @@ The client request, once at the start of the stream:
 | version | UUID       | addons len | addons  | command | port | atyp | address | payload |
 | 1 B = 0 | 16 B       | 1 B = 0    | 0 B     | 1 B     | 2 B  | 1 B  | var     | ...     |
 +---------+------------+------------+---------+---------+------+------+---------+---------+
-command: 0x01 = TCP, 0x02 = UDP;  port: big-endian
-atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 B)
+command: 0x01 = TCP, 0x02 = UDP, 0x03 = Mux;  port: big-endian
+atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 B)   — codes differ from SOCKS5
 ```
 
-Note: VLESS atyp codes **differ** from SOCKS5.
+- The header goes out together with the client's first data if it is ready within 5 ms, otherwise alone: fewer RTTs
+  and no size signature of a header record. A read started before the first write waits that long, but wakes as soon
+  as a write has sent the header with data; only connections where the client writes nothing wait the whole time.
+- The server response `version | addons len (N) | addons (N B)` is read lazily on the first read; version ≠ 0 is an
+  error.
+- UDP (command 0x02): every packet in both directions is `length u16 BE | payload`; one VLESS stream is one destination.
+  With Vision, UDP goes as XUDP (§11.4).
+- Transport: TCP through the SocketFactory, then TLS (§11.2) or REALITY (§11.3); XHTTP (§11.5) may replace the raw TCP.
+  Without TLS and REALITY, `allow_plaintext: true` is required, otherwise it is a config error: the UUID and the
+  traffic would cross the network in the clear.
+- `uuid` is parsed from its string form; an invalid one is a config error.
 
-- The header is sent together with the client's first data if it is ready within 5 ms. Otherwise it is sent on its own. This saves round trips and reduces the size signature. A read started before the first write waits for that time but wakes as soon as a write has sent the header with its data; only connections where the client writes nothing wait it out. The same goes for the address in Shadowsocks.
-- Without Vision TLS is read in bulk: one socket `read` of up to 64 KB, rustls deframes the records from memory; a TLS record leaves in one `write` (header and payload via `write_vectored`). With Vision reads stay one record at a time: the switch to a raw copy needs nothing read past the record carrying it.
-- Server response: `version (1 B) | addons len (1 B, N) | addons (N B)`, then data. The response is read lazily, on the first read from the stream: N addon bytes are skipped. A version ≠ 0 is an error.
-- UDP (command 0x02): each packet in both directions is `length u16 BE | payload`. One VLESS stream corresponds to one destination address, that is one `PacketStream`.
-- Transport: TCP through the SocketFactory, then TLS (§11.4) if `tls.enabled`. Without TLS a warning is logged: traffic goes in the clear.
-- `uuid` is parsed from its string form. An invalid UUID is a config error.
-- `flow` is not supported; its presence in a link is an error.
+### 11.2 TLS client
 
-### 11.2 Shadowsocks AEAD
+- `rustls` with the `ring` provider, `webpki-roots` roots, TLS 1.2 and 1.3, `sni` (the host by default), `alpn`.
+  Certificate verification is always on. `pinned_sha256`: SHA-256 of the DER leaf certificate, checked **on top of**
+  normal verification. One `ClientConfig` per outbound.
+- **Browser fingerprint** (`fingerprint`, a link's `fp`). rustls's ClientHello is easy to tell from a browser's
+  (JA3/JA4), and DPI blocks by it. The `vendor/rustls` patch hands the encoded ClientHello over before it is hashed and
+  sent; the engine rebuilds it as Chrome 152 (`outbound/fingerprint.rs`): GREASE in ciphers, groups, versions and
+  extensions; BoringSSL's cipher suites; extensions shuffled per connection between a leading and a trailing GREASE
+  extension; X25519MLKEM768 and X25519 key shares; GREASE ECH; ALPS; signature_algorithms as Chrome 152. JA4:
+  `t13d1516h2_8daaf6152771_806a8c22fdea`. Everything rustls's state depends on is kept: the random, session_id
+  (REALITY's token), SNI, ALPN, key shares, a HelloRetryRequest cookie. The rebuild's randomness is derived from the
+  ClientHello random, so a retried hello and REALITY's second pass rebuild the same bytes. Chrome is the default and
+  serves every browser name until other templates exist; `none` (or `rustls`) sends rustls's own ClientHello.
+- **X25519MLKEM768** (0x11ec, draft-ietf-tls-ecdhe-mlkem; `outbound/pq.rs`): the client share is the ML-KEM-768
+  encapsulation key (1184 B) and X25519 (32 B), the server share the ciphertext (1088 B) and X25519, the secret the
+  ML-KEM key and the X25519 secret. The X25519 half is also offered as a separate key share, so a server without ML-KEM
+  still completes in one RTT.
+- **Bulk reads.** Without Vision, TLS is read in large blocks: one socket `read` of up to 64 KB, rustls parses records
+  from memory; a write goes out as one `write` (`write_vectored`). With Vision, reads take exactly one record at a time
+  (`tls_stream.rs`): after the direct-copy command nothing more may have been read.
 
-Public specification: https://shadowsocks.org/doc/aead.html
+### 11.3 REALITY
 
-- Methods and lengths: `aes-128-gcm` (key 16, salt 16), `aes-256-gcm` (32/32), `chacha20-ietf-poly1305` (32/32). The tag is 16 bytes, the nonce 12 bytes.
-- The master key from the password is EVP_BytesToKey(MD5, no salt, 1 iteration):
-  `D_0 = ""`, `D_i = MD5(D_{i-1} || password)`, key = the first key_len bytes of `D_1||D_2||…`.
-- Session subkey: `HKDF-SHA1(ikm = master_key, salt = salt, info = "ss-subkey", L = key_len)`.
-- **TCP.** Each direction starts with its own random salt of salt_len. Then come chunks `[enc(len u16 BE) + tag][enc(payload) + tag]`, where len ≤ 0x3FFF. The nonce is a 12-byte little-endian counter that starts at 0 and grows by 1 after **every** seal/open operation (length and data are separate operations).
-- The client's first payload starts with the destination address in SOCKS5 format (`atyp` 1/3/4 + addr + port BE). The address and the first data go in one chunk if the data is ready within 5 ms.
-- A tag authentication failure → close the connection at once without a reply.
-- **UDP.** Each datagram: `salt | seal(subkey, nonce=0, socks_addr || payload)`. The server reply has the same format. The address in the reply is checked and dropped.
+TLS 1.3 where the client proves knowledge of the server's public key inside the ClientHello `session_id`:
 
-Required tests:
-- EVP_BytesToKey for the password `"password"` and key_len 32: compute the reference in the test with an independent MD5-concatenation implementation;
-- TCP and UDP encryption round trips;
-- an integration test with a mini Shadowsocks server written in the test from this same specification.
+- `auth_key = HKDF-SHA256(ikm = X25519(client key share secret, server public key), salt = client_random[..20],
+  info = "REALITY")`, 32 bytes;
+- `session_id = AES-256-GCM(auth_key, nonce = client_random[20..], plaintext = ver(3) | 0 | unix_time(be32) |
+  short_id(8), aad = the ClientHello with a zeroed session_id)`.
 
-### 11.3 SOCKS5 client
+The server answers with a throw-away Ed25519 certificate whose signature field is `HMAC-SHA512(auth_key, public key)`;
+anything else means the real site the server impersonates answered, and the connection is refused. rustls builds the
+ClientHello itself, so it is built twice with the same randomness and key share: to learn its bytes, and with the
+computed session_id. Settings: `server_name` (required), `public_key` (X25519, base64url), `short_id` (hex, up to 16
+characters), `alpn`, `fingerprint` (§11.2). `tls` and `reality` together are refused.
 
-RFC 1928/1929: CONNECT, optionally with a username and password. Domains are sent as ATYP 3, without local resolving. `connect_udp` → `Error::Unsupported`.
+### 11.4 XTLS Vision and XUDP
 
-### 11.4 TLS client
+- **Vision** (`flow: "xtls-rprx-vision"`, needs TLS or REALITY, over TCP only). The first packets of each direction are
+  wrapped in padded blocks that hide the size pattern of TLS-in-TLS:
+  `[UUID, first block only] | command | content_len(be16) | padding_len(be16) | content | padding`; command 0 = more
+  blocks follow, 1 = padding ends, 2 = padding ends and the sender stops using the outer TLS (direct copy). The engine
+  never switches its own direction to direct copy: it ends with command 1 and keeps writing through TLS (both Xray
+  clients and servers accept it). After command 2 from the server the inner traffic is read from the bare TCP, which is
+  why TLS is read one record at a time (§11.2).
+- **XUDP**: UDP of Vision users, as Xray sends it: the VLESS Mux command, the target `v1.mux.cool:666`, then Mux.Cool
+  frames `meta_len(be16) | session_id(be16)=0 | status | option | [network | port(be16) | atyp | addr] [global_id(8)]`,
+  `[data_len(be16) | data]` when option has bit 0x01. status: 1 new (first packet, with the destination and the global
+  ID), 2 keep, 3 end, 4 keep-alive (ignored). The 8-byte global ID names the client's UDP socket, so the server keeps
+  one NAT mapping for it (full-cone NAT: games, voice calls).
 
-- `tokio-rustls`, roots from `webpki-roots`, TLS 1.2 and 1.3.
-- `sni` (the server host by default) and `alpn` (empty by default).
-- Certificate verification is always on.
-- Optional `"pinned_sha256": ["hex..."]`: the SHA-256 of the DER leaf certificate. If pinning is set, the certificate must **both** pass standard verification **and** match the pin.
-- The `ClientConfig` is created once per outbound and reused (`Arc`).
+### 11.5 XHTTP (SplitHTTP)
 
-### 11.5 Direct
+VLESS inside ordinary-looking HTTP requests, compatible with Xray (`outbound/xhttp/`). Settings come from the VLESS
+`xhttp` field (snake_case) or from Xray's `xhttpSettings` / a link's `extra` (camelCase, read strictly: unknown and
+unimplemented keys are an `Unsupported` error, never skipped silently).
 
-- TCP: if the target is a domain, it is resolved through the DNS client (§8.3). Then the addresses are tried in turn with a 5 s timeout per address. Sockets come only from the SocketFactory.
-- UDP: `udp_bind` and `connect` to the target.
-- If the target is a fake IP and the domain is not found, that is an error (loop protection).
+- **Modes** (`mode`): `stream-one` — one streaming `POST {path}` carries both directions; `stream-up` —
+  `GET {path}{session}` downloads and one streaming `POST` uploads; `packet-up` — `GET` downloads and the upload is cut
+  into `POST {path}{session}/{seq}` requests (passes any CDN or reverse proxy); `auto` — `stream-one` with REALITY,
+  otherwise `packet-up`.
+- **HTTP:** HTTP/2 over TLS and REALITY; HTTP/1.1 without TLS or with ALPN `http/1.1`, `packet-up` only. No HTTP/3.
+- **XMUX** (`xmux`): HTTP/2 connections are reused and retired after a number of sessions (`c_max_reuse_times`),
+  requests (`h_max_request_times`) or some time (`h_max_reusable_secs`), so long-lived TLS connections do not stand
+  out; `max_concurrency` / `max_connections`. Without `xmux`, Xray's values: 1 session per connection, 600–900
+  requests, 1800–3000 s.
+- `path` (may carry a query), `host` (the TLS/REALITY name by default, then the server address), `headers` (no
+  `Host`), browser-like headers, `no_grpc_header` (no `Content-Type: application/grpc` on streaming uploads),
+  `sc_max_each_post_bytes` (1,000,000 by default) and `sc_min_posts_interval_ms` (30) for `packet-up`.
+- **Padding:** by default a random `x_padding` (100–1000 bytes, `x_padding_bytes`, at most 65,536) in
+  `Referer: …?x_padding=…`. With `x_padding_obfs_mode`, as in Xray: `x_padding_placement` (`query`, `header`, `cookie`,
+  `queryInHeader` — the default), `x_padding_key` (`x_padding`), `x_padding_header` (`X-Padding`), `x_padding_method`
+  (`repeat-x` or `tokenish` — random base62 whose length counts in HPACK Huffman bytes, not characters).
+- **Metadata for CDNs:** `session_id_placement` and `seq_placement` (`path` by default, `query`, `header`, `cookie`),
+  keys `session_id_key` / `seq_key` (`X-Session` / `X-Seq` in headers, `x_session` / `x_seq` in query and cookies),
+  a custom ID alphabet (`session_id_table`, including Xray's named alphabets, URL-safe ASCII) with
+  `session_id_length` (1–256, at least 2^31 possible IDs, short dotted alphabets refused), and the upload method
+  `uplink_http_method` (`POST` by default; `GET` with a body in `packet-up` only; `PUT`, `PATCH`, `DELETE`). Metadata
+  and padding keys are checked before connecting: reserved HTTP headers (`Host`, `Content-Length`, `Cookie`,
+  `Content-Type`, …) and colliding keys are an error.
+- One request builder for HTTP/1.1 and HTTP/2: the query of `path` is kept byte for byte except transport keys; stale
+  transport query/cookie values never shadow new ones; downloads carry no sequence number.
+- TLS, SNI, HTTP Host and the server address are independent: the client keeps TLS to the CDN edge even when the
+  origin takes XHTTP without TLS. Not implemented: HTTP/3, `downloadSettings`, payload in cookies/headers.
 
-### 11.6 Block
+### 11.6 ClientHello fragmentation
 
-`connect_tcp` and `connect_udp` return `Error::Blocked` at once. The incoming connection is closed (TCP RST if the stack allows it).
+`fragment: {"length": "100-200", "interval": "10-20"}` on VLESS with TLS or REALITY (and on `link`). The first record
+(the ClientHello) is cut into several TLS records of random sizes from `length`, each sent in its own TCP write after
+a pause from `interval` (ms). DPI that looks for the server name in the first segment or the first record sees only a
+part of it. TLS allows a handshake message to span records, so servers accept it.
 
-### 11.7 XHTTP: extended CDN request format
-
-VLESS `xhttp` accepts Xray `extra`: `xPaddingObfsMode`, `xPaddingKey`,
-`xPaddingHeader`, `xPaddingPlacement` (`query`, `header`, `cookie`, `queryInHeader`),
-`xPaddingMethod` (`repeat-x`, `tokenish`), `sessionIDPlacement`, `sessionIDKey`,
-`sessionIDTable`, `sessionIDLength`, `seqPlacement`, `seqKey`, `uplinkHTTPMethod`.
-Session and sequence metadata can use path/query/header/cookie. `tokenish` is random
-base62 sized in HPACK Huffman bytes, not characters. Keys and alphabets are checked
-before sending. Named Xray alphabets are supported; custom alphabets are restricted
-to URL-safe ASCII and lengths to 1–256 (short dotted IDs are refused to avoid dot
-segments). Padding is capped at 65536 bytes. Reserved HTTP framing headers and
-colliding metadata/padding keys are refused.
-
-A shared builder produces the same request targets/headers for HTTP/1.1 and HTTP/2,
-preserves the query in `path`, and retains the request body even for GET uploads.
-GET requires `packet-up`; POST/PUT/PATCH/DELETE are also supported. Without obfs,
-the legacy `Referer: …?x_padding=…` stays unchanged. With obfs, Xray defaults are
-`queryInHeader`, `X-Padding`, `x_padding`, `repeat-x`.
-
-TLS, SNI, HTTP Host and the dial address remain separate: a CDN client uses TLS to
-the edge even when its origin accepts plaintext XHTTP on loopback. Plaintext VLESS
-share links remain refused. This does not add HTTP/3, `downloadSettings`, payload in
-cookies/headers, or insecure certificate verification. Unimplemented wire options
-continue to fail explicitly.
-
-Run `XRAY_BIN=/path/to/xray cargo test --test xray_interop
-xhttp_cdn_obfuscation_against_xray`: real TCP/UDP payloads over GET packet-up with
-query sequence, tokenish padding and custom session IDs; HTTP/2+TLS, HTTP/1.1+TLS
-and a plaintext origin on disposable loopback listeners. This proves wire
-interoperability, not availability of any particular CDN. Format references:
-public Xray `transport/internet/splithttp/{config,xpadding}.go` and
-`infra/conf/transport_method.go`.
-
-Custom alphabets require a length and at least 2^31 possible IDs (counting distinct
-symbols); degenerate alphabets are rejected. Unrelated query bytes are preserved
-exactly; only transport-owned keys are replaced. Stale transport cookies/query keys
-cannot shadow new values. On loading saved state the client re-evaluates capability
-while preserving IDs, user labels and subscriptions.
-
-### 11.8 Hysteria 2
+### 11.7 Hysteria 2
 
 Public specification: https://v2.hysteria.network/docs/developers/Protocol/
 
-- One QUIC connection per outbound (quinn, TLS 1.3, ALPN `h3`, WebPKI verification and optional leaf pins),
-  shared by TCP and UDP. `SocketFactory` creates the socket (protect and interface binding before quinn gets
-  it). With `salamander_password` the socket is wrapped in Salamander: `salt[8]` and the QUIC packet XORed with
-  BLAKE2b-256(password ‖ salt); GSO is off, MTU discovery is not used.
-- Authentication: HTTP/3 `POST https://hysteria/auth` with `Hysteria-Auth`, `Hysteria-CC-RX: 0` and a random
+```json
+{ "type": "hysteria2", "tag": "hy2", "server": "hy.example", "port": 443, "password": "user:pass",
+  "sni": "hy.example", "pinned_sha256": [], "salamander_password": "obfs-key" }
+```
+
+- `password` is the whole authentication string (up to 4096 bytes, a valid HTTP header value); `sni` defaults to
+  `server`; `pinned_sha256` are leaf pins on top of WebPKI; `salamander_password` is 4–4096 bytes.
+- One QUIC connection per outbound (quinn, TLS 1.3, ALPN `h3`, WebPKI verification that cannot be disabled), shared by
+  TCP and UDP. The `SocketFactory` creates the socket (protect and binding before quinn gets it). Keepalive 10 s, idle
+  timeout 30 s.
+- **Salamander:** every UDP packet is `salt[8]` and the QUIC packet XORed with BLAKE2b-256(password ‖ salt); GSO is off,
+  GRO packets are opened one by one, MTU discovery is not used (1200-byte packets leave room for the 8-byte salt). It
+  is obfuscation; QUIC/TLS still provides the security.
+- **Authentication:** HTTP/3 `POST https://hysteria/auth` with `Hysteria-Auth`, `Hysteria-CC-RX: 0` and a random
   `Hysteria-Padding`. Only status 233 succeeds; `Hysteria-UDP` tells whether UDP is allowed.
-- TCP: a bidirectional QUIC stream, request `varint 0x401 | varint length | host:port | varint length | padding`,
-  response `status u8 | varint length | message | varint length | padding`; status ≠ 0 is a refusal (the
-  server's text is not logged).
-- UDP: QUIC datagrams `session u32 | packet u16 | fragment u8 | count u8 | varint length | host:port | data`,
-  fragments of at most 1200 bytes. Reassembly is bounded: 8 packets, 128 KiB, 5 s per packet; a flow queues
-  32 packets, and when it is full that flow's packets are dropped while other flows do not wait.
-- A closed connection is replaced for new flows only; open ones are never replayed. One dial serves everyone
-  (the others wait for it), at most 10 s per address. When it fails, flows arriving in the next 2 s get the
+- **TCP:** a bidirectional QUIC stream, request `varint 0x401 | varint length | host:port | varint length | padding`,
+  response `status u8 | varint length | message | varint length | padding`; status ≠ 0 is a refusal (the server's
+  text is not logged).
+- **UDP:** QUIC datagrams `session u32 | packet u16 | fragment u8 | count u8 | varint length | host:port | data`,
+  fragments of up to 1200 bytes. Reassembly is bounded: 8 packets, 128 KiB, 5 s per packet; a flow queues 32 packets,
+  and when it is full that flow's packets are dropped while others do not wait; at most 256 UDP sessions per
+  connection.
+- **Reconnection:** a closed connection is replaced for new flows only; open ones are never replayed. One dial serves
+  everyone (the others wait for it), at most 10 s per address. When it fails, flows arriving in the next 2 s get the
   same error at once instead of waiting 10 s each.
-- Bandwidth in links (Brutal) is not used: congestion control is quinn's default.
-- Details, limits and verification commands: [HYSTERIA2.md](HYSTERIA2.md).
+- Bandwidth (Brutal) is not used: congestion control is quinn's default. Not implemented: Hysteria 1, port hopping, ECH,
+  other obfs. Details and verification commands: [HYSTERIA2.md](HYSTERIA2.md).
+
+### 11.8 Shadowsocks AEAD
+
+Public specification: https://shadowsocks.org/doc/aead.html
+
+- Methods: `aes-128-gcm` (key 16, salt 16), `aes-256-gcm` (32/32), `chacha20-ietf-poly1305` (32/32); tag 16 bytes,
+  nonce 12 bytes.
+- The master key is EVP_BytesToKey(MD5, no salt, 1 iteration): `D_0 = ""`, `D_i = MD5(D_{i-1} || password)`, the key
+  is the first key_len bytes of `D_1||D_2||…`. The session subkey is `HKDF-SHA1(master_key, salt, "ss-subkey")`.
+- **TCP:** each direction starts with its own random salt, then chunks `[enc(len u16 BE)+tag][enc(payload)+tag]`,
+  len ≤ 0x3FFF; the nonce is a 12-byte little-endian counter, +1 after **every** seal/open. The client's first payload
+  starts with the SOCKS5-style destination; the address and the first data go in one chunk if the data is ready within
+  5 ms (reads wake as for VLESS). A tag error closes the connection without a reply.
+- **UDP:** a datagram is `salt | seal(subkey, nonce = 0, socks_addr || payload)`, the reply has the same format, and its
+  address is checked and dropped.
+- A password shorter than 16 characters gives a warning: a key from EVP_BytesToKey(MD5) can be brute-forced offline
+  from recorded traffic.
+
+### 11.9 SOCKS5 client
+
+RFC 1928/1929: CONNECT, optional username and password. Domains are sent as ATYP 3, without a local lookup.
+`connect_udp` → `Error::Unsupported` (DNS through such an outbound goes over TCP, §8.2).
+
+### 11.10 Direct
+
+- TCP: the domain is resolved (§8.3) and checked by the Dispatcher (§6.1); addresses are tried in turn with a 5 s
+  timeout each. UDP: `udp_bind` and `connect` to the destination. Sockets come only from the SocketFactory.
+- A fake-IP destination without a mapping is an error (loop protection).
+
+### 11.11 Block
+
+`connect_tcp` and `connect_udp` return `Error::Blocked` at once; the incoming connection is closed (TCP RST when the
+stack allows it). Names a domain rule blocks are not resolved by the TUN DNS server (§8.2).
 
 ---
 
-## 12. Desktop system network (feature `system-routes`, used only by `unbihex-cli`)
+## 12. Desktop system network
 
-```rust
-pub trait SystemNetwork {
-    fn detect_default() -> Result<DefaultRoute>;    // the physical interface (name, index), v4/v6 gateway, system DNS (if available) — through netdev
-    fn apply(&self, tun: &TunInfo, servers: &[IpAddr]) -> Result<RouteGuard>;
-}
-pub struct RouteGuard { /* the list of actions done */ }   // Drop: undoes them in reverse order, errors are only logged
-```
+The engine does not change system routes or DNS. The client does it
+(`unbihex-client/crates/client-core/src/platform/`) for a TUN with `auto_route`, from `Instance::tun_info()` and
+`Instance::server_ips()`:
 
-General rules:
-- The default route is **not replaced**; instead two half routes `0.0.0.0/1` and `128.0.0.0/1` (and `::/1`, `8000::/1` if IPv6 is on) are added through the TUN. Existing routes stay, and rollback is simple.
-- For each proxy server IP a host route is added through the original gateway and the physical interface.
-- If the system's DNS servers are in the LAN (for example 192.168.1.1), a host route **through the TUN** is added for them, so that DNS gets hijacked.
-- Every command is logged at `debug`. A non-zero exit code → an error with the command's stderr, and what has been done is undone.
-- Rights are checked before start: Linux/macOS — `geteuid() == 0`, Windows — an administrator token. Without them a clear error is shown.
-
-**Linux:**
-
-```
-ip route add 0.0.0.0/1 dev unbihex0
-ip route add 128.0.0.0/1 dev unbihex0
-ip route add <srv>/32 via <gw> dev <phys>
-```
-
-Plus the IPv6 equivalents with `ip -6`. DNS: if `resolvectl` exists, run `resolvectl dns unbihex0 10.199.233.2` and `resolvectl domain unbihex0 '~.'`, otherwise warn (hijacking UDP/53 still works).
-
-**macOS:**
-
-```
-route -n add -net 0.0.0.0/1 -interface utunN
-route -n add -net 128.0.0.0/1 -interface utunN
-route -n add -host <srv> <gw>
-```
-
-DNS: find the network service of the physical interface with `networksetup -listnetworkserviceorder`, save the output of `networksetup -getdnsservers <svc>`, run `networksetup -setdnsservers <svc> 10.199.233.2`. On rollback restore the saved value or `Empty`.
-
-**Windows:**
-
-```
-netsh interface ipv4 set interface "<tun>" metric=1
-netsh interface ipv4 add route 0.0.0.0/1 "<tun>" metric=1
-netsh interface ipv4 add route 128.0.0.0/1 "<tun>" metric=1
-route add <srv> mask 255.255.255.255 <gw> if <phys_idx> metric 1
-netsh interface ipv4 set dnsservers name="<tun>" source=static address=10.199.233.2 register=none validate=no
-```
-
-A known limitation noted in the README: Windows may query the DNS of other interfaces in parallel (Smart Multi-Homed Name Resolution).
-
-**Emergency rollback.** `unbihex cleanup` removes the routes and DNS settings recorded in the `unbihex-routes.json` journal. The journal is written next to the config before every change. This is needed if the process was killed.
+- The default route is **not replaced**: the half routes `0.0.0.0/1` and `128.0.0.0/1` (and `::/1`, `8000::/1` with
+  IPv6) are added through the TUN. Existing routes stay, and the rollback is simple.
+- Each proxy server address gets a host route through the original gateway and physical interface.
+- **Linux:** `ip route add …`, LAN addresses of the system DNS servers get `ip route replace <dns> dev <tun>` (so DNS
+  is captured); DNS: `resolvectl dns <tun> <dns>` and `resolvectl domain <tun> '~.'`.
+- **macOS:** `route -n add …`; DNS: `networksetup -setdnsservers <service> <dns>`, keeping the previous value.
+- **Windows:** `netsh interface ipv4|ipv6 add route …` with metric 1, `route add <srv> mask 255.255.255.255 <gw> if
+  <idx>`; DNS: an NRPT rule "all names → the tunnel DNS" in the registry (a Group Policy with NRPT rules disables
+  local ones).
+- Each action is written to a journal first (`routes-journal.json`, `proxy-journal.json` for the system proxy, in the
+  data folder) and then performed. Rollback runs in reverse order; on the next start the client rolls back whatever a
+  killed process left behind. The journal accepts known commands only.
+- Rights are required: root on Linux/macOS, administrator on Windows; without them there is a clear error.
 
 ---
 
-## 13. The `unbihex` CLI
+## 13. Engine hosts
+
+### 13.1 `unbihex-cli`
+
+The console client (`unbihex-client/crates/unbihex-cli`): subscriptions, servers, `connect` and a menu. For the engine
+directly:
 
 ```
-unbihex run -c <config.json>            # start; Ctrl-C/SIGTERM → clean stop and route rollback
-unbihex run --link '<vless://|ss://>'   # without a file: tun(auto_route) + an ip_private→direct rule + final=proxy
-unbihex check -c <config.json>          # config validation, exit code 0/1
-unbihex cleanup                         # emergency rollback from the journal
-unbihex version
+unbihex-cli run -c <config.json>     an engine config as it is (§5): routes and DNS untouched, SIGHUP reloads
+unbihex-cli check -c <config.json>   validate a config
 ```
 
-The `--log <level>` flag overrides `log.level`. Logs go to stderr.
+### 13.2 C ABI (`unbihex-client/crates/unbihex-ffi`, `include/unbihex.h`)
 
----
-
-## 14. FFI (`unbihex-ffi`)
-
-### 14.1 C ABI (`include/unbihex.h`, for iOS and everything else)
+For the iOS Packet Tunnel and other C hosts:
 
 ```c
-typedef bool (*unbihex_protect_cb)(int32_t fd, void *ctx);
-// Returns a handle > 0 or a negative error code. Non-blocking: starts its own tokio runtime (2 worker threads).
+typedef bool (*unbihex_protect_cb)(int32_t fd, void *ctx);              // may be NULL; false refuses the socket
 int32_t     unbihex_start(const char *config_json, int32_t tun_fd, unbihex_protect_cb protect, void *ctx);
-int32_t     unbihex_stop(int32_t handle);                 // 0 = ok; blocks until stopped (at most 5 s)
-const char *unbihex_last_error(void);                     // thread-local; the string is valid until the next call on this thread
-const char *unbihex_version(void);                        // a static string
+int32_t     unbihex_stop(int32_t handle);                               // 0 = ok; waits up to 5 s
+bool        unbihex_stats(uint64_t *proxy_up, uint64_t *proxy_down, uint64_t *direct_up, uint64_t *direct_down);
+const char *unbihex_last_error(void);                                  // thread-local, never NULL
+const char *unbihex_version(void);
 ```
 
-- Every `extern "C"` function is wrapped in `catch_unwind`; a panic → code `-99`.
-- Pointers are checked for NULL.
-- Error codes: `-1` invalid config, `-2` TUN error, `-3` network, `-4` already running (the MVP allows one instance), `-5` invalid handle.
+- `unbihex_start` does not block: it runs its own tokio runtime with 2 worker threads; `tun_fd = -1` means no TUN;
+  one instance at a time; it returns a handle > 0 or an error code.
+- Codes: `-1` config, `-2` TUN, `-3` network, `-4` already running (also `stop` from an engine thread such as the
+  protect callback), `-5` invalid handle, `-99` panic (every function is wrapped in `catch_unwind`). Pointers are
+  checked for NULL.
 
-### 14.2 JNI (Android)
+### 13.3 Android
 
-The `com.unbihex.UnbihexNative` class:
-- `static native int start(String configJson, int tunFd);`
-- `static native int stop(int handle);`
-- `static native String lastError();`
-
-On Android the recommended loop protection is `VpnService.Builder.addDisallowedApplication(getPackageName())`. Then protect is not needed, and `start` calls the engine with `protect = None`.
-
-### 14.3 Examples (`examples/`)
-
-- `android/UnbihexVpnService.kt`: a `Builder` with the address `10.199.233.1/30`, `addRoute("0.0.0.0", 0)`, `addDnsServer("10.199.233.2")`, `addDisallowedApplication(packageName)`, `setMtu(1500)`, `establish()` → `detachFd()` → `UnbihexNative.start`.
-- `ios/PacketTunnelProvider.swift`:
-  - `NEPacketTunnelNetworkSettings`: IPv4 `10.199.233.1`, mask `255.255.255.252`, `includedRoutes = [.default()]`, DNS `10.199.233.2`, MTU 1500;
-  - finding the utun fd by scanning descriptors 0…1024 with `getsockopt(SYSPROTO_CONTROL, UTUN_OPT_IFNAME)`;
-  - calling `unbihex_start`;
-  - a comment about the required `packet-tunnel-provider` entitlement and the Network Extension memory limit (~50 MB).
+The engine runs inside the `unbihex-client` app process: the `tauri-plugin-unbihex-vpn` plugin starts a `VpnService`
+(a foreground service); `VpnService.Builder` gets the addresses `10.199.233.1/30` and `fdb5:2f3c:9a17::1/126`, the
+routes `0.0.0.0/0` and `::/0`, DNS `10.199.233.2`, the MTU and an exclusion of the app itself
+(`addDisallowedApplication`); the TUN fd and `protect` go to `Instance::start` with `system_dns_bypasses_tun = true`.
 
 ---
 
-## 15. Security and reliability (mandatory requirements)
+## 14. Security and robustness
 
-- Every length value from the network is checked before memory is allocated: domain ≤ 255, SS chunk ≤ 0x3FFF, VLESS UDP ≤ 65,535, HTTP headers ≤ 16 KB.
-- Every read during a handshake runs under the `handshake_timeout_secs` timeout.
-- `unbihex-engine` has no `unwrap()`/`expect()` on data from the network. A panic is allowed only for program invariants.
-- `unsafe` only in `net/socket.rs` (setsockopt), `inbound/tun.rs` (fd) and `unbihex-ffi`. Each block has a `// SAFETY:` comment.
-- Secrets (uuid, password) are not written to logs. `Debug` for outbound configs masks them as `***`.
-- Logs at `info` and below contain no traffic content.
-- VLESS without TLS is refused unless the outbound (or `link`) sets `"allow_plaintext": true`: otherwise the UUID and traffic go in the clear.
-- Shadowsocks with a password shorter than 16 characters gives a warning: a key from EVP_BytesToKey(MD5) can be brute-forced offline from recorded traffic.
-
----
-
-## 16. Tests and CI
-
-**Unit tests** (in each module):
-- config: valid and invalid examples;
-- link: vless/ss, correct and erroneous;
-- router: all conditions, IDNA, rule order, decisions by name;
-- fakeip: allocation, reuse, eviction;
-- dns server: A, AAAA, HTTPS, FORMERR, NXDOMAIN for blocked names;
-- encoding and parsing of VLESS and SOCKS5 headers;
-- Shadowsocks: KDF and encryption.
-
-**Integration tests** (`crates/unbihex-engine/tests/`), all on `127.0.0.1` without internet access:
-1. SOCKS inbound → direct → a local TCP echo.
-2. HTTP CONNECT inbound → direct → echo.
-3. SOCKS inbound → VLESS outbound without TLS → a mini VLESS server (in the test, per §11.1) → echo. Plus a UDP variant through `connect_udp`.
-4. SOCKS inbound → VLESS + TLS with a self-signed certificate. For the test a hidden `#[cfg(test)]` root is added to the TLS config (`rcgen`, a dev-dependency). There is no public insecure option.
-5. SOCKS inbound → Shadowsocks outbound → a mini SS server → echo (all three methods), plus UDP.
-6. A block rule: the connection is closed.
-7. Against real servers when `XRAY_BIN` / `HYSTERIA_BIN` are set (otherwise the tests return at once):
-   `tests/xray_interop.rs` (Vision, REALITY, XHTTP, the CDN format of §11.7), `tests/hysteria2_interop.rs`
-   (Hysteria 2 with and without Salamander, §11.8).
-
-**CI** (`.github/workflows/ci.yml`), matrix:
-- `ubuntu-latest`: fmt, clippy `-D warnings`, test;
-- `windows-latest`: clippy, test;
-- `macos-latest`: clippy, test, `cargo build --target aarch64-apple-ios -p unbihex-ffi`;
-- Android: `cargo-ndk` for `aarch64-linux-android` and `armv7-linux-androideabi` (`-p unbihex-ffi`).
-
-**MVP done criteria:**
-- `cargo test --workspace` green on Windows/Linux/macOS;
-- `cargo clippy --workspace --all-targets -- -D warnings` clean;
-- `unbihex run --link vless://...` on Windows/Linux/macOS sends browser traffic through the server, and after Ctrl-C the routes and DNS are restored.
+- Every length from the network is checked before allocating: domain ≤ 255, SS chunk ≤ 0x3FFF, VLESS UDP ≤ 65,535,
+  HTTP headers ≤ 16 KB, Hysteria 2 address ≤ 2048, Hysteria 2 message and padding ≤ 2048 / 4096.
+- Every handshake read runs under the `handshake_timeout_secs` timeout.
+- No `unwrap()` on network data; panics only for program invariants. `unsafe` only as in §2.2.
+- Secrets (uuid, passwords, keys, links) never reach the logs: `Secret` and config `Debug` show `***`.
+- Logs never contain traffic contents; individual connections are logged at `debug` only.
+- TLS certificate verification cannot be disabled, neither in the config nor in links (`insecure`, `allowInsecure`,
+  `skip-cert-verify` are refused). Unencrypted VLESS only with `allow_plaintext`.
+- An open proxy (SOCKS/HTTP without `users` off loopback) is a config error.
 
 ---
 
-## 17. Test server (feature `server`)
+## 15. Tests
 
-> The server is for tests and measurements: run your own client ↔ server pair and watch how traffic gets through.
-> It is not a server for users: it has no management API, no live user changes, no per-user traffic statistics
-> and no panel config formats.
+Running: `cargo test`, `cargo test --features server`, `cargo clippy --all-targets` (also with `--features server`).
+
+- **Unit tests** in the modules: config and links (including `hy2://` and XHTTP `extra`), the router (conditions,
+  IDNA, order, merging, decisions by name), geodata / `.srs` / the succinct trie, fake IP, the DNS server (A, AAAA,
+  HTTPS, FORMERR, NXDOMAIN for blocked names, forwarding through the Dispatcher), the DNS client (server race,
+  resends), VLESS and SOCKS5 headers, Shadowsocks (KDF and encryption), Vision, XUDP, REALITY, the Chrome fingerprint,
+  X25519MLKEM768, fragmentation, XHTTP (request builder, padding, metadata), Hysteria 2 (varints, frames, UDP
+  reassembly, Salamander), the TUN (sniffing, windows, the stack), the SocketFactory.
+- **Integration** (`tests/integration.rs`, all on `127.0.0.1` without internet access): SOCKS → direct → echo; HTTP
+  CONNECT and a plain request; keep-alive cannot reach another host; SOCKS → VLESS without TLS (TCP and UDP) and with
+  TLS; Shadowsocks with all methods (TCP and UDP); a block rule; the `link` outbound and SOCKS authentication; IP rules
+  for host names and loop refusal; hot reload (open connections live on, new ones switch); loopback without a password;
+  the mixed inbound; a missing `default_interface`.
+- **Against real servers** when `XRAY_BIN` / `HYSTERIA_BIN` are set (otherwise the tests return at once):
+  `xray_interop.rs` — Vision and REALITY, XHTTP in all modes, the XHTTP CDN format (GET packet-up, tokenish, custom
+  session IDs) over HTTP/2+TLS, HTTP/1.1+TLS and HTTP/1.1 without TLS; `hysteria2_interop.rs` — Hysteria 2 (the
+  official server and Xray) with and without Salamander: parallel TCP and UDP, fragments, refusals for a wrong auth /
+  root / SNI / pin and for a failed protect.
+- The test server: §16.3.
+
+---
+
+## 16. Test server (`server` feature)
+
+> The server exists for tests and measurements: run your own "client ↔ server" pair and watch how traffic passes.
+> It is not a server for users: it has no management API, no live users, no per-user traffic accounting and no panel
+> config formats.
 
 The protocol code lives in `unbihex-engine` behind the `server` feature: the VLESS inbound (`inbound/vless.rs`),
-server-side TLS and REALITY (`inbound/reality.rs`, `inbound/reality_shape.rs`), Mux.Cool / XUDP (`inbound/mux.rs`).
-The process and the CLI live in the `test_server` crate (binary `test_server`, version 0.0.1). Client builds are
-compiled without the `server` feature and do not contain this code.
+server TLS and REALITY (`inbound/reality.rs`, `inbound/reality_shape.rs`), Mux.Cool / XUDP (`inbound/mux.rs`). The
+process and the CLI are in the `test_server` crate (binary `test_server`, version 0.0.2). Client builds are compiled
+without the `server` feature and contain none of this code.
 
-### 17.1 VLESS inbound
+### 16.1 VLESS inbound
 
 ```json
 { "type": "vless", "tag": "vless-in", "listen": "0.0.0.0:443",
@@ -727,46 +797,51 @@ compiled without the `server` feature and do not contain this code.
 ```
 
 - Exactly one of `tls` and `reality` is set. VLESS without encryption is not supported on the server.
-- `users` is not empty; `id` is a UUID and may not repeat; `flow` is `""`, `xtls-rprx-vision` or `xtls-rprx-vision-udp443`,
-  and any other value is an `Unsupported` error. `email` names the user in logs.
-- `tls`: the certificate chain and key in PEM, plus `alpn` (default `h2`, `http/1.1`, as in Xray). The server supports
+- `users` is not empty; `id` is a UUID, without duplicates; `flow` is `""`, `xtls-rprx-vision` or
+  `xtls-rprx-vision-udp443`, anything else is an `Unsupported` error. `email` is the user's name in logs.
+- `tls`: the certificate chain and key in PEM, `alpn` (`h2`, `http/1.1` by default, as in Xray). The server supports
   the X25519MLKEM768 key exchange.
-- `reality` (the counterpart of Xray's `realitySettings`):
+- `reality` (like Xray's `realitySettings`):
 
-  | Field | Meaning |
+  | Field | Value |
   |---|---|
   | `dest` | the site the server impersonates, `host:port` |
-  | `server_names` | allowed SNI values, not empty |
+  | `server_names` | allowed SNIs, not empty |
   | `private_key` | X25519, base64url (`test_server x25519`) |
-  | `short_ids` | hex, up to 16 characters; `""` is the all-zero ID; not empty |
+  | `short_ids` | hex up to 16 characters; `""` is the zero ID; not empty |
   | `max_time_diff_ms` | allowed client clock difference; 0 or absent means 120,000 (unlike Xray, the check cannot be turned off) |
 
-  A client without the key (a scanner, a browser) is forwarded to `dest` untouched and sees the real site.
-- Replay: the `client_random` of accepted hellos is remembered for twice the `max_time_diff_ms` window. A replayed
-  hello (one a censor recorded) goes to `dest`, like a stranger's.
-- Handshake sizes like `dest`'s: for our client the server, as Xray, sends the same ClientHello to `dest` and reads
-  the answer. It answers with the same key exchange group and cipher suite, so the ServerHello has the same length.
-  It re-frames its EncryptedExtensions…Finished into records of `dest`'s lengths with TLS 1.3 padding
-  (RFC 8446 §5.4) (`inbound/reality_shape.rs`). `dest`'s answer ends at a pause, at a record boundary, of a quarter of its TCP connect time (2–15 ms); a record still arriving is always waited for.
-  If `dest` does not answer within 3 s, the records keep rustls's sizes. `dest`'s answer is cached for 10 minutes by the stable ClientHello fields (SNI, cipher suites, groups, ALPN, key_share groups; GREASE ignored), its addresses for 5 minutes; a failed probe is not cached. Clock skew and replays are logged at info.
-- Users come from the config only: the test server cannot change them live or count traffic per user.
-- Vision follows Xray's rules: a user whose `flow` is Vision must use it.
-- UDP: the VLESS UDP command and Mux.Cool / XUDP.
-- Accepted connections go to the same `Dispatcher` (§7): routing, DNS and outbounds are shared with the client.
+  A client without the key (a scanner, a browser) is spliced to `dest` transparently and sees the real site.
+- Replay: the `client_random` of accepted hellos is remembered for twice the `max_time_diff_ms` window; a replayed
+  hello (recorded by a censor) goes to `dest` like a stranger's.
+- Handshake sizes like `dest`'s: for its own client the server, like Xray, sends the same ClientHello to `dest` and
+  reads the answer, replies with the same key exchange group and cipher suite (a ServerHello of the same length), and
+  re-frames its EncryptedExtensions…Finished into records of `dest`'s lengths with TLS 1.3 record padding (RFC 8446 §5.4)
+  (`inbound/reality_shape.rs`). The end of `dest`'s answer is a pause at a record boundary of a quarter of its TCP
+  connect time (2–15 ms); an unfinished record is always awaited. If `dest` does not answer within 3 s, the records keep
+  rustls's sizes. `dest`'s answer is cached for 10 minutes by the stable ClientHello fields (SNI, ciphers, groups, ALPN,
+  key share groups; GREASE ignored), `dest`'s addresses for 5 minutes; a failed probe is not cached. Clock differences
+  and replays are logged at info.
+- Users come from the config only. Vision follows Xray's rules: a user whose `flow` is Vision must use it for TCP;
+  Vision does not wrap the UDP command, and a Mux.Cool stream of a Vision user may carry UDP only.
+- UDP: the VLESS UDP command and Mux.Cool / XUDP. The VLESS response header goes out with the first downlink data.
+- Accepted connections go to the same `Dispatcher` (§7): routing, DNS and outbounds are shared with the client. The
+  test server resolves destination names with the system resolver; private answers are allowed only for
+  `dns.allow_private_answers`.
 
-### 17.2 CLI
+### 16.2 CLI
 
 ```text
 test_server run -c <config.json | stdin:>   run until Ctrl-C / SIGTERM
-test_server check -c <config.json>          validate the config
-test_server uuid [-i text]                  a random UUID, or the UUIDv5 of the text (as Xray)
+test_server check -c <config.json>          check a config
+test_server uuid [-i text]                  a random UUID, or UUIDv5 from text (as in Xray)
 test_server x25519 [-i key]                 a REALITY key pair, or the public key of a private one
 test_server version
 ```
 
-The config is the engine's own JSON (§5) with a `vless` inbound, nothing else.
+The config is the engine's JSON (§5) with a `vless` inbound.
 
-### 17.3 Tests
+### 16.3 Tests
 
 All on `127.0.0.1`, our client against our server (`test_server/tests/`):
 - TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users;

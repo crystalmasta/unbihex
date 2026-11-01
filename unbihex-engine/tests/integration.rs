@@ -1,4 +1,4 @@
-//! End-to-end tests on loopback (SPEC §16): no Internet access needed.
+//! End-to-end tests on loopback (SPEC §15): no Internet access needed.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;

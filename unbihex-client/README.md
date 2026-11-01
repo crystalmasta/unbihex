@@ -82,7 +82,7 @@ unbihex-client/
 ├─ crates/client-core/        логика клиента (без UI): подписки, серверы, конфиг ядра,
 │                             пинг, запуск ядра, системный прокси и маршруты TUN
 │   └─ src/platform/          windows.rs (netsh, route, реестр), linux.rs, macos.rs
-├─ crates/unbihex-ffi/        C ABI ядра (SPEC §14.1) для iOS-расширения: libunbihex.a + include/unbihex.h
+├─ crates/unbihex-ffi/        C ABI ядра (SPEC §13.2) для iOS-расширения: libunbihex.a + include/unbihex.h
 ├─ plugins/tauri-plugin-unbihex-vpn/
 │   ├─ android/               VpnService (Kotlin): поднимает TUN и отдаёт fd ядру
 │   └─ ios/                   NETunnelProviderManager (Swift): запускает Packet Tunnel

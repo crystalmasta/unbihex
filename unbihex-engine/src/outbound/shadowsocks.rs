@@ -1,4 +1,4 @@
-//! Shadowsocks AEAD client (SPEC §11.2), per the public AEAD specification.
+//! Shadowsocks AEAD client (SPEC §11.8), per the public AEAD specification.
 //!
 //! TCP: salt | [seal(len be16) | seal(payload)]…   nonce = LE counter, +1 per seal/open
 //! UDP: salt | seal(nonce = 0, socks_addr || payload)

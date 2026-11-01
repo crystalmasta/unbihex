@@ -27,7 +27,7 @@ test_server x25519 [-i key]                 a REALITY key pair, or the public ke
 test_server version
 ```
 
-The config is the engine's JSON ([`../unbihex-engine/SPEC.en.md`](../unbihex-engine/SPEC.en.md), §5 and §17) with a
+The config is the engine's JSON ([`../unbihex-engine/SPEC.en.md`](../unbihex-engine/SPEC.en.md), §5 and §16) with a
 `vless` inbound. Examples: [`config.example.json`](config.example.json) (TLS) and
 [`config.reality.example.json`](config.reality.example.json) (REALITY).
 

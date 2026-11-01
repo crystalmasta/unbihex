@@ -1,4 +1,4 @@
-//! C ABI of the Unbihex engine (SPEC §14.1).
+//! C ABI of the Unbihex engine (SPEC §13.2).
 //!
 //! The iOS Packet Tunnel extension links the static library and calls
 //! `unbihex_start(config_json, utun_fd, NULL, NULL)` from `startTunnel`.

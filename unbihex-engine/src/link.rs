@@ -1,4 +1,4 @@
-//! Share links: `vless://`, `ss://`, `hy2://` and `hysteria2://` (SPEC §5.4–5.5).
+//! Share links: `vless://`, `ss://`, `hy2://` and `hysteria2://` (SPEC §5.4).
 
 use base64::Engine;
 use percent_encoding::percent_decode_str;

@@ -83,7 +83,7 @@ unbihex-client/
 ├─ crates/client-core/        client logic (no UI): subscriptions, servers, engine config,
 │                             ping, engine start, system proxy and TUN routes
 │   └─ src/platform/          windows.rs (netsh, route, registry), linux.rs, macos.rs
-├─ crates/unbihex-ffi/        the engine's C ABI (SPEC §14.1) for the iOS extension: libunbihex.a + include/unbihex.h
+├─ crates/unbihex-ffi/        the engine's C ABI (SPEC §13.2) for the iOS extension: libunbihex.a + include/unbihex.h
 ├─ plugins/tauri-plugin-unbihex-vpn/
 │   ├─ android/               VpnService (Kotlin): brings up the TUN and hands its fd to the engine
 │   └─ ios/                   NETunnelProviderManager (Swift): starts the Packet Tunnel

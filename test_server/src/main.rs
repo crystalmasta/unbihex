@@ -11,7 +11,7 @@
 //! test_server version
 //! ```
 //!
-//! The config is the engine's own JSON (../unbihex-engine/SPEC.md §5 and §17) with
+//! The config is the engine's own JSON (../unbihex-engine/SPEC.md §5 and §16) with
 //! `vless` inbounds; see config.example.json and config.reality.example.json.
 
 use std::io::Read;
