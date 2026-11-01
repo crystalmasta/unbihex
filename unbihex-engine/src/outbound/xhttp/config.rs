@@ -241,6 +241,7 @@ impl XhttpConfig {
         {
             return Err(Error::config("xhttp: xPaddingBytes cannot be disabled"));
         }
+        // By dubr1k (github.com/dubr1k), PR #32.
         if self.padding().to > 65_536 {
             return Err(Error::config("xhttp: xPaddingBytes exceeds 65536"));
         }
@@ -380,6 +381,7 @@ impl XhttpConfig {
         self.path.split_once('?').map(|(_, q)| q).unwrap_or_default()
     }
 
+    // By dubr1k (github.com/dubr1k), PR #32.
     /// Effective session placement.
     pub fn session_placement(&self) -> &str {
         default_str(&self.session_id_placement, "path")
@@ -591,6 +593,7 @@ impl XhttpConfig {
     }
 }
 
+// By dubr1k (github.com/dubr1k), PR #32.
 fn default_str<'a>(value: &'a str, default: &'a str) -> &'a str {
     if value.is_empty() { default } else { value }
 }
@@ -648,6 +651,7 @@ fn xmux_from_xray(v: &Value) -> Result<XmuxConfig> {
 mod tests {
     use super::*;
 
+    // By dubr1k (github.com/dubr1k), PR #32.
     #[test]
     fn cdn_obfuscation_settings() {
         let c = XhttpConfig::from_xray(&serde_json::json!({

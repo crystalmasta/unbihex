@@ -350,6 +350,7 @@ pub struct UserConfig {
 pub enum OutboundConfig {
     /// VLESS over TCP, optionally with TLS.
     Vless(VlessConfig),
+    // By dubr1k (github.com/dubr1k), PR #33.
     /// Hysteria 2 over QUIC (TCP streams and UDP datagrams).
     Hysteria2(Hysteria2Config),
     /// Shadowsocks AEAD.
@@ -389,6 +390,7 @@ impl OutboundConfig {
     }
 }
 
+// By dubr1k (github.com/dubr1k), PR #33.
 /// Native Hysteria 2 outbound. TLS verification and ALPN `h3` are mandatory.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

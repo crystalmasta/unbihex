@@ -78,6 +78,7 @@ impl Client {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         crate::platform::recover(&dir);
         let (mut data, mut fresh) = load(&dir.join(STATE_FILE));
+        // By dubr1k (github.com/dubr1k), PR #32.
         for server in &mut data.servers {
             fresh |= crate::links::refresh_support(server);
         }
@@ -549,6 +550,7 @@ mod tests {
         d
     }
 
+    // By dubr1k (github.com/dubr1k), PR #32.
     #[tokio::test]
     async fn saved_unsupported_cdn_is_rechecked_without_losing_identity() {
         let dir = tmp();
@@ -641,6 +643,7 @@ mod tests {
         assert_eq!(d.selected, None);
     }
 
+    // By dubr1k (github.com/dubr1k), PR #33.
     #[tokio::test]
     async fn saved_unsupported_hysteria2_is_rechecked_without_losing_identity() {
         let dir = tmp();

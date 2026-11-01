@@ -305,6 +305,7 @@ impl XhttpClient {
         self.mode
     }
 
+    // By dubr1k (github.com/dubr1k), PR #32.
     /// One shared wire-format builder for both HTTP/1.1 and HTTP/2.
     fn request_shape(
         &self,
@@ -718,6 +719,7 @@ impl XhttpClient {
         }
     }
 
+    // By dubr1k (github.com/dubr1k), PR #32.
     fn uplink_method(&self) -> http::Method {
         // Validated by XhttpConfig; unknown methods never reach the wire.
         match self.cfg.uplink_method() {
@@ -844,6 +846,7 @@ mod tests {
         assert!(chrome_version() >= 144);
     }
 
+    // By dubr1k (github.com/dubr1k), PR #32.
     #[test]
     fn cdn_request_has_sequence_and_token_in_query_not_path_or_referer() {
         let cfg = XhttpConfig::from_xray(&serde_json::json!({

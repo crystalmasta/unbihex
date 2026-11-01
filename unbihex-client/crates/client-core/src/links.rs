@@ -165,6 +165,7 @@ fn parse_generic(link: &str, scheme: &str) -> Result<Server> {
     let (host, port) = split_host_port(&pct(&hostport));
     s.host = host;
     s.port = port;
+    // By dubr1k (github.com/dubr1k), PR #33.
     if scheme == "hysteria2" || scheme == "hy2" {
         // Use the engine's strict parser for the effective address/default port
         // instead of showing port 0 for the standard optional :443 URI form.
@@ -420,6 +421,7 @@ mod tests {
         assert!(!s.is_supported());
     }
 
+    // By dubr1k (github.com/dubr1k), PR #33.
     #[test]
     fn hysteria2_links_use_native_core_and_refuse_unimplemented_options() {
         for uri in [

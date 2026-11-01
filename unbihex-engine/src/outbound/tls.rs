@@ -34,6 +34,7 @@ impl std::fmt::Debug for TlsClient {
 }
 
 impl TlsClient {
+    // By dubr1k (github.com/dubr1k), PR #33.
     /// QUIC uses the same roots and pinning policy, but not the TCP-only
     /// ClientHello rewriter. ALPN is fixed by the Hysteria 2 protocol.
     pub(crate) fn quic_config(

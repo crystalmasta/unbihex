@@ -49,6 +49,7 @@ fn xray_bin() -> Option<String> {
     std::env::var("XRAY_BIN").ok().filter(|p| !p.is_empty())
 }
 
+// By dubr1k (github.com/dubr1k), PR #32.
 fn loopback_freedom() -> serde_json::Value {
     // Recent Xray blocks private targets by default. Only this disposable test
     // server may reach the loopback echo destinations; production is untouched.
@@ -433,6 +434,7 @@ fn xhttp(path: &str, mode: &str, xmux: Option<serde_json::Value>) -> XhttpConfig
     XhttpConfig::from_xray(&v).unwrap()
 }
 
+// By dubr1k (github.com/dubr1k), PR #32.
 /// CDN-style GET packet uploads, custom session IDs and tokenish query padding.
 /// All listeners and destinations are loopback; no running server is modified.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

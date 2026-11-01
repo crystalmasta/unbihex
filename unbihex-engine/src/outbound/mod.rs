@@ -157,6 +157,7 @@ pub async fn build_outbound(
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
             Arc::new(vless::VlessOutbound::new(c, server, ctx.sockets.clone())?)
         }
+        // By dubr1k (github.com/dubr1k), PR #33.
         OutboundConfig::Hysteria2(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
             Arc::new(hysteria2::Hysteria2Outbound::new(c, server, ctx.sockets.clone())?)

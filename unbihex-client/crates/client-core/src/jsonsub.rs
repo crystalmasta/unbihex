@@ -172,6 +172,7 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
         .cloned()
         .unwrap_or_else(|| server.clone());
     match protocol {
+        // By dubr1k (github.com/dubr1k), PR #33.
         "hysteria" | "hysteria2" => {
             let h = stream
                 .get("hysteriaSettings")
@@ -554,6 +555,7 @@ mod tests {
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 
+    // By dubr1k (github.com/dubr1k), PR #33.
     #[test]
     fn xray_hysteria2_preserves_auth_sni_and_salamander() {
         let mut outbound = serde_json::json!({
@@ -757,6 +759,7 @@ mod tests {
         assert!(links[0].contains("extra="));
     }
 
+    // By dubr1k (github.com/dubr1k), PR #32.
     #[test]
     fn xray_cdn_xhttp_preserves_obfuscation_and_client_tls() {
         let body = serde_json::json!({"outbounds":[{
