@@ -37,8 +37,8 @@ the engine design in [`unbihex-engine/SPEC.en.md`](unbihex-engine/SPEC.en.md), t
 ## Author and license
 
 © 2026 Crystalmasta — https://github.com/crystalmasta.
-License — Business Source License 1.1, see [`LICENSE`](LICENSE). Free for individuals and for companies with
-annual revenue up to USD 500,000; larger companies need a paid license to use it in their infrastructure or
+License — Business Source License 1.1, see [`LICENSE`](LICENSE). Free for individuals and for organizations
+without revenue; any organization with revenue needs a paid license to use it in its infrastructure or
 products. Each version becomes Mozilla Public License 2.0 four years after its release; the versions up to
 client 0.2.6, engine 0.1.6 and test_server 0.0.2 were released under it already.
 Report vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).

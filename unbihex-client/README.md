@@ -280,4 +280,4 @@ Windows — `%APPDATA%\com.unbihex.client`, Android/iOS — внутренняя
 
 © 2026 Crystalmasta — https://github.com/crystalmasta.
 Лицензия — Business Source License 1.1, текст в файле `LICENSE`, пересказ — [`LICENSE.ru.md`](../LICENSE.ru.md):
-бесплатно для физических лиц и компаний с годовой выручкой до 500 000 $, через четыре года каждая версия переходит на MPL-2.0.
+бесплатно для физических лиц и организаций без выручки, через четыре года каждая версия переходит на MPL-2.0.

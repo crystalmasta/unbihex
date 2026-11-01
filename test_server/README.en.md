@@ -52,4 +52,4 @@ For measurements against Xray and sing-box on one stand there is a third-party s
 [pshakhmin/xray-bench](https://github.com/pshakhmin/xray-bench).
 
 ## License
-Business Source License 1.1, see [`LICENSE`](LICENSE): free for individuals and companies with annual revenue up to USD 500,000; each version becomes MPL-2.0 four years after its release. © 2026 Crystalmasta.
+Business Source License 1.1, see [`LICENSE`](LICENSE): free for individuals and organizations without revenue; each version becomes MPL-2.0 four years after its release. © 2026 Crystalmasta.
