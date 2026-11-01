@@ -33,6 +33,8 @@ jobs:
         with:
           script: |
             const SIGN = 'I have read the CLA Document and I hereby sign the CLA';
+            // CLA.md version: a signature of an older version does not count, its signer signs again.
+            const VERSION = 'v2';
             const BRANCH = 'cla-signatures';
             const FILE = 'signatures.json';
             const ALLOW = new Set(['crystalmasta']);
@@ -62,7 +64,7 @@ jobs:
             } catch (e) {
               if (e.status !== 404) throw e;
             }
-            const signed = new Set(sigs.map((s) => s.login.toLowerCase()));
+            const signed = new Set(sigs.filter((s) => s.cla === VERSION).map((s) => s.login.toLowerCase()));
 
             // The phrase as the whole comment signs for its author.
             if (context.eventName === 'issue_comment') {
@@ -75,11 +77,11 @@ jobs:
                   pr: number,
                   comment: context.payload.comment.html_url,
                   date: new Date().toISOString(),
-                  cla: 'v1',
+                  cla: VERSION,
                 });
                 await github.rest.repos.createOrUpdateFileContents({
                   owner, repo, path: FILE, branch: BRANCH, sha,
-                  message: `CLA signed by ${who.login} (PR #${number})`,
+                  message: `CLA ${VERSION} signed by ${who.login} (PR #${number})`,
                   content: Buffer.from(JSON.stringify(sigs, null, 2) + '\n').toString('base64'),
                 });
                 signed.add(who.login.toLowerCase());

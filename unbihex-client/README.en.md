@@ -282,4 +282,4 @@ Server links contain access keys: do not publish this file.
 ## Author and license
 
 © 2026 Crystalmasta — https://github.com/crystalmasta.
-License — Mozilla Public License 2.0, see the `LICENSE` file.
+License — Business Source License 1.1, see the `LICENSE` file: free for individuals and companies with annual revenue up to USD 500,000; each version becomes MPL-2.0 four years after its release.

@@ -51,4 +51,5 @@ cargo test        # наш клиент ↔ наш сервер на loopback: T
 [pshakhmin/xray-bench](https://github.com/pshakhmin/xray-bench).
 
 ## Лицензия
-Mozilla Public License 2.0, текст в [`LICENSE`](LICENSE). © 2026 Crystalmasta.
+Business Source License 1.1, текст в [`LICENSE`](LICENSE), пересказ — [`LICENSE.ru.md`](../LICENSE.ru.md):
+бесплатно для физических лиц и компаний с годовой выручкой до 500 000 $, через четыре года каждая версия переходит на MPL-2.0. © 2026 Crystalmasta.

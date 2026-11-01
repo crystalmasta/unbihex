@@ -16,4 +16,5 @@ cargo clippy --all-targets
 ## Автор и лицензия
 
 © 2026 Crystalmasta — https://github.com/crystalmasta.
-Лицензия — Mozilla Public License 2.0, текст в файле `LICENSE`.
+Лицензия — Business Source License 1.1, текст в файле `LICENSE`, пересказ — [`LICENSE.ru.md`](../LICENSE.ru.md):
+бесплатно для физических лиц и компаний с годовой выручкой до 500 000 $, через четыре года каждая версия переходит на MPL-2.0.
