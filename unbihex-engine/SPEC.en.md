@@ -44,7 +44,7 @@ unbihex/
 │  │     ├─ address.rs        # Address, TargetAddr
 │  │     ├─ session.rs        # Session, Network
 │  │     ├─ config.rs         # serde config structs (§5) + validation
-│  │     ├─ link.rs           # parsing vless:// and ss:// (§5.4)
+│  │     ├─ link.rs           # parsing vless://, ss://, hy2:// (§5.4, §5.5)
 │  │     ├─ router.rs         # rules (§6)
 │  │     ├─ dispatcher.rs     # outbound choice + relay (§7)
 │  │     ├─ relay.rs          # bidirectional copy with timeouts
@@ -67,6 +67,8 @@ unbihex/
 │  │     │  ├─ block.rs
 │  │     │  ├─ socks.rs       # SOCKS5 client (§11.3)
 │  │     │  ├─ tls.rs         # rustls client wrapper (§11.4)
+│  │     │  ├─ xhttp/         # XHTTP: HTTP/1.1 and HTTP/2, CDN format (§11.7)
+│  │     │  ├─ hysteria2/     # Hysteria 2: QUIC, HTTP/3, Salamander (§11.8)
 │  │     │  ├─ vless.rs       # §11.1
 │  │     │  └─ shadowsocks.rs # §11.2
 │  │     └─ platform/         # desktop system routes/DNS (§12), behind the "system-routes" feature
@@ -93,6 +95,7 @@ unbihex/
 - DNS: `hickory-proto`.
 - TLS: `tokio-rustls` / `rustls` 0.23 **with the `ring` provider**, without `aws-lc-rs` (it needs cmake and nasm), plus `webpki-roots`.
 - Cryptography: `aes-gcm`, `chacha20poly1305`, `hkdf`, `sha1`, `md-5`.
+- QUIC (Hysteria 2): `quinn` (runtime-tokio, rustls-ring), `h3`, `h3-quinn`; Salamander: `blake2`.
 - FFI: `jni` (only `cfg(target_os = "android")`).
 
 Platform dependencies go under `[target.'cfg(...)'.dependencies]`.
@@ -239,12 +242,15 @@ If any step fails, undo what has been done and return the error.
 ### 5.4 Share links (`type: "link"`)
 
 - `vless://<uuid>@<host>:<port>?security=tls&sni=<sni>&alpn=<a,b>&type=tcp&encryption=none#<name>`
-  - Only `type=tcp` (or none) and `security=tls|none` are supported. `flow`, `security=reality`, `type=ws|grpc|xhttp` give a clear `Unsupported("...")` error.
+  - Supported: `type=tcp|raw` (or none) and `type=xhttp|splithttp` (with `path`, `host`, `mode`, `extra`, §11.7),
+    `security=tls|reality|none` (REALITY takes `pbk`, `sid`, `sni`, `fp`) and `flow=xtls-rprx-vision` (`-udp443` too).
+    Other `type` values (`ws`, `grpc`, …), `flow`, `encryption` and `headerType` give a clear `Unsupported("...")` error.
   - If `sni` is not set, the host is used.
   - The host may be IPv6 in brackets.
   - Parameters are percent-decoded.
 - `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002), and the legacy form `ss://<base64(method:password@host:port)>#name`. Base64 is accepted with and without padding.
 - Plugins (`?plugin=`) are not supported; they are an error.
+- `hysteria2://` and `hy2://`: §5.5.
 
 ---
 
@@ -272,6 +278,10 @@ See [HYSTERIA2.md](HYSTERIA2.md) for the full contract, limits and verification 
 - `domain_suffix: "example.com"` matches `example.com` and `a.example.com`, but not `badexample.com`. A leading dot in the config is allowed and ignored.
 - All domains in the config are converted to ASCII lowercase through IDNA (`рф` → `xn--p1ai`).
 - If the target is an IP address, domain conditions are false. If the target is a domain, IP conditions are false on the first pick.
+- A decision by the name alone (`Router::pick_by_name`): the first rule with domain conditions that matches the name and
+  has no port, protocol or rule-set conditions decides for every connection to it. IP-only rules are skipped (they do
+  not concern names); a rule without domain conditions before it, and `final`, make no such decision. The TUN DNS
+  server answers NXDOMAIN by it (§8.2).
 - If `direct` is picked, the target is a domain and the decision was not made by a domain rule, the Dispatcher resolves the domain itself (with the same resolver as direct) and runs the rules again for each address (like IPIfNonMatch in Xray). If any address hits `block`, the session is blocked; if the first address leads to the proxy, the session goes to the proxy with the domain; otherwise direct connects only to the checked addresses (without resolving again, so that DNS rebinding cannot bypass the check). Sessions picked for the proxy are never resolved locally: that would leak the name to the local DNS.
 - DNS rebinding protection: when a direct session with a domain gets private addresses (`ip_private`), they are dropped, whatever rule picked the session. With no addresses left the session is blocked. Exceptions: single-label names, `localhost`, and the suffixes in `dns.fakeip_exclude` and `dns.allow_private_answers`. On the test server (with a VLESS inbound) the only exceptions are `dns.allow_private_answers`: a server has no LAN of its own, and `metadata` or `metadata.google.internal` lead to the cloud's metadata service.
 - Direct does not connect to the engine's own listen addresses (a loop), nor to the host's loopback addresses (127/8, ::1, 0.0.0.0, ::) when the client is not on this host (the source is not loopback and the inbound is not TUN).
@@ -521,6 +531,28 @@ exactly; only transport-owned keys are replaced. Stale transport cookies/query k
 cannot shadow new values. On loading saved state the client re-evaluates capability
 while preserving IDs, user labels and subscriptions.
 
+### 11.8 Hysteria 2
+
+Public specification: https://v2.hysteria.network/docs/developers/Protocol/
+
+- One QUIC connection per outbound (quinn, TLS 1.3, ALPN `h3`, WebPKI verification and optional leaf pins),
+  shared by TCP and UDP. `SocketFactory` creates the socket (protect and interface binding before quinn gets
+  it). With `salamander_password` the socket is wrapped in Salamander: `salt[8]` and the QUIC packet XORed with
+  BLAKE2b-256(password ‖ salt); GSO is off, MTU discovery is not used.
+- Authentication: HTTP/3 `POST https://hysteria/auth` with `Hysteria-Auth`, `Hysteria-CC-RX: 0` and a random
+  `Hysteria-Padding`. Only status 233 succeeds; `Hysteria-UDP` tells whether UDP is allowed.
+- TCP: a bidirectional QUIC stream, request `varint 0x401 | varint length | host:port | varint length | padding`,
+  response `status u8 | varint length | message | varint length | padding`; status ≠ 0 is a refusal (the
+  server's text is not logged).
+- UDP: QUIC datagrams `session u32 | packet u16 | fragment u8 | count u8 | varint length | host:port | data`,
+  fragments of at most 1200 bytes. Reassembly is bounded: 8 packets, 128 KiB, 5 s per packet; a flow queues
+  32 packets, and when it is full that flow's packets are dropped while other flows do not wait.
+- A closed connection is replaced for new flows only; open ones are never replayed. One dial serves everyone
+  (the others wait for it), at most 10 s per address. When it fails, flows arriving in the next 2 s get the
+  same error at once instead of waiting 10 s each.
+- Bandwidth in links (Brutal) is not used: congestion control is quinn's default.
+- Details, limits and verification commands: [HYSTERIA2.md](HYSTERIA2.md).
+
 ---
 
 ## 12. Desktop system network (feature `system-routes`, used only by `unbihex-cli`)
@@ -645,9 +677,9 @@ On Android the recommended loop protection is `VpnService.Builder.addDisallowedA
 **Unit tests** (in each module):
 - config: valid and invalid examples;
 - link: vless/ss, correct and erroneous;
-- router: all conditions, IDNA, rule order;
+- router: all conditions, IDNA, rule order, decisions by name;
 - fakeip: allocation, reuse, eviction;
-- dns server: A, AAAA, HTTPS, FORMERR;
+- dns server: A, AAAA, HTTPS, FORMERR, NXDOMAIN for blocked names;
 - encoding and parsing of VLESS and SOCKS5 headers;
 - Shadowsocks: KDF and encryption.
 
@@ -658,6 +690,9 @@ On Android the recommended loop protection is `VpnService.Builder.addDisallowedA
 4. SOCKS inbound → VLESS + TLS with a self-signed certificate. For the test a hidden `#[cfg(test)]` root is added to the TLS config (`rcgen`, a dev-dependency). There is no public insecure option.
 5. SOCKS inbound → Shadowsocks outbound → a mini SS server → echo (all three methods), plus UDP.
 6. A block rule: the connection is closed.
+7. Against real servers when `XRAY_BIN` / `HYSTERIA_BIN` are set (otherwise the tests return at once):
+   `tests/xray_interop.rs` (Vision, REALITY, XHTTP, the CDN format of §11.7), `tests/hysteria2_interop.rs`
+   (Hysteria 2 with and without Salamander, §11.8).
 
 **CI** (`.github/workflows/ci.yml`), matrix:
 - `ubuntu-latest`: fmt, clippy `-D warnings`, test;

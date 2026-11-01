@@ -73,7 +73,9 @@ deleted/re-added. Stale ping results are cleared when derived metadata changes.
   there is no DNS lookup of `hysteria` or following of HTTP redirects.
 - One lazy, single-flight authenticated connection is shared by concurrent flows.
   The HTTP/3 driver and sender live as long as that connection. New flows reconnect
-  after closure; existing streams/datagrams are never silently replayed.
+  after closure; existing streams/datagrams are never silently replayed. After a
+  failed dial, flows arriving within 2 s get the same error at once instead of
+  each dialling again.
 - A per-address QUIC/auth handshake and TCP stream setup each have a 10 s timeout.
   Keepalive is 10 s, idle timeout 30 s. Dropping an outbound/last flow releases its
   endpoint, connection and background tasks; cancelling auth never caches it.

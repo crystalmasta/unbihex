@@ -44,7 +44,7 @@ unbihex/
 │  │     ├─ address.rs        # Address, TargetAddr
 │  │     ├─ session.rs        # Session, Network
 │  │     ├─ config.rs         # serde-структуры конфига (§5) + валидация
-│  │     ├─ link.rs           # разбор vless:// и ss:// (§5.4)
+│  │     ├─ link.rs           # разбор vless://, ss://, hy2:// (§5.4, §5.5)
 │  │     ├─ router.rs         # правила (§6)
 │  │     ├─ dispatcher.rs     # выбор outbound + relay (§7)
 │  │     ├─ relay.rs          # двунаправленное копирование с таймаутами
@@ -67,6 +67,8 @@ unbihex/
 │  │     │  ├─ block.rs
 │  │     │  ├─ socks.rs       # SOCKS5 клиент (§11.3)
 │  │     │  ├─ tls.rs         # обёртка rustls-клиента (§11.4)
+│  │     │  ├─ xhttp/         # XHTTP: HTTP/1.1 и HTTP/2, формат CDN (§11.7)
+│  │     │  ├─ hysteria2/     # Hysteria 2: QUIC, HTTP/3, Salamander (§11.8)
 │  │     │  ├─ vless.rs       # §11.1
 │  │     │  └─ shadowsocks.rs # §11.2
 │  │     └─ platform/         # системные маршруты/DNS для десктопа (§12), за feature "system-routes"
@@ -93,6 +95,7 @@ unbihex/
 - DNS: `hickory-proto`.
 - TLS: `tokio-rustls` / `rustls` 0.23 **с провайдером `ring`**, без `aws-lc-rs` (ему нужны cmake и nasm), плюс `webpki-roots`.
 - Шифрование: `aes-gcm`, `chacha20poly1305`, `hkdf`, `sha1`, `md-5`.
+- QUIC (Hysteria 2): `quinn` (runtime-tokio, rustls-ring), `h3`, `h3-quinn`; Salamander — `blake2`.
 - FFI: `jni` (только `cfg(target_os = "android")`).
 
 Платформенные зависимости подключаются через `[target.'cfg(...)'.dependencies]`.
@@ -239,12 +242,15 @@ pub struct PlatformHooks {
 ### 5.4 Share-ссылки (`type: "link"`)
 
 - `vless://<uuid>@<host>:<port>?security=tls&sni=<sni>&alpn=<a,b>&type=tcp&encryption=none#<name>`
-  - Поддерживаются только `type=tcp` (или отсутствует) и `security=tls|none`. `flow`, `security=reality`, `type=ws|grpc|xhttp` дают понятную ошибку `Unsupported("...")`.
+  - Поддерживаются `type=tcp|raw` (или отсутствует) и `type=xhttp|splithttp` (с `path`, `host`, `mode`, `extra` — §11.7),
+    `security=tls|reality|none` (для REALITY — `pbk`, `sid`, `sni`, `fp`) и `flow=xtls-rprx-vision` (`-udp443` тоже).
+    Другие `type` (`ws`, `grpc`, …), `flow`, `encryption` и `headerType` дают понятную ошибку `Unsupported("...")`.
   - Если `sni` не задан, берётся host.
   - Host может быть IPv6 в скобках.
   - Параметры percent-decoded.
 - `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002), а также legacy-формат `ss://<base64(method:password@host:port)>#name`. Base64 принимается с паддингом и без.
 - Плагины (`?plugin=`) не поддерживаются, это ошибка.
+- `hysteria2://` и `hy2://` — §5.5.
 
 ---
 
@@ -272,6 +278,10 @@ Hysteria 1, hopping, ECH и insecure TLS не реализованы, такие
 - `domain_suffix: "example.com"` совпадает с `example.com` и `a.example.com`, но не с `badexample.com`. Ведущая точка в конфиге допустима и игнорируется.
 - Все домены из конфига переводятся в ASCII lowercase через IDNA (`рф` → `xn--p1ai`).
 - Если цель задана IP-адресом, доменные условия ложны. Если цель — домен, IP-условия ложны при первом выборе.
+- Решение по одному имени (`Router::pick_by_name`): правило с доменными условиями, без условий на порт, протокол
+  и rule-set, первым совпавшее с именем, решает за все соединения к нему. Правила только по IP пропускаются (имени
+  они не касаются); правило без доменных условий раньше него и `final` такого решения не дают. По нему DNS-сервер
+  TUN отвечает NXDOMAIN (§8.2).
 - Если выбран `direct`, а цель — домен и решение приняло не доменное правило, Dispatcher резолвит домен сам (тем же резолвером, что и direct) и заново прогоняет правила по каждому адресу (как IPIfNonMatch в Xray). Хоть один адрес попал в `block` → сессия блокируется; первый адрес ведёт в прокси → сессия уходит в прокси с доменом; иначе direct подключается только к проверенным адресам (без повторного резолвинга, чтобы DNS rebinding не обошёл проверку). Сессии, выбранные для прокси, локально не резолвятся: это утечка имени в локальный DNS.
 - Защита от DNS rebinding: если direct-сессия с доменом получила приватные адреса (`ip_private`), они отбрасываются, какое бы правило ни выбрало сессию. Не остаётся адресов — сессия блокируется. Исключения: однословные имена, `localhost`, суффиксы из `dns.fakeip_exclude` и `dns.allow_private_answers`. На тестовом сервере (есть VLESS inbound) исключения — только `dns.allow_private_answers`: у сервера нет своей LAN, а `metadata` или `metadata.google.internal` ведут к метаданным облака.
 - Direct не подключается к собственным listen-адресам движка (петля) и к loopback-адресам хоста (127/8, ::1, 0.0.0.0, ::), если клиент не на этом хосте (источник не loopback и inbound не TUN).
@@ -522,6 +532,28 @@ plaintext origin на одноразовых loopback-listener-ах. Это пр
 подменять новые. При открытии сохранённого состояния клиент пересчитывает доступность,
 сохраняя ID, пользовательские названия и подписки.
 
+### 11.8 Hysteria 2
+
+Публичная спецификация: https://v2.hysteria.network/docs/developers/Protocol/
+
+- Одно QUIC-соединение на outbound (quinn, TLS 1.3, ALPN `h3`, проверка WebPKI и необязательные leaf-пины),
+  общее для TCP и UDP. Сокет создаёт `SocketFactory` (protect и привязка к интерфейсу — до передачи в quinn).
+  При `salamander_password` сокет оборачивается Salamander: `salt[8]` и QUIC-пакет, сложенный по XOR с
+  BLAKE2b-256(пароль ‖ salt); GSO выключен, MTU discovery не используется.
+- Аутентификация: HTTP/3 `POST https://hysteria/auth` с `Hysteria-Auth`, `Hysteria-CC-RX: 0` и случайным
+  `Hysteria-Padding`. Успех — только статус 233; `Hysteria-UDP` говорит, разрешён ли UDP.
+- TCP: двунаправленный QUIC-поток, запрос `varint 0x401 | varint длина | host:port | varint длина | padding`,
+  ответ `status u8 | varint длина | сообщение | varint длина | padding`; status ≠ 0 — отказ (текст сервера в лог
+  не попадает).
+- UDP: QUIC datagram `session u32 | packet u16 | fragment u8 | count u8 | varint длина | host:port | данные`,
+  фрагменты не больше 1200 байт. Сборка ограничена: 8 пакетов, 128 КиБ, 5 с на пакет; очередь потока —
+  32 пакета, при переполнении пакеты этого потока отбрасываются, остальные потоки не ждут.
+- Закрытое соединение заменяется только для новых потоков, уже открытые не переигрываются. Подключение
+  одно на всех (остальные ждут его), к каждому адресу не дольше 10 с. Если оно не удалось, потоки, пришедшие
+  в следующие 2 с, сразу получают ту же ошибку, а не ждут каждый свои 10 с.
+- Скорости из ссылок (Brutal) не используются: контроль перегрузки — штатный в quinn.
+- Подробности, лимиты и команды проверки — [HYSTERIA2.md](HYSTERIA2.md).
+
 ---
 
 ## 12. Системная сеть на десктопе (feature `system-routes`, используется только `unbihex-cli`)
@@ -646,9 +678,9 @@ const char *unbihex_version(void);                        // статическ�
 **Unit-тесты** (в каждом модуле):
 - config: валидные и невалидные примеры;
 - link: vless/ss, корректные и ошибочные;
-- router: все условия, IDNA, порядок правил;
+- router: все условия, IDNA, порядок правил, решение по имени;
 - fakeip: выдача, повтор, вытеснение;
-- dns server: A, AAAA, HTTPS, FORMERR;
+- dns server: A, AAAA, HTTPS, FORMERR, NXDOMAIN для заблокированных имён;
 - кодирование и разбор заголовков VLESS и SOCKS5;
 - Shadowsocks: KDF и шифрование.
 
@@ -659,6 +691,9 @@ const char *unbihex_version(void);                        // статическ�
 4. SOCKS inbound → VLESS + TLS с самоподписанным сертификатом. Для теста в TLS-конфиг добавляется скрытый `#[cfg(test)]`-корень (`rcgen`, dev-dependency). Публичной опции insecure нет.
 5. SOCKS inbound → Shadowsocks outbound → мини-SS-сервер → echo (все три метода), плюс UDP.
 6. Правило block: соединение закрывается.
+7. Против настоящих серверов, если заданы `XRAY_BIN` / `HYSTERIA_BIN` (иначе тесты сразу выходят):
+   `tests/xray_interop.rs` (Vision, REALITY, XHTTP, формат CDN §11.7), `tests/hysteria2_interop.rs`
+   (Hysteria 2 с Salamander и без, §11.8).
 
 **CI** (`.github/workflows/ci.yml`), матрица:
 - `ubuntu-latest`: fmt, clippy `-D warnings`, test;
