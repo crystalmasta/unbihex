@@ -21,8 +21,8 @@ VPN-клиент для подписок на собственном ядре **
   Подписки и базы правил скачиваются только по `https://`; `http://` разрешён лишь для адресов
   этого компьютера и локальной сети (`127.0.0.1`, `localhost`, `192.168.x.x` и т. п.),
   перенаправления на `http://` в интернет отклоняются. Ответ подписки — не больше 8 МБ, файл базы — 256 МБ (пишется на диск по мере скачивания).
-- Ручное добавление ссылок `vless://`, `ss://`, `socks://`.
-- TLS и REALITY отправляют ClientHello как у Chrome (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768),
+- Ручное добавление ссылок `vless://`, `ss://`, `socks://`, `hysteria2://` / `hy2://`.
+- VLESS TLS и REALITY отправляют ClientHello как у Chrome (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768),
   а не узнаваемый ClientHello rustls; `fp=none` в ссылке отключает это.
 - Проверка пинга на выбор: через прокси GET или HEAD (запрос идёт через само ядро до `cp.cloudflare.com/generate_204`,
   проверяется вся цепочка), TCP (только соединение с портом сервера) или ICMP. TCP и ICMP проверяют и серверы
@@ -55,10 +55,14 @@ VPN-клиент для подписок на собственном ядре **
   транспорты TCP и XHTTP (режимы packet-up, stream-up и stream-one поверх HTTP/2; packet-up — и поверх HTTP/1.1).
 - **Shadowsocks** с AEAD-шифрами aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
 - **SOCKS5**.
+- **Hysteria2**: TCP и UDP поверх QUIC/TLS, в том числе Salamander; ссылки и JSON-подписки Xray/sing-box.
+  Сертификат проверяется всегда. QUIC-отпечаток Quinn не имитирует браузер; hopping, ECH, Brutal и insecure TLS не поддерживаются
+  (скорости из ссылки пропускаются). Пинг «TCP» для Hysteria2 идёт через сам протокол: сервер слушает UDP.
+  Подробности и проверки — [HYSTERIA2.md](../unbihex-engine/HYSTERIA2.md).
 
 Пока не поддерживается — такие серверы видны в списке, но серые:
 
-- протоколы VMess, Trojan, Hysteria2, TUIC, WireGuard;
+- протоколы VMess, Trojan, Hysteria 1, TUIC, WireGuard;
 - у VLESS — транспорты ws, grpc, httpupgrade, XHTTP поверх HTTP/3 и другие виды `flow`, кроме Vision;
 - у Shadowsocks — Shadowsocks 2022 и плагины.
 

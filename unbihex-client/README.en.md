@@ -22,8 +22,8 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   of this computer and the local network (`127.0.0.1`, `localhost`, `192.168.x.x` and so on), and redirects to
   `http://` on the internet are refused. A subscription response is at most 8 MB, a database file at most 256 MB
   (written to disk as it downloads).
-- Adding `vless://`, `ss://` and `socks://` links by hand.
-- TLS and REALITY send a Chrome ClientHello (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768) instead of
+- Adding `vless://`, `ss://`, `socks://`, `hy2://` and `hysteria2://` links by hand.
+- VLESS TLS and REALITY send a Chrome ClientHello (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768) instead of
   rustls's recognisable one; `fp=none` in a link turns this off.
 - A choice of ping tests: through the proxy with GET or HEAD (the request goes through the engine itself to
   `cp.cloudflare.com/generate_204`, so the whole chain is checked), TCP (a connection to the server port only) or ICMP.
@@ -56,10 +56,14 @@ Works:
   the TCP and XHTTP transports (packet-up, stream-up and stream-one over HTTP/2; packet-up also over HTTP/1.1).
 - **Shadowsocks** with the AEAD ciphers aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
 - **SOCKS5**.
+- **Hysteria2**: TCP/UDP over QUIC/TLS, including Salamander, share links and Xray/sing-box JSON subscriptions.
+  Certificate verification is mandatory. Quinn does not mimic a browser QUIC fingerprint; hopping, ECH, Brutal and insecure TLS are unsupported
+  (bandwidth in a link is skipped). The "TCP" ping of a Hysteria2 server goes through the protocol itself: the server listens on UDP.
+  See [HYSTERIA2.md](../unbihex-engine/HYSTERIA2.md) for scope and verification.
 
 Not supported yet — such servers are listed, but greyed out:
 
-- the VMess, Trojan, Hysteria2, TUIC and WireGuard protocols;
+- the VMess, Trojan, Hysteria 1, TUIC and WireGuard protocols;
 - for VLESS: the ws, grpc and httpupgrade transports, XHTTP over HTTP/3, and `flow` kinds other than Vision;
 - for Shadowsocks: Shadowsocks 2022 and plugins.
 

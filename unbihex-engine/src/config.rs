@@ -350,6 +350,8 @@ pub struct UserConfig {
 pub enum OutboundConfig {
     /// VLESS over TCP, optionally with TLS.
     Vless(VlessConfig),
+    /// Hysteria 2 over QUIC (TCP streams and UDP datagrams).
+    Hysteria2(Hysteria2Config),
     /// Shadowsocks AEAD.
     Shadowsocks(ShadowsocksConfig),
     /// Upstream SOCKS5 proxy.
@@ -367,6 +369,7 @@ impl OutboundConfig {
     pub fn tag(&self) -> &str {
         match self {
             OutboundConfig::Vless(c) => &c.tag,
+            OutboundConfig::Hysteria2(c) => &c.tag,
             OutboundConfig::Shadowsocks(c) => &c.tag,
             OutboundConfig::Socks(c) => &c.tag,
             OutboundConfig::Link(c) => &c.tag,
@@ -378,10 +381,69 @@ impl OutboundConfig {
     pub fn server(&self) -> Option<(&str, u16)> {
         match self {
             OutboundConfig::Vless(c) => Some((&c.server, c.port)),
+            OutboundConfig::Hysteria2(c) => Some((&c.server, c.port)),
             OutboundConfig::Shadowsocks(c) => Some((&c.server, c.port)),
             OutboundConfig::Socks(c) => Some((&c.server, c.port)),
             _ => None,
         }
+    }
+}
+
+/// Native Hysteria 2 outbound. TLS verification and ALPN `h3` are mandatory.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hysteria2Config {
+    /// Routing tag.
+    pub tag: String,
+    /// Server host or IP, without IPv6 brackets.
+    pub server: String,
+    /// UDP port.
+    pub port: u16,
+    /// Entire authentication string (including `username:password`, if used).
+    pub password: Secret,
+    /// Certificate server name; defaults to `server`.
+    #[serde(default)]
+    pub sni: Option<String>,
+    /// Optional leaf SHA-256 pins, in addition to normal WebPKI validation.
+    #[serde(default)]
+    pub pinned_sha256: Vec<String>,
+    /// Optional Salamander pre-shared key (at least four UTF-8 bytes).
+    #[serde(default)]
+    pub salamander_password: Option<Secret>,
+}
+
+impl Hysteria2Config {
+    /// Validates metadata without opening sockets or logging authentication data.
+    pub fn validate(&self) -> Result<()> {
+        if self.server.trim().is_empty() || self.port == 0 {
+            return Err(Error::config("hysteria2: invalid server"));
+        }
+        if self.password.expose().is_empty()
+            || self.password.expose().len() > 4096
+            || http::HeaderValue::from_str(self.password.expose()).is_err()
+        {
+            return Err(Error::config("hysteria2: invalid authentication string"));
+        }
+        rustls::pki_types::ServerName::try_from(self.sni.as_deref().unwrap_or(&self.server))
+            .map_err(|_| Error::config("hysteria2: invalid TLS server name"))?;
+        for pin in &self.pinned_sha256 {
+            let clean = pin.replace(':', "");
+            if clean.len() != 64 || !clean.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(Error::config(
+                    "hysteria2: pinSHA256 must contain 32 hex bytes",
+                ));
+            }
+        }
+        if self
+            .salamander_password
+            .as_ref()
+            .is_some_and(|s| s.expose().len() < 4 || s.expose().len() > 4096)
+        {
+            return Err(Error::config(
+                "hysteria2: Salamander password must be 4-4096 bytes",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -991,6 +1053,9 @@ impl Config {
             }
             if let OutboundConfig::Shadowsocks(s) = o {
                 crate::outbound::shadowsocks::Method::parse(&s.method)?;
+            }
+            if let OutboundConfig::Hysteria2(h) = o {
+                h.validate()?;
             }
             if let Some((server, port)) = o.server()
                 && (server.trim().is_empty() || port == 0)

@@ -45,6 +45,10 @@ pub async fn measure(server: &Server, method: PingMethod, env: &PingEnv) -> Resu
         match method {
             PingMethod::ProxyGet => http_delay(server, env, "GET").await,
             PingMethod::ProxyHead => http_delay(server, env, "HEAD").await,
+            // Hysteria 2 listens on UDP: a TCP connect to its port says nothing.
+            PingMethod::Tcp if server.protocol == "hysteria2" => {
+                http_delay(server, env, "GET").await
+            }
             PingMethod::Tcp => tcp_delay(server, env).await,
             PingMethod::Icmp => icmp_delay(server, env).await,
         }

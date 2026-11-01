@@ -91,6 +91,64 @@ fn simple_link(scheme: &str, secret: &str, host: &str, port: u64, name: &str) ->
     format!("{scheme}://{}@{}#{}", enc(secret), host_port(host, port), enc(name))
 }
 
+// By dubr1k (github.com/dubr1k), PR #33: Hysteria 2 from Xray and sing-box JSON.
+fn hysteria2_link(
+    secret: &str,
+    host: &str,
+    port: u64,
+    params: &[(&str, String)],
+    name: &str,
+) -> String {
+    let q = params
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k}={}", enc(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!(
+        "hysteria2://{}@{}?{}#{}",
+        enc(secret),
+        host_port(host, port),
+        q,
+        enc(name)
+    )
+}
+
+fn unknown_fields(value: &Value, allowed: &[&str]) -> bool {
+    !value.is_null()
+        && value
+            .as_object()
+            .is_none_or(|o| o.keys().any(|k| !allowed.contains(&k.as_str())))
+}
+
+fn invalid_string(value: &Value, key: &str) -> bool {
+    value
+        .get(key)
+        .is_some_and(|v| !v.is_null() && !v.is_string())
+}
+
+fn invalid_alpn(value: &Value) -> bool {
+    match value.get("alpn") {
+        None | Some(Value::Null) | Some(Value::String(_)) => false,
+        Some(Value::Array(a)) => a.iter().any(|v| !v.is_string()),
+        _ => true,
+    }
+}
+
+fn mark_unsupported(params: &mut Vec<(&'static str, String)>, condition: bool) {
+    if condition {
+        params.push((crate::links::JSON_OPTIONS_DROPPED, "1".into()));
+    }
+}
+
+fn json_bool_flag(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::Bool(true)) => "1".into(),
+        None | Some(Value::Null) | Some(Value::Bool(false)) => "0".into(),
+        _ => "invalid".into(),
+    }
+}
+
 /// One Xray outbound → link.
 fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
     let protocol = str_of(ob, "protocol");
@@ -114,6 +172,101 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
         .cloned()
         .unwrap_or_else(|| server.clone());
     match protocol {
+        "hysteria" | "hysteria2" => {
+            let h = stream
+                .get("hysteriaSettings")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let version = settings.get("version").and_then(Value::as_u64);
+            if version != Some(2) {
+                return Some(simple_link(
+                    "hysteria",
+                    str_of(&h, "auth"),
+                    host,
+                    port,
+                    name,
+                ));
+            }
+            let t = stream.get("tlsSettings").cloned().unwrap_or(Value::Null);
+            let mut params = vec![
+                ("security", "tls".into()),
+                ("sni", str_of(&t, "serverName").into()),
+                ("alpn", join_alpn(t.get("alpn"))),
+                ("insecure", json_bool_flag(t.get("allowInsecure"))),
+                ("fp", str_of(&t, "fingerprint").into()),
+            ];
+            let valid_stream = str_of(&stream, "network") == "hysteria"
+                && str_of(&stream, "security") == "tls"
+                && h.get("version").and_then(Value::as_u64) == Some(2);
+            mark_unsupported(
+                &mut params,
+                !valid_stream
+                    || unknown_fields(ob, &["protocol", "tag", "settings", "streamSettings"])
+                    || unknown_fields(&settings, &["address", "port", "version"])
+                    || unknown_fields(
+                        &stream,
+                        &[
+                            "network",
+                            "security",
+                            "tlsSettings",
+                            "hysteriaSettings",
+                            "finalmask",
+                        ],
+                    )
+                    || unknown_fields(&h, &["version", "auth", "udpIdleTimeout"])
+                    || unknown_fields(
+                        &t,
+                        &[
+                            "serverName",
+                            "alpn",
+                            "allowInsecure",
+                            "fingerprint",
+                            "pinnedPeerCertSha256",
+                        ],
+                    )
+                    || invalid_string(&t, "serverName")
+                    || invalid_string(&t, "fingerprint")
+                    || invalid_alpn(&t),
+            );
+            if let Some(pins) = t.get("pinnedPeerCertSha256").filter(|p| !p.is_null()) {
+                // Xray pins can establish trust (including a CA), whereas
+                // native pins only narrow WebPKI trust to a leaf certificate.
+                // Do not translate different policies or discard an empty pin.
+                mark_unsupported(&mut params, !pins.as_array().is_some_and(|a| a.is_empty()));
+            }
+            if let Some(m) = stream.get("finalmask").filter(|v| !v.is_null()) {
+                let udp = m.get("udp").and_then(Value::as_array);
+                match udp {
+                    Some(a) if a.is_empty() => {}
+                    Some(a) if a.len() == 1 && str_of(&a[0], "type") == "salamander" => {
+                        let settings = a[0].get("settings").cloned().unwrap_or(Value::Null);
+                        params.push(("obfs", "salamander".into()));
+                        params.push(("obfs-password", str_of(&settings, "password").into()));
+                        mark_unsupported(
+                            &mut params,
+                            unknown_fields(&a[0], &["type", "settings"])
+                                || unknown_fields(&settings, &["password"]),
+                        );
+                    }
+                    None if m.as_object().is_some_and(|o| o.is_empty()) => {}
+                    _ => mark_unsupported(&mut params, true),
+                }
+                mark_unsupported(
+                    &mut params,
+                    unknown_fields(m, &["udp", "tcp"])
+                        || m.get("tcp").is_some_and(|v| {
+                            !v.is_null() && !v.as_array().is_some_and(|a| a.is_empty())
+                        }),
+                );
+            }
+            Some(hysteria2_link(
+                str_of(&h, "auth"),
+                host,
+                port,
+                &params,
+                name,
+            ))
+        }
         "vless" => {
             let network = str_of(&stream, "network");
             let security = str_of(&stream, "security");
@@ -196,7 +349,15 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
     }
 }
 
-const XRAY_PROXIES: &[&str] = &["vless", "vmess", "trojan", "shadowsocks", "socks"];
+const XRAY_PROXIES: &[&str] = &[
+    "vless",
+    "vmess",
+    "trojan",
+    "shadowsocks",
+    "socks",
+    "hysteria",
+    "hysteria2",
+];
 
 fn xray_config(cfg: &Value, out: &mut Vec<String>) {
     let remarks = str_of(cfg, "remarks");
@@ -292,7 +453,66 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
         "shadowsocks" => Some(ss_link(str_of(ob, "method"), str_of(ob, "password"), host, port, name)),
         "socks" => Some(socks_link(str_of(ob, "username"), str_of(ob, "password"), host, port, name)),
         "trojan" => Some(simple_link("trojan", str_of(ob, "password"), host, port, name)),
-        "hysteria2" => Some(simple_link("hysteria2", str_of(ob, "password"), host, port, name)),
+        "hysteria2" => {
+            let mut params = vec![
+                ("security", "tls".into()),
+                ("sni", str_of(&tls, "server_name").into()),
+                ("alpn", join_alpn(tls.get("alpn"))),
+                ("insecure", json_bool_flag(tls.get("insecure"))),
+            ];
+            mark_unsupported(
+                &mut params,
+                unknown_fields(
+                    ob,
+                    &[
+                        "type",
+                        "tag",
+                        "server",
+                        "server_port",
+                        "password",
+                        "tls",
+                        "obfs",
+                        "up_mbps",
+                        "down_mbps",
+                        "server_ports",
+                        "hop_interval",
+                    ],
+                ) || unknown_fields(&tls, &["enabled", "server_name", "alpn", "insecure"])
+                    || tls.get("enabled").is_some_and(|v| v != &Value::Bool(true))
+                    || invalid_string(&tls, "server_name")
+                    || invalid_alpn(&tls),
+            );
+            if let Some(o) = ob.get("obfs").filter(|o| !o.is_null()) {
+                params.push(("obfs", str_of(o, "type").into()));
+                params.push(("obfs-password", str_of(o, "password").into()));
+                mark_unsupported(
+                    &mut params,
+                    unknown_fields(o, &["type", "password"])
+                        || invalid_string(o, "type")
+                        || invalid_string(o, "password"),
+                );
+            }
+            for (source, query) in [("up_mbps", "upmbps"), ("down_mbps", "downmbps")] {
+                if let Some(v) = ob
+                    .get(source)
+                    .filter(|v| !v.is_null() && v.as_u64() != Some(0))
+                {
+                    params.push((query, v.to_string()));
+                }
+            }
+            mark_unsupported(
+                &mut params,
+                ob.get("server_ports").is_some_and(|v| !v.is_null())
+                    || ob.get("hop_interval").is_some_and(|v| !v.is_null()),
+            );
+            Some(hysteria2_link(
+                str_of(ob, "password"),
+                host,
+                port,
+                &params,
+                name,
+            ))
+        }
         "tuic" => Some(simple_link("tuic", str_of(ob, "uuid"), host, port, name)),
         "vmess" => {
             let j = json!({ "v": "2", "ps": name, "add": host, "port": port.to_string(),
@@ -333,6 +553,134 @@ mod tests {
     use crate::links::parse_server;
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
+
+    #[test]
+    fn xray_hysteria2_preserves_auth_sni_and_salamander() {
+        let mut outbound = serde_json::json!({
+            "protocol":"hysteria","tag":"HY2",
+            "settings":{"address":"198.51.100.10","port":443,"version":2},
+            "streamSettings":{"network":"hysteria","security":"tls",
+                "hysteriaSettings":{"version":2,"auth":"user:password"},
+                "tlsSettings":{"serverName":"hy.example","alpn":["h3"],"fingerprint":"chrome"},
+                "finalmask":{"tcp":[],"udp":[{"type":"salamander","settings":{"password":"test-obfs-password"}}]}}
+        });
+        let links =
+            links_from_json(&serde_json::json!({"outbounds":[outbound.clone()]}).to_string())
+                .unwrap();
+        let s = parse_server(&links[0]).unwrap();
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        let unbihex_engine::config::OutboundConfig::Hysteria2(c) =
+            unbihex_engine::link::parse_link(&links[0], "proxy").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(c.password.expose(), "user:password");
+        assert_eq!(c.sni.as_deref(), Some("hy.example"));
+        assert_eq!(
+            c.salamander_password.unwrap().expose(),
+            "test-obfs-password"
+        );
+        outbound["streamSettings"]["tlsSettings"]["allowInsecure"] = json!(true);
+        let links = links_from_json(&json!({"outbounds":[outbound]}).to_string()).unwrap();
+        assert!(!parse_server(&links[0]).unwrap().is_supported());
+    }
+
+    #[test]
+    fn xray_hysteria2_refuses_dropped_dial_options() {
+        let outbound = json!({"protocol":"hysteria","tag":"HY2",
+            "settings":{"address":"198.51.100.10","port":443,"version":2},
+            "streamSettings":{"network":"hysteria","security":"tls",
+                "hysteriaSettings":{"version":2,"auth":"user:password"}}});
+        for (key, value) in [
+            ("sendThrough", json!("192.0.2.5")),
+            (
+                "proxySettings",
+                json!({"tag":"previous-hop","transportLayer":true}),
+            ),
+            ("mux", json!({"enabled":true})),
+            ("futureDialOption", json!(true)),
+        ] {
+            let mut configured = outbound.clone();
+            configured[key] = value;
+            let links = links_from_json(&json!({"outbounds":[configured]}).to_string()).unwrap();
+            assert!(
+                !parse_server(&links[0]).unwrap().is_supported(),
+                "silently dropped {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn xray_hysteria2_does_not_drop_empty_certificate_pin() {
+        let mut outbound = json!({"protocol":"hysteria","tag":"HY2",
+            "settings":{"address":"198.51.100.10","port":443,"version":2},
+            "streamSettings":{"network":"hysteria","security":"tls",
+                "hysteriaSettings":{"version":2,"auth":"user:password"},
+                "tlsSettings":{}}});
+        for pins in [
+            json!([""]),
+            json!(["ab".repeat(32)]),
+            json!("ab".repeat(32)),
+            json!(123),
+        ] {
+            outbound["streamSettings"]["tlsSettings"]["pinnedPeerCertSha256"] = pins;
+            let links =
+                links_from_json(&json!({"outbounds":[outbound.clone()]}).to_string()).unwrap();
+            assert!(
+                !parse_server(&links[0]).unwrap().is_supported(),
+                "silently changed certificate pin policy"
+            );
+        }
+        outbound["streamSettings"]["tlsSettings"]["pinnedPeerCertSha256"] = json!([]);
+        let links = links_from_json(&json!({"outbounds":[outbound]}).to_string()).unwrap();
+        assert!(parse_server(&links[0]).unwrap().is_supported());
+    }
+
+    #[test]
+    fn sing_box_hysteria2_keeps_tls_and_refuses_dropped_options() {
+        let outbound = json!({"type":"hysteria2","tag":"HY2","server":"2001:db8::1","server_port":443,"password":"pw",
+            "tls":{"enabled":true,"server_name":"hy.example","alpn":["h3"]},
+            "obfs":{"type":"salamander","password":"test-password"}});
+        let link = links_from_json(&json!({"outbounds":[outbound.clone()]}).to_string())
+            .unwrap()
+            .remove(0);
+        let s = parse_server(&link).unwrap();
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        assert_eq!(s.host, "2001:db8::1");
+        let unbihex_engine::config::OutboundConfig::Hysteria2(c) =
+            unbihex_engine::link::parse_link(&link, "proxy").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(c.sni.as_deref(), Some("hy.example"));
+        let mut fast = outbound.clone();
+        fast["up_mbps"] = json!(50);
+        fast["down_mbps"] = json!(200);
+        let links = links_from_json(&json!({"outbounds":[fast]}).to_string()).unwrap();
+        assert!(
+            parse_server(&links[0]).unwrap().is_supported(),
+            "bandwidth is only a hint"
+        );
+        for (key, value) in [
+            ("server_ports", json!(["443:1000"])),
+            ("detour", json!("other")),
+            ("obfs", json!(123)),
+            ("tls", json!({"server_name":5})),
+            ("tls", json!({"insecure":true})),
+            (
+                "tls",
+                json!({"certificate_public_key_sha256":["different-pin-policy"]}),
+            ),
+        ] {
+            let mut bad = outbound.clone();
+            bad[key] = value;
+            let links = links_from_json(&json!({"outbounds":[bad]}).to_string()).unwrap();
+            assert!(
+                !parse_server(&links[0]).unwrap().is_supported(),
+                "silently dropped {key}"
+            );
+        }
+    }
 
     #[test]
     fn xray_array_like_remnawave() {
@@ -453,7 +801,7 @@ mod tests {
         let a = parse_server(&links[0]).unwrap();
         assert_eq!(a.name, "a");
         assert!(a.is_supported(), "{:?}", a.unsupported);
-        assert!(!parse_server(&links[1]).unwrap().is_supported());
+        assert!(parse_server(&links[1]).unwrap().is_supported());
         assert!(links_from_json("{\"log\":{}}").is_none());
     }
 }

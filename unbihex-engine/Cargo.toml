@@ -67,6 +67,10 @@ regex-lite = "0.1"
 h2 = "0.4"
 http = "1"
 ml-kem = { version = "0.3.3", features = ["zeroize"] }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+blake2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

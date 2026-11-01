@@ -248,6 +248,22 @@ If any step fails, undo what has been done and return the error.
 
 ---
 
+### 5.5 Native Hysteria 2 outbound
+
+`type: "hysteria2"`: `tag`, `server`, `port`, `password` (the entire auth string),
+optional `sni`, `pinned_sha256`, `salamander_password`. TLS 1.3 / ALPN `h3` and WebPKI
+verification are mandatory; optional leaf pins are additional checks, not a bypass.
+`SocketFactory` creates/protects the QUIC socket before optional Salamander wrapping.
+TCP, demultiplexed UDP with bounded reassembly, shared authenticated connections and
+reconnection for new flows are supported. `hysteria2://` / `hy2://` default to port 443
+and support IPv6 and percent-encoded auth. Xray/sing-box import preserves TLS/SNI/obfs;
+unimplemented wire/verification options are refused rather than dropped.
+Panel `fp` values are TCP/uTLS hints, not a promise of browser QUIC emulation.
+Hysteria 1, hopping, ECH and insecure TLS are not implemented; such links are refused.
+Bandwidth (`up`/`down`, `upmbps`/`downmbps`) asks for Brutal, which is absent: it is
+skipped and QUIC's own congestion control works. Unknown link parameters are skipped too.
+See [HYSTERIA2.md](HYSTERIA2.md) for the full contract, limits and verification commands.
+
 ## 6. Routing
 
 - A rule is an object with optional condition fields and a mandatory `outbound`. Fields: `domain` (exact match), `domain_suffix`, `domain_keyword` (substring), `ip_cidr` (IPv4/IPv6), `ip_private` (bool), `port` (a list of u16 or `"1000-2000"` strings), `network` (`"tcp"` | `"udp"`), `inbound` (a list of tags).
