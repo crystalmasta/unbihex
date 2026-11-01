@@ -1,4 +1,4 @@
-# Where things stand (27.10.2026)
+# Where things stand (01.11.2026)
 
 [Русский](PROGRESS.md) · **English**
 
@@ -137,6 +137,19 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   and dropped to 1 MB/s at times); a size can be set in the config. By Pavel Shakhmin, PR #20.
 - Android: the window comes back when the app is reopened after being swiped away with the VPN on (0.2.4 showed a
   blank screen; the 0.2.4 APK was already replaced).
+
+## 01.11 — client 0.2.6, engine 0.1.6, test_server 0.0.2
+- Ad and tracker blocking (#28, off by default): hosts lists — AdAway, StevenBlack, Peter Lowe or your own over
+  https://, downloaded from their authors and refreshed weekly. In TUN and on Android blocked names get NXDOMAIN;
+  sites in the "through VPN / direct" lists are not blocked. The console client: `--adblock`.
+- Hysteria2 natively (QUIC with quinn, HTTP/3 authentication, TCP and UDP, Salamander), `hy2://` links and Xray /
+  sing-box JSON subscriptions (PR #33). Bandwidth in links (Brutal) is skipped; the "TCP" ping of a Hysteria2
+  server goes through the protocol.
+- XHTTP: Xray CDN profiles with request obfuscation (padding, session ID and sequence in query/header/cookie, GET
+  uploads) are no longer greyed out (PR #32). Servers greyed out by an older version are re-checked on start.
+- The selected server no longer jumps to the first one after a subscription update when the panel rewrites
+  `sid`/`spx` in its links (#35); pings are kept too.
+- test_server 0.0.2 is built on engine 0.1.6.
 
 ## Next
 1. Fuzzing and benchmarks, the engine README as an SDK.
