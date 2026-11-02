@@ -135,6 +135,9 @@ pub struct XmuxConfig {
     /// How long a connection is reused, seconds.
     #[serde(default)]
     pub h_max_reusable_secs: Option<Range>,
+    /// HTTP/2 PING period in seconds: `0` is Chrome's 45 s, negative disables.
+    #[serde(default)]
+    pub h_keep_alive_period: Option<i32>,
 }
 
 impl XmuxConfig {
@@ -159,6 +162,7 @@ impl XmuxConfig {
             c_max_reuse_times: None,
             h_max_request_times: Some(Range { from: 600, to: 900 }),
             h_max_reusable_secs: Some(Range { from: 1800, to: 3000 }),
+            h_keep_alive_period: None,
         }
     }
 }
@@ -515,6 +519,7 @@ impl XhttpConfig {
             .as_object()
             .ok_or_else(|| Error::config("xhttp settings must be an object"))?;
         let mut cfg = XhttpConfig::default();
+        let has_extra = obj.get("extra").is_some_and(|e| !e.is_null());
         if let Some(extra) = obj.get("extra").filter(|e| !e.is_null()) {
             // Like Xray: `extra` replaces everything but host, path and mode.
             cfg = XhttpConfig::from_xray(extra)?;
@@ -540,6 +545,10 @@ impl XhttpConfig {
             }
         };
         for (k, val) in obj {
+            // Xray ignores every outer field but these three once `extra` is set.
+            if has_extra && !matches!(k.as_str(), "host" | "path" | "mode" | "extra") {
+                continue;
+            }
             match k.as_str() {
                 "host" => cfg.host = s(k)?.filter(|h| !h.is_empty()),
                 "path" => cfg.path = s(k)?.unwrap_or_default(),
@@ -565,7 +574,7 @@ impl XhttpConfig {
                 "xmux" => cfg.xmux = Some(xmux_from_xray(val)?),
                 // Server-side or ignored by clients.
                 "noSSEHeader" | "scMaxBufferedPosts" | "scStreamUpServerSecs"
-                | "serverMaxHeaderBytes" => {}
+                | "serverMaxHeaderBytes" | "h2Params" => {}
                 // Wire format options: accepted only with their defaults.
                 "xPaddingObfsMode" => cfg.x_padding_obfs_mode = b(k)?,
                 "xPaddingKey" => cfg.x_padding_key = s(k)?.unwrap_or_default(),
@@ -653,7 +662,17 @@ fn xmux_from_xray(v: &Value) -> Result<XmuxConfig> {
             "cMaxReuseTimes" => x.c_max_reuse_times = r,
             "hMaxRequestTimes" => x.h_max_request_times = r,
             "hMaxReusableSecs" => x.h_max_reusable_secs = r,
-            "hKeepAlivePeriod" => {}
+            "hKeepAlivePeriod" => {
+                x.h_keep_alive_period = match val {
+                    Value::Null => None,
+                    Value::Number(n) => Some(
+                        n.as_i64()
+                            .ok_or_else(|| Error::config("xhttp xmux: hKeepAlivePeriod"))?
+                            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                    ),
+                    _ => return Err(Error::config("xhttp xmux: hKeepAlivePeriod must be a number")),
+                }
+            }
             other => return Err(Error::config(format!("xhttp xmux: unknown field {other:?}"))),
         }
     }

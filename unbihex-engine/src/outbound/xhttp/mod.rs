@@ -602,11 +602,66 @@ impl XhttpClient {
         b.body(()).map_err(|e| Error::protocol(format!("xhttp: {e}")))
     }
 
-    async fn dial_h2(&self) -> Result<(SendRequest<Bytes>, Arc<AtomicBool>)> {
+    /// The HTTP/2 PING period. `hKeepAlivePeriod` follows Xray: `0` is
+    /// Chrome's 45 s and a negative value disables PINGs. An idle tunnel that
+    /// nothing pings is reaped by NATs and CDNs, and the next session then
+    /// pays a handshake.
+    fn keep_alive(&self) -> Option<Duration> {
+        match self.cfg.xmux.as_ref().and_then(|x| x.h_keep_alive_period) {
+            Some(v) if v < 0 => None,
+            Some(v) if v > 0 => Some(Duration::from_secs(u64::try_from(v).unwrap_or(45))),
+            _ => Some(Duration::from_secs(45)),
+        }
+    }
+
+    /// Sends HTTP/2 PINGs on an idle connection, the way a browser and Xray
+    /// do: NATs and CDNs reap bindings that go quiet, and a PING also notices
+    /// a connection that died without a FIN. `h2` has no built-in keep-alive,
+    /// so this is a task per connection that stops as soon as the pool drops
+    /// it. Returns the stop flag the pool flips on retirement.
+    fn spawn_keep_alive(
+        &self,
+        pings: Option<h2::PingPong>,
+        closed: &Arc<AtomicBool>,
+    ) -> Option<Arc<AtomicBool>> {
+        let period = self.keep_alive()?;
+        let mut pings = pings?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let closed = closed.clone();
+        tokio::spawn(async move {
+            let tick = Duration::from_secs(1).min(period);
+            let mut waited = Duration::ZERO;
+            while waited < period {
+                if flag.load(Ordering::Relaxed) || closed.load(Ordering::Relaxed) {
+                    return;
+                }
+                tokio::time::sleep(tick).await;
+                waited += tick;
+            }
+            if flag.load(Ordering::Relaxed) || closed.load(Ordering::Relaxed) {
+                return;
+            }
+            // A pong that does not come back means the tunnel is gone, even if
+            // TCP has not noticed: retire the connection instead of handing it
+            // to the next session.
+            if tokio::time::timeout(Duration::from_secs(15), pings.ping(h2::Ping::opaque()))
+                .await
+                .is_err()
+            {
+                closed.store(true, Ordering::Relaxed);
+            }
+        });
+        Some(stop)
+    }
+
+    async fn dial_h2(&self) -> Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)> {
         let io = self.dialer.dial().await?;
         let mut builder = h2::client::Builder::new();
         self.h2_settings().apply(&mut builder);
-        let (send, conn) = builder.handshake::<_, Bytes>(io).await.map_err(h2_err)?;
+        let (send, mut conn) = builder.handshake::<_, Bytes>(io).await.map_err(h2_err)?;
+        // Must be taken from the connection before it is driven to completion.
+        let pings = conn.ping_pong();
         let closed = Arc::new(AtomicBool::new(false));
         let flag = closed.clone();
         tokio::spawn(async move {
@@ -615,7 +670,8 @@ impl XhttpClient {
             }
             flag.store(true, Ordering::Relaxed);
         });
-        Ok((send, closed))
+        let ping = self.spawn_keep_alive(pings, &closed);
+        Ok((send, closed, ping))
     }
 
     /// Opens a new XHTTP session.
@@ -1098,7 +1154,7 @@ mod tests {
             let _ = conn.await;
         });
         let lease = pool
-            .get(|| async { Ok((send, Arc::new(AtomicBool::new(false)))) })
+            .get(|| async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
             .await
             .unwrap();
         let req = http::Request::builder()
@@ -1186,6 +1242,24 @@ mod tests {
             client.h2_settings(),
             H2Settings::for_fingerprint(Some(Fingerprint::Firefox))
         );
+
+    }
+
+    #[test]
+    fn keep_alive_follows_xmux() {
+        let with = |v: i32| {
+            let cfg = XhttpConfig {
+                xmux: Some(XmuxConfig {
+                    h_keep_alive_period: Some(v),
+                    ..XmuxConfig::default()
+                }),
+                ..XhttpConfig::default()
+            };
+            client(cfg).keep_alive()
+        };
+        assert_eq!(with(0), Some(Duration::from_secs(45)), "0 is Chrome's period");
+        assert_eq!(with(-1), None, "a negative period disables PINGs");
+        assert_eq!(with(20), Some(Duration::from_secs(20)));
     }
 
     #[test]
