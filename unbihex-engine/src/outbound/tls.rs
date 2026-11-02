@@ -23,6 +23,7 @@ pub struct TlsClient {
     connector: TlsConnector,
     config: Arc<ClientConfig>,
     server_name: ServerName<'static>,
+    fingerprint: Option<Fingerprint>,
 }
 
 impl std::fmt::Debug for TlsClient {
@@ -124,7 +125,13 @@ impl TlsClient {
             connector: TlsConnector::from(config.clone()),
             config,
             server_name,
+            fingerprint,
         })
+    }
+
+    /// The browser profile whose ClientHello this client sends, if any.
+    pub fn fingerprint(&self) -> Option<Fingerprint> {
+        self.fingerprint
     }
 
     /// Runs the TLS handshake over a TCP connection, returning a record-exact stream
