@@ -674,25 +674,31 @@ impl XhttpClient {
         let closed = closed.clone();
         tokio::spawn(async move {
             let tick = Duration::from_secs(1).min(period);
-            let mut waited = Duration::ZERO;
-            while waited < period {
+            loop {
+                let mut waited = Duration::ZERO;
+                while waited < period {
+                    if flag.load(Ordering::Relaxed) || closed.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    tokio::time::sleep(tick).await;
+                    waited += tick;
+                }
                 if flag.load(Ordering::Relaxed) || closed.load(Ordering::Relaxed) {
                     return;
                 }
-                tokio::time::sleep(tick).await;
-                waited += tick;
-            }
-            if flag.load(Ordering::Relaxed) || closed.load(Ordering::Relaxed) {
-                return;
-            }
-            // A pong that does not come back means the tunnel is gone, even if
-            // TCP has not noticed: retire the connection instead of handing it
-            // to the next session.
-            if tokio::time::timeout(Duration::from_secs(15), pings.ping(h2::Ping::opaque()))
-                .await
-                .is_err()
-            {
-                closed.store(true, Ordering::Relaxed);
+                // A pong that does not come back means the tunnel is gone,
+                // even if TCP has not noticed: retire the connection instead
+                // of handing it to the next session. An immediate error means
+                // the same.
+                match tokio::time::timeout(Duration::from_secs(15), pings.ping(h2::Ping::opaque()))
+                    .await
+                {
+                    Ok(Ok(_)) => {}
+                    _ => {
+                        closed.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
             }
         });
         Some(stop)
@@ -1060,12 +1066,16 @@ struct H2Bridge {
     tx: SendStream<Bytes>,
     down: DuplexStream,
     write_done: bool,
+    /// The stream can outlive the download (stream-up uploads keep going after
+    /// the server ends the GET), so it holds its own hold on the connection.
+    _lease: pool::Lease,
 }
 
 impl H2Bridge {
     /// Starts the download pump, which also holds the pooled connection lease.
     fn new(lease: pool::Lease, tx: SendStream<Bytes>, resp: h2::client::ResponseFuture) -> H2Bridge {
         let (down, inner) = tokio::io::duplex(PIPE);
+        let held = lease.clone();
         tokio::spawn(async move {
             let _lease = lease;
             if let Err(e) = download_h2(resp, inner).await {
@@ -1076,6 +1086,7 @@ impl H2Bridge {
             tx,
             down,
             write_done: false,
+            _lease: held,
         }
     }
 }
@@ -1263,6 +1274,52 @@ mod tests {
         let mut out = Vec::new();
         bridge.read_to_end(&mut out).await.unwrap();
         assert_eq!(out, b"hello bridge");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_of_sessions_respects_the_connection_cap() {
+        let mut xmux = XmuxConfig::xray_default();
+        xmux.max_connections = Some(Range::fixed(2));
+        let pool = Arc::new(pool::H2Pool::new(xmux));
+        let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            let dials = dials.clone();
+            tasks.push(tokio::spawn(async move {
+                pool.get(move || async move {
+                    dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+                    tokio::spawn(async move {
+                        let mut conn = h2::server::handshake(server_io).await.unwrap();
+                        while let Some(Ok(_)) = conn.accept().await {}
+                    });
+                    let (send, conn) = h2::client::handshake(client_io).await.unwrap();
+                    tokio::spawn(async move {
+                        let _ = conn.await;
+                    });
+                    Ok::<_, crate::error::Error>((
+                        send,
+                        Arc::new(AtomicBool::new(false)),
+                        None::<Arc<AtomicBool>>,
+                    ))
+                })
+                .await
+                .unwrap()
+            }));
+        }
+        let mut leases = Vec::new();
+        for task in tasks {
+            leases.push(task.await.unwrap());
+        }
+        assert_eq!(
+            dials.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "a burst of sessions dialed more connections than the cap"
+        );
+        assert_eq!(pool.len(), 2);
+        drop(leases);
     }
 
     #[test]
