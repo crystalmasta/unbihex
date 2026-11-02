@@ -14,6 +14,8 @@ pub mod tls;
 pub mod tls_stream;
 pub mod vision;
 pub mod vless;
+/// VMess AEAD native outbound.
+pub mod vmess;
 pub mod xhttp;
 pub mod xudp;
 
@@ -153,6 +155,10 @@ pub async fn build_outbound(
     Ok(match cfg {
         OutboundConfig::Direct(c) => Arc::new(direct::DirectOutbound::new(&c.tag, ctx.clone())),
         OutboundConfig::Block(c) => Arc::new(block::BlockOutbound::new(&c.tag)),
+        OutboundConfig::Vmess(c) => {
+            let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
+            Arc::new(vmess::VmessOutbound::new(c, server, ctx.sockets.clone())?)
+        }
         OutboundConfig::Vless(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
             Arc::new(vless::VlessOutbound::new(c, server, ctx.sockets.clone())?)
@@ -160,7 +166,11 @@ pub async fn build_outbound(
         // By dubr1k (github.com/dubr1k), PR #33.
         OutboundConfig::Hysteria2(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
-            Arc::new(hysteria2::Hysteria2Outbound::new(c, server, ctx.sockets.clone())?)
+            Arc::new(hysteria2::Hysteria2Outbound::new(
+                c,
+                server,
+                ctx.sockets.clone(),
+            )?)
         }
         OutboundConfig::Shadowsocks(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;

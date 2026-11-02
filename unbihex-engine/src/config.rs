@@ -132,9 +132,13 @@ impl VlessInboundConfig {
             let id = uuid::Uuid::parse_str(u.id.expose())
                 .map_err(|_| Error::config(format!("inbound {}: invalid user id", self.tag)))?;
             if !ids.insert(id) {
-                return Err(Error::config(format!("inbound {}: duplicate user id", self.tag)));
+                return Err(Error::config(format!(
+                    "inbound {}: duplicate user id",
+                    self.tag
+                )));
             }
-            if !(u.flow.is_empty() || u.flow == FLOW_VISION || u.flow == "xtls-rprx-vision-udp443") {
+            if !(u.flow.is_empty() || u.flow == FLOW_VISION || u.flow == "xtls-rprx-vision-udp443")
+            {
                 return Err(Error::Unsupported(format!(
                     "inbound {}: flow {:?}",
                     self.tag, u.flow
@@ -207,14 +211,17 @@ pub fn parse_x25519_key(s: &str, what: &str) -> Result<[u8; 32]> {
         .decode(s)
         .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(s))
         .map_err(|_| Error::config(format!("reality: {what} is not base64")))?;
-    <[u8; 32]>::try_from(raw).map_err(|_| Error::config(format!("reality: {what} must be 32 bytes")))
+    <[u8; 32]>::try_from(raw)
+        .map_err(|_| Error::config(format!("reality: {what} must be 32 bytes")))
 }
 
 /// A REALITY short ID (hex, up to 16 characters), zero-padded to 8 bytes.
 pub fn parse_short_id(s: &str) -> Result<[u8; 8]> {
     let s = s.trim();
     if s.len() > 16 || !s.len().is_multiple_of(2) {
-        return Err(Error::config("reality: short_id must be up to 16 hex characters"));
+        return Err(Error::config(
+            "reality: short_id must be up to 16 hex characters",
+        ));
     }
     let raw = hex::decode(s).map_err(|_| Error::config("reality: short_id is not hex"))?;
     let mut out = [0u8; 8];
@@ -350,6 +357,8 @@ pub struct UserConfig {
 pub enum OutboundConfig {
     /// VLESS over TCP, optionally with TLS.
     Vless(VlessConfig),
+    /// Modern VMess AEAD (alterId=0).
+    Vmess(VmessConfig),
     // By dubr1k (github.com/dubr1k), PR #33.
     /// Hysteria 2 over QUIC (TCP streams and UDP datagrams).
     Hysteria2(Hysteria2Config),
@@ -370,6 +379,7 @@ impl OutboundConfig {
     pub fn tag(&self) -> &str {
         match self {
             OutboundConfig::Vless(c) => &c.tag,
+            OutboundConfig::Vmess(c) => &c.tag,
             OutboundConfig::Hysteria2(c) => &c.tag,
             OutboundConfig::Shadowsocks(c) => &c.tag,
             OutboundConfig::Socks(c) => &c.tag,
@@ -382,6 +392,7 @@ impl OutboundConfig {
     pub fn server(&self) -> Option<(&str, u16)> {
         match self {
             OutboundConfig::Vless(c) => Some((&c.server, c.port)),
+            OutboundConfig::Vmess(c) => Some((&c.server, c.port)),
             OutboundConfig::Hysteria2(c) => Some((&c.server, c.port)),
             OutboundConfig::Shadowsocks(c) => Some((&c.server, c.port)),
             OutboundConfig::Socks(c) => Some((&c.server, c.port)),
@@ -1056,6 +1067,9 @@ impl Config {
             if let OutboundConfig::Shadowsocks(s) = o {
                 crate::outbound::shadowsocks::Method::parse(&s.method)?;
             }
+            if let OutboundConfig::Vmess(v) = o {
+                v.validate()?;
+            }
             if let OutboundConfig::Hysteria2(h) = o {
                 h.validate()?;
             }
@@ -1096,7 +1110,9 @@ impl Config {
         match self.route.default_mark {
             Some(0) => return Err(Error::config("route.default_mark must not be 0")),
             Some(_) if !cfg!(any(target_os = "linux", target_os = "android")) => {
-                return Err(Error::config("route.default_mark is supported on Linux only"));
+                return Err(Error::config(
+                    "route.default_mark is supported on Linux only",
+                ));
             }
             _ => {}
         }
@@ -1111,13 +1127,19 @@ impl Config {
         }
         for r in &self.route.rules {
             if let Some(t) = r.rule_set.iter().find(|t| !set_tags.contains(t.as_str())) {
-                return Err(Error::config(format!("rule refers to unknown rule_set {t:?}")));
+                return Err(Error::config(format!(
+                    "rule refers to unknown rule_set {t:?}"
+                )));
             }
             if !r.geosite.is_empty() && self.route.geosite.is_none() {
-                return Err(Error::config("geosite rules need route.geosite (path to geosite.dat)"));
+                return Err(Error::config(
+                    "geosite rules need route.geosite (path to geosite.dat)",
+                ));
             }
             if !r.geoip.is_empty() && self.route.geoip.is_none() {
-                return Err(Error::config("geoip rules need route.geoip (path to geoip.dat)"));
+                return Err(Error::config(
+                    "geoip rules need route.geoip (path to geoip.dat)",
+                ));
             }
             if !out_tags.contains(r.outbound.as_str()) {
                 return Err(Error::config(format!(
@@ -1261,7 +1283,13 @@ mod tests {
     #[test]
     fn fakeip_exclude_default_and_custom() {
         let d = DnsConfig::default().fakeip_exclude_suffixes().unwrap();
-        for s in ["msftconnecttest.com", "msftncsi.com", "lan", "home.arpa", "local"] {
+        for s in [
+            "msftconnecttest.com",
+            "msftncsi.com",
+            "lan",
+            "home.arpa",
+            "local",
+        ] {
             assert!(d.contains(s), "{s}");
         }
         let c = Config::from_json(
@@ -1329,14 +1357,100 @@ mod tests {
                 r#"{{"outbounds":[{{"type":"direct","tag":"d"}}],"limits":{{{limits}}}}}"#
             ))
         };
-        assert_eq!(cfg("").unwrap().limits.socket_buffer, 0, "absent: the kernel decides");
-        assert_eq!(cfg(r#""socket_buffer":131072"#).unwrap().limits.socket_buffer, 131_072);
+        assert_eq!(
+            cfg("").unwrap().limits.socket_buffer,
+            0,
+            "absent: the kernel decides"
+        );
+        assert_eq!(
+            cfg(r#""socket_buffer":131072"#)
+                .unwrap()
+                .limits
+                .socket_buffer,
+            131_072
+        );
         assert_eq!(cfg(r#""socket_buffer":0"#).unwrap().limits.socket_buffer, 0);
         for bad in ["1024", "33554432"] {
             let err = cfg(&format!(r#""socket_buffer":{bad}"#)).unwrap_err();
-            assert!(err.to_string().contains("limits.socket_buffer"), "{bad}: {err}");
+            assert!(
+                err.to_string().contains("limits.socket_buffer"),
+                "{bad}: {err}"
+            );
         }
         let c = cfg(r#""socket_buffer":131072"#).unwrap();
-        assert_eq!(c.limits.max_connections, 4096, "the other limits keep their defaults");
+        assert_eq!(
+            c.limits.max_connections, 4096,
+            "the other limits keep their defaults"
+        );
+    }
+}
+
+/// Modern VMess AEAD configuration. Legacy alterId and plaintext body ciphers are refused.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmessConfig {
+    /// Routing tag.
+    pub tag: String,
+    /// Proxy host.
+    pub server: String,
+    /// Proxy TCP port.
+    pub port: u16,
+    /// User UUID (credential, never debug-printed).
+    pub uuid: Secret,
+    /// Body cipher: auto, aes-128-gcm or chacha20-poly1305.
+    #[serde(default = "vmess_auto")]
+    pub security: String,
+    /// Optional WebSocket transport.
+    #[serde(default)]
+    pub websocket: Option<VmessWebsocket>,
+    /// Optional verified TLS.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+/// WebSocket path and optional HTTP Host override.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmessWebsocket {
+    /// Absolute request path; query is permitted.
+    pub path: String,
+    /// Optional HTTP Host override (not TLS SNI).
+    #[serde(default)]
+    pub host: Option<String>,
+}
+fn vmess_auto() -> String {
+    "auto".into()
+}
+impl VmessConfig {
+    /// Checks capability and credentials before opening sockets.
+    pub fn validate(&self) -> Result<()> {
+        if self.server.is_empty() || self.port == 0 {
+            return Err(Error::config("vmess: invalid endpoint"));
+        }
+        uuid::Uuid::parse_str(self.uuid.expose())
+            .map_err(|_| Error::config("vmess: invalid UUID"))?;
+        if self.tls.as_ref().is_some_and(|t| !t.enabled) {
+            return Err(Error::config("vmess: omit tls instead of enabled=false"));
+        }
+        if let Some(ws) = &self.websocket {
+            if !ws.path.starts_with('/')
+                || ws.path.contains(['\r', '\n', '#'])
+                || ws.path.len() > 8192
+            {
+                return Err(Error::config("vmess: invalid WebSocket path"));
+            }
+            if ws
+                .host
+                .as_ref()
+                .is_some_and(|h| h.is_empty() || h.contains(['\r', '\n', '/']))
+            {
+                return Err(Error::config("vmess: invalid WebSocket Host"));
+            }
+        }
+        match self.security.as_str() {
+            "auto" | "aes-128-gcm" | "chacha20-poly1305" => Ok(()),
+            _ => Err(Error::Unsupported(
+                "vmess: unsupported body security (requires AEAD)".into(),
+            )),
+        }
     }
 }

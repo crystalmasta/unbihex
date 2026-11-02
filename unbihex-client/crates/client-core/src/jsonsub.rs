@@ -32,7 +32,11 @@ fn host_port(host: &str, port: u64) -> String {
 
 fn join_alpn(v: Option<&Value>) -> String {
     match v {
-        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","),
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(","),
         Some(Value::String(s)) => s.clone(),
         _ => String::new(),
     }
@@ -52,8 +56,22 @@ fn vless_link(
 ) -> String {
     let mut q = vec![
         ("encryption".to_string(), "none".to_string()),
-        ("type".to_string(), if network.is_empty() { "tcp".into() } else { network.to_string() }),
-        ("security".to_string(), if security.is_empty() { "none".into() } else { security.to_string() }),
+        (
+            "type".to_string(),
+            if network.is_empty() {
+                "tcp".into()
+            } else {
+                network.to_string()
+            },
+        ),
+        (
+            "security".to_string(),
+            if security.is_empty() {
+                "none".into()
+            } else {
+                security.to_string()
+            },
+        ),
     ];
     if !flow.is_empty() {
         q.push(("flow".into(), flow.into()));
@@ -74,7 +92,8 @@ fn vless_link(
 }
 
 fn ss_link(method: &str, password: &str, host: &str, port: u64, name: &str) -> String {
-    let ui = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("{method}:{password}"));
+    let ui =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("{method}:{password}"));
     format!("ss://{ui}@{}#{}", host_port(host, port), enc(name))
 }
 
@@ -88,7 +107,12 @@ fn socks_link(user: &str, pass: &str, host: &str, port: u64, name: &str) -> Stri
 }
 
 fn simple_link(scheme: &str, secret: &str, host: &str, port: u64, name: &str) -> String {
-    format!("{scheme}://{}@{}#{}", enc(secret), host_port(host, port), enc(name))
+    format!(
+        "{scheme}://{}@{}#{}",
+        enc(secret),
+        host_port(host, port),
+        enc(name)
+    )
 }
 
 // By dubr1k (github.com/dubr1k), PR #33: Hysteria 2 from Xray and sing-box JSON.
@@ -278,7 +302,10 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
                 params.push(("alpn", join_alpn(t.get("alpn"))));
                 params.push(("fp", str_of(&t, "fingerprint").to_string()));
             } else if security == "reality" {
-                let r = stream.get("realitySettings").cloned().unwrap_or(Value::Null);
+                let r = stream
+                    .get("realitySettings")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 params.push(("sni", str_of(&r, "serverName").to_string()));
                 params.push(("pbk", str_of(&r, "publicKey").to_string()));
                 params.push(("sid", str_of(&r, "shortId").to_string()));
@@ -333,14 +360,56 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
             port,
             name,
         )),
-        "trojan" => Some(simple_link("trojan", str_of(&server, "password"), host, port, name)),
+        "trojan" => Some(simple_link(
+            "trojan",
+            str_of(&server, "password"),
+            host,
+            port,
+            name,
+        )),
         "vmess" => {
+            let t = stream.get("tlsSettings").cloned().unwrap_or(Value::Null);
             let net = str_of(&stream, "network");
-            let j = json!({
-                "v": "2", "ps": name, "add": host, "port": port.to_string(),
-                "id": str_of(&user, "id"), "net": if net.is_empty() { "tcp" } else { net },
-                "tls": str_of(&stream, "security"),
-            });
+            let mut j = json!({"v":"2","ps":name,"add":host,"port":port.to_string(),
+                "id":str_of(&user,"id"),"aid":user.get("alterId").cloned().unwrap_or(json!(0)),
+                "scy":str_of(&user,"security"),"net":if net.is_empty(){"tcp"}else{net},
+                "tls":str_of(&stream,"security"),"sni":str_of(&t,"serverName"),
+                "alpn":join_alpn(t.get("alpn")),"fp":str_of(&t,"fingerprint"),
+                "allowInsecure":json_bool_flag(t.get("allowInsecure"))});
+            let ws = stream.get("wsSettings").cloned().unwrap_or(Value::Null);
+            j["path"] = json!(str_of(&ws, "path"));
+            j["host"] = json!(ws.get("headers").map(|h| str_of(h, "Host")).unwrap_or(""));
+            if unknown_fields(&ws, &["path", "headers"])
+                || ws.get("headers").is_some_and(|h| {
+                    unknown_fields(h, &["Host"]) || h.get("Host").is_some_and(|v| !v.is_string())
+                })
+                || unknown_fields(ob, &["protocol", "tag", "settings", "streamSettings"])
+                || unknown_fields(
+                    &stream,
+                    &["network", "security", "tlsSettings", "wsSettings"],
+                )
+                || unknown_fields(&t, &["serverName", "alpn", "fingerprint", "allowInsecure"])
+                || invalid_alpn(&t)
+                || unknown_fields(&user, &["id", "security", "alterId", "level", "email"])
+                || settings
+                    .get("vnext")
+                    .is_some_and(|v| v.as_array().is_none_or(|v| v.len() != 1))
+                || server
+                    .get("users")
+                    .is_some_and(|v| v.as_array().is_none_or(|v| v.len() != 1))
+                || unknown_fields(
+                    &settings,
+                    &[
+                        "vnext", "address", "port", "id", "security", "alterId", "users",
+                    ],
+                )
+                || unknown_fields(
+                    &server,
+                    &["address", "port", "users", "id", "security", "alterId"],
+                )
+            {
+                j["unsupported-json-options"] = json!(true);
+            }
             Some(format!(
                 "vmess://{}",
                 base64::engine::general_purpose::STANDARD.encode(j.to_string())
@@ -421,14 +490,23 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
     let tls = ob.get("tls").cloned().unwrap_or(Value::Null);
     let tls_on = tls.get("enabled").and_then(Value::as_bool).unwrap_or(false);
     let reality = tls.get("reality").cloned().unwrap_or(Value::Null);
-    let reality_on = reality.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let reality_on = reality
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let network = ob
         .get("transport")
         .map(|t| str_of(t, "type").to_string())
         .unwrap_or_default();
     match kind {
         "vless" => {
-            let security = if reality_on { "reality" } else if tls_on { "tls" } else { "none" };
+            let security = if reality_on {
+                "reality"
+            } else if tls_on {
+                "tls"
+            } else {
+                "none"
+            };
             let fp = tls
                 .get("utls")
                 .map(|u| str_of(u, "fingerprint").to_string())
@@ -451,9 +529,27 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
                 name,
             ))
         }
-        "shadowsocks" => Some(ss_link(str_of(ob, "method"), str_of(ob, "password"), host, port, name)),
-        "socks" => Some(socks_link(str_of(ob, "username"), str_of(ob, "password"), host, port, name)),
-        "trojan" => Some(simple_link("trojan", str_of(ob, "password"), host, port, name)),
+        "shadowsocks" => Some(ss_link(
+            str_of(ob, "method"),
+            str_of(ob, "password"),
+            host,
+            port,
+            name,
+        )),
+        "socks" => Some(socks_link(
+            str_of(ob, "username"),
+            str_of(ob, "password"),
+            host,
+            port,
+            name,
+        )),
+        "trojan" => Some(simple_link(
+            "trojan",
+            str_of(ob, "password"),
+            host,
+            port,
+            name,
+        )),
         "hysteria2" => {
             let mut params = vec![
                 ("security", "tls".into()),
@@ -516,10 +612,46 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
         }
         "tuic" => Some(simple_link("tuic", str_of(ob, "uuid"), host, port, name)),
         "vmess" => {
-            let j = json!({ "v": "2", "ps": name, "add": host, "port": port.to_string(),
-                "id": str_of(ob, "uuid"), "net": if network.is_empty() { "tcp" } else { &network },
-                "tls": if tls_on { "tls" } else { "" } });
-            Some(format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(j.to_string())))
+            let mut j = json!({"v":"2","ps":name,"add":host,"port":port.to_string(),
+                "id":str_of(ob,"uuid"),"aid":ob.get("alter_id").cloned().unwrap_or(json!(0)),
+                "scy":str_of(ob,"security"),"net":if network.is_empty(){"tcp"}else{&network},
+                "tls":if tls_on{"tls"}else{""},"sni":str_of(&tls,"server_name"),
+                "alpn":join_alpn(tls.get("alpn")),"allowInsecure":json_bool_flag(tls.get("insecure"))});
+            let transport = ob.get("transport").cloned().unwrap_or(Value::Null);
+            j["path"] = json!(str_of(&transport, "path"));
+            j["host"] = json!(
+                transport
+                    .get("headers")
+                    .map(|h| str_of(h, "Host"))
+                    .unwrap_or("")
+            );
+            if unknown_fields(&transport, &["type", "path", "headers"])
+                || transport.get("headers").is_some_and(|h| {
+                    unknown_fields(h, &["Host"]) || h.get("Host").is_some_and(|v| !v.is_string())
+                })
+                || unknown_fields(
+                    ob,
+                    &[
+                        "type",
+                        "tag",
+                        "server",
+                        "server_port",
+                        "uuid",
+                        "security",
+                        "alter_id",
+                        "tls",
+                        "transport",
+                    ],
+                )
+                || unknown_fields(&tls, &["enabled", "server_name", "alpn", "insecure"])
+                || invalid_alpn(&tls)
+            {
+                j["unsupported-json-options"] = json!(true);
+            }
+            Some(format!(
+                "vmess://{}",
+                base64::engine::general_purpose::STANDARD.encode(j.to_string())
+            ))
         }
         _ => None,
     }
@@ -725,7 +857,11 @@ mod tests {
         );
         let links = links_from_json(&body).unwrap();
         assert_eq!(links.len(), 3, "{links:?}");
-        assert!(links[1].contains("b.example") && links[1].contains("Auto%20%C2%B7%20proxy%2D2"), "{}", links[1]);
+        assert!(
+            links[1].contains("b.example") && links[1].contains("Auto%20%C2%B7%20proxy%2D2"),
+            "{}",
+            links[1]
+        );
     }
 
     #[test]

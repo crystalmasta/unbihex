@@ -3,7 +3,7 @@
 [Русский](README.md) · **English**
 
 A VPN client for subscriptions, built on its own network engine written in Rust. Works with Xray servers:
-VLESS (TLS, REALITY, XTLS Vision, XHTTP), Shadowsocks, SOCKS5, Hysteria2 (TCP/UDP, Salamander).
+VLESS (TLS, REALITY, XTLS Vision, XHTTP), VMess AEAD (TCP/TLS, WS/TLS), Shadowsocks, SOCKS5, Hysteria2 (TCP/UDP, Salamander).
 One code base for Windows, Linux, macOS, Android and iOS.
 
 ## Download

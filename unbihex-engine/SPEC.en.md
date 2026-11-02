@@ -13,7 +13,7 @@ linked in each section. A change of engine behaviour updates this document and i
 Unbihex is a client proxy engine. It takes traffic in (a TUN with all of the device's traffic, local SOCKS5/HTTP
 ports), routes connections by rules and sends them directly, blocks them or passes them through a proxy server.
 
-Protocols: VLESS (TLS, REALITY, XTLS Vision, XHTTP, XUDP), Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
+Protocols: VMess AEAD (TCP/TLS, WebSocket/TLS), VLESS (TLS, REALITY, XTLS Vision, XHTTP, XUDP), Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
 TLS and REALITY send a Chrome ClientHello. Rules understand domains, addresses, ports, geosite/geoip databases and
 sing-box rule-sets. Routing and outbounds can be replaced on the fly without dropping open connections.
 
@@ -847,3 +847,35 @@ All on `127.0.0.1`, our client against our server (`test_server/tests/`):
 - TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users;
 - REALITY with Vision and the Chrome fingerprint, a fragmented ClientHello, one `dest` probe per ClientHello shape;
 - what strangers see: the real site over TLS and HTTP.
+
+
+## VMess AEAD outbound
+
+`type: "vmess"`: `tag`, `server`, `port`, secret `uuid`, `security` (`auto`,
+`aes-128-gcm`, `chacha20-poly1305`), optional `tls` (same mandatory WebPKI verification
+as VLESS), optional `websocket: {"path":"/vmess", "host":"cdn.example"}`.
+`auto` selects ChaCha20-Poly1305; explicit AES selects AES-128-GCM. This is a native
+outbound, not an external Xray process. TCP and fixed-target UDP use modern VMess
+AEAD request/response headers with alterId=0, authenticated body chunks, and bounded
+framing. Nonce exhaustion at 65536 chunks fails closed: reconnect is required.
+TLS SNI and HTTP WebSocket Host are independent. All sockets use SocketFactory.
+
+Standard base64 JSON `vmess://` links and Xray/sing-box JSON subscription entries are
+supported. Client capability, saved-profile refresh, outbound construction and real
+GET/HEAD delay tests use the same engine parser. Import preserves UUID, cipher,
+alterId, TLS, SNI, ALPN, WebSocket path and Host; unsupported settings stay visibly
+unsupported rather than being dropped. Legacy alterId, CFB/none/zero encryption,
+mux/XUDP, gRPC/HTTPUpgrade/XHTTP, TCP camouflage, custom certificate bypasses,
+WebSocket early data and custom headers other than Host are not supported.
+
+The Xray-compatible fixed-target UDP payload maximum is **8174 bytes** (8192 minus
+2-byte chunk length and 16-byte AEAD tag). Larger and empty datagrams return an error,
+never a silently truncated/fragmented success. TCP is split into bounded chunks.
+Malformed headers, authentication failures, reordered/tampered chunks, response
+commands, truncated wire streams and nonce reuse are rejected.
+
+Verification: `tests/vmess_interop.rs` explicitly runs against official Xray26.10.31:
+12 transport/cipher combinations (TCP, TLS, WS, WSS × auto/AES/ChaCha), TCP40KB and
+UDP boundaries, wrong UUID and untrusted TLS. The opt-in test is ignored in normal
+runs and requires XRAY_BIN; ignored is not a passed interoperability check. See
+`../audit/VMESS_IMPLEMENTATION.md`. Android build and device testing are not claimed.

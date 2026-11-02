@@ -831,3 +831,32 @@ test_server version
 - TLS и Vision, UDP, XUDP, Mux с несколькими сессиями, отказ чужим пользователям;
 - REALITY с Vision и отпечатком Chrome, фрагментированный ClientHello, одна проба `dest` на форму ClientHello;
 - что видят чужие: настоящий сайт по TLS и HTTP.
+
+
+## Исходящий VMess AEAD
+
+`type: "vmess"`: `tag`, `server`, `port`, секретный `uuid`, `security` (`auto`,
+`aes-128-gcm`, `chacha20-poly1305`), необязательные `tls` (обязательная стандартная
+проверка сертификата) и `websocket: {"path":"/vmess", "host":"cdn.example"}`.
+`auto` выбирает ChaCha20-Poly1305. Нативная реализация, без внешнего процесса Xray:
+TCP и UDP к фиксированному назначению, современные AEAD-заголовки alterId=0,
+аутентифицированные фреймы. При исчерпании 65536 nonce поток закрывается с ошибкой,
+нужно переподключение. HTTP Host WebSocket независим от TLS SNI. Сокеты защищаются
+общим SocketFactory, TLS использует штатный WebPKI без отключения проверки.
+
+Поддержаны JSON base64 `vmess://` и подписки Xray/sing-box; UUID, cipher, alterId,
+TLS/SNI/ALPN и WS path/Host сохраняются. Проверка возможностей, обновление сохранённых
+профилей, сборка outbound и GET/HEAD ping используют общий parser ядра.
+Неподдержанные настройки явно помечаются: legacy alterId, none/zero/CFB, mux/XUDP,
+gRPC/HTTPUpgrade/XHTTP, TCP camouflage, insecure TLS, WebSocket early data и HTTP
+заголовки кроме Host. Они не заменяются молча на поддержанный вариант.
+
+Максимум UDP для совместимости с Xray — **8174 байта**: 8192 минус 2 длины и 16 тега.
+Пустые и большие датаграммы отклоняются, не обрезаются и не дробятся. TCP дробится
+на ограниченные фреймы. Проверяются response authentication, теги, длины, усечение,
+порядок фреймов, отсутствие повторного использования nonce.
+
+Реальная проверка: `tests/vmess_interop.rs`, официальный Xray26.10.31, 12 сочетаний
+(TCP/TLS/WS/WSS × auto/AES/ChaCha), TCP40KB, границы UDP, неверный UUID и недоверенный
+сертификат. Тест запускается явно с XRAY_BIN; ignore не означает passed. Подробности:
+`../audit/VMESS_IMPLEMENTATION.md`. Android-сборка и подключение на устройстве не заявлены.

@@ -15,6 +15,8 @@ pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
     let url = url.trim();
     if let Some(rest) = strip_scheme(url, "vless://") {
         parse_vless(rest, tag)
+    } else if let Some(rest) = strip_scheme(url, "vmess://") {
+        parse_vmess(rest, tag)
     } else if let Some(rest) = strip_scheme(url, "ss://") {
         parse_ss(rest, tag)
     } else if let Some(rest) =
@@ -224,8 +226,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
             None,
         ),
         "reality" => {
-            let public_key =
-                pbk.ok_or_else(|| Error::config("vless link: reality without pbk"))?;
+            let public_key = pbk.ok_or_else(|| Error::config("vless link: reality without pbk"))?;
             let server_name = sni.unwrap_or_else(|| server.clone());
             (
                 None,
@@ -244,7 +245,9 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let xhttp = match xhttp {
         Some(mut m) => {
             m.extend(xhttp_fields);
-            Some(crate::outbound::xhttp::XhttpConfig::from_xray(&serde_json::Value::Object(m))?)
+            Some(crate::outbound::xhttp::XhttpConfig::from_xray(
+                &serde_json::Value::Object(m),
+            )?)
         }
         None => None,
     };
@@ -396,7 +399,12 @@ mod tests {
 
     #[test]
     fn vless_unsupported() {
-        for q in ["type=ws", "type=grpc", "flow=xtls-rprx-direct", "security=xtls"] {
+        for q in [
+            "type=ws",
+            "type=grpc",
+            "flow=xtls-rprx-direct",
+            "security=xtls",
+        ] {
             let l = format!("vless://{UUID}@h:443?{q}");
             assert!(
                 matches!(parse_link(&l, "p"), Err(Error::Unsupported(_))),
@@ -424,7 +432,10 @@ mod tests {
         };
         let r = v.reality.as_ref().unwrap();
         assert_eq!(r.server_name, "www.microsoft.com");
-        assert_eq!(r.short_id_bytes().unwrap(), [0x6b, 0xa8, 0x51, 0x79, 0xe3, 0x0d, 0x4f, 0xc2]);
+        assert_eq!(
+            r.short_id_bytes().unwrap(),
+            [0x6b, 0xa8, 0x51, 0x79, 0xe3, 0x0d, 0x4f, 0xc2]
+        );
         assert_eq!(r.public_key_bytes().unwrap().len(), 32);
         assert_eq!(r.fingerprint.as_deref(), Some("chrome"));
         assert!(!v.is_plaintext() && v.is_vision());
@@ -432,7 +443,11 @@ mod tests {
         assert!(parse_link(&format!("vless://{UUID}@h:1?flow=xtls-rprx-vision"), "p").is_err());
         assert!(parse_link(&format!("vless://{UUID}@h:1?security=reality&sni=a"), "p").is_err());
         assert!(
-            parse_link(&format!("vless://{UUID}@h:1?security=reality&pbk=AAAA&sid=zz"), "p").is_err()
+            parse_link(
+                &format!("vless://{UUID}@h:1?security=reality&pbk=AAAA&sid=zz"),
+                "p"
+            )
+            .is_err()
         );
     }
 
@@ -489,4 +504,124 @@ mod tests {
         let bad = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("rc4-md5:x");
         assert!(parse_link(&format!("ss://{bad}@h:1"), "s").is_err());
     }
+}
+
+/// Parses the standard base64 JSON VMess share-link payload, rejecting lossy options.
+fn parse_vmess(rest: &str, tag: &str) -> Result<OutboundConfig> {
+    use crate::config::VmessConfig;
+    let encoded = rest.split('#').next().unwrap_or(rest).trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(encoded)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded))
+        .map_err(|_| Error::config("vmess: invalid base64"))?;
+    if bytes.len() > 65536 {
+        return Err(Error::config("vmess: share link too large"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| Error::config("vmess: invalid JSON"))?;
+    let map = value
+        .as_object()
+        .ok_or_else(|| Error::config("vmess: expected object"))?;
+    let field = |k: &str| -> Result<String> {
+        match map.get(k) {
+            None | Some(serde_json::Value::Null) => Ok(String::new()),
+            Some(serde_json::Value::String(s)) => Ok(s.clone()),
+            Some(serde_json::Value::Number(n)) => Ok(n.to_string()),
+            _ => Err(Error::config(format!("vmess: invalid {k}"))),
+        }
+    };
+    for k in map.keys() {
+        if ![
+            "v",
+            "ps",
+            "add",
+            "port",
+            "id",
+            "aid",
+            "scy",
+            "net",
+            "type",
+            "host",
+            "path",
+            "tls",
+            "sni",
+            "alpn",
+            "fp",
+            "allowInsecure",
+        ]
+        .contains(&k.as_str())
+        {
+            return Err(Error::Unsupported(format!("vmess: unsupported option {k}")));
+        }
+    }
+    if !matches!(field("aid")?.as_str(), "" | "0") {
+        return Err(Error::Unsupported(
+            "vmess: legacy alterId is not supported".into(),
+        ));
+    }
+    if !matches!(field("net")?.as_str(), "" | "tcp" | "raw" | "ws") {
+        return Err(Error::Unsupported(
+            "vmess: only TCP transport is supported".into(),
+        ));
+    }
+    if !matches!(field("type")?.as_str(), "" | "none")
+        || (field("net")? != "ws" && (!field("path")?.is_empty() || !field("host")?.is_empty()))
+    {
+        return Err(Error::Unsupported(
+            "vmess: TCP camouflage is not supported".into(),
+        ));
+    }
+    if !matches!(field("allowInsecure")?.as_str(), "" | "0" | "false") {
+        return Err(Error::Unsupported(
+            "vmess: insecure TLS is not supported".into(),
+        ));
+    }
+    let tls = match field("tls")?.as_str() {
+        "" | "none" => None,
+        "tls" => Some(TlsConfig {
+            enabled: true,
+            sni: Some(field("sni")?).filter(|s| !s.is_empty()),
+            alpn: field("alpn")?
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            pinned_sha256: Vec::new(),
+            fingerprint: Some(field("fp")?).filter(|s| !s.is_empty()),
+        }),
+        _ => return Err(Error::Unsupported("vmess: unsupported TLS mode".into())),
+    };
+    if tls.is_none()
+        && (!field("sni")?.is_empty() || !field("alpn")?.is_empty() || !field("fp")?.is_empty())
+    {
+        return Err(Error::Unsupported("vmess: TLS options require TLS".into()));
+    }
+    let security = field("scy")?;
+    let cfg = VmessConfig {
+        tag: tag.into(),
+        server: field("add")?,
+        port: field("port")?
+            .parse()
+            .map_err(|_| Error::config("vmess: invalid port"))?,
+        uuid: Secret(field("id")?),
+        websocket: if field("net")? == "ws" {
+            Some(crate::config::VmessWebsocket {
+                path: {
+                    let path = field("path")?;
+                    if path.is_empty() { "/".into() } else { path }
+                },
+                host: Some(field("host")?).filter(|s| !s.is_empty()),
+            })
+        } else {
+            None
+        },
+        security: if security.is_empty() {
+            "auto".into()
+        } else {
+            security
+        },
+        tls,
+    };
+    cfg.validate()?;
+    Ok(OutboundConfig::Vmess(cfg))
 }

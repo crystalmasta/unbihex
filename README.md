@@ -3,7 +3,7 @@
 **Русский** · [English](README.en.md)
 
 VPN-клиент для подписок на собственном сетевом ядре на Rust. Совместим с серверами Xray:
-VLESS (TLS, REALITY, XTLS Vision, XHTTP), Shadowsocks, SOCKS5, Hysteria2 (TCP/UDP, Salamander).
+VLESS (TLS, REALITY, XTLS Vision, XHTTP), VMess AEAD (TCP/TLS, WS/TLS), Shadowsocks, SOCKS5, Hysteria2 (TCP/UDP, Salamander).
 Один код для Windows, Linux, macOS, Android и iOS.
 
 ## Скачать

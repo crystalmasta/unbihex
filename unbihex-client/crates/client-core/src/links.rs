@@ -12,8 +12,21 @@ use crate::model::Server;
 
 /// Schemes recognised as share links (supported or not).
 const SCHEMES: &[&str] = &[
-    "vless", "vmess", "trojan", "ss", "ssr", "socks", "socks5", "hysteria", "hysteria2", "hy2",
-    "tuic", "wireguard", "wg", "anytls", "naive+https",
+    "vless",
+    "vmess",
+    "trojan",
+    "ss",
+    "ssr",
+    "socks",
+    "socks5",
+    "hysteria",
+    "hysteria2",
+    "hy2",
+    "tuic",
+    "wireguard",
+    "wg",
+    "anytls",
+    "naive+https",
 ];
 
 /// Whether `line` looks like a share link.
@@ -182,7 +195,11 @@ fn parse_generic(link: &str, scheme: &str) -> Result<Server> {
         "hysteria2" | "hy2" => "quic+tls".into(),
         "vless" | "trojan" => {
             let net = param("type");
-            let net = if net.is_empty() { "tcp".to_string() } else { net };
+            let net = if net.is_empty() {
+                "tcp".to_string()
+            } else {
+                net
+            };
             let sec = param("security");
             let sec = if sec.is_empty() && scheme == "trojan" {
                 "tls".to_string()
@@ -206,7 +223,10 @@ fn split_host_port(s: &str) -> (String, u16) {
     if let Some(rest) = s.strip_prefix('[')
         && let Some((h, p)) = rest.split_once(']')
     {
-        return (h.to_string(), p.trim_start_matches(':').parse().unwrap_or(0));
+        return (
+            h.to_string(),
+            p.trim_start_matches(':').parse().unwrap_or(0),
+        );
     }
     match s.rsplit_once(':') {
         Some((h, p)) => (h.to_string(), p.parse().unwrap_or(0)),
@@ -230,15 +250,16 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
         "hysteria2" | "hy2" if json_options_dropped(link) => {
             Some("в профиле есть настройки Hysteria 2, которых клиент пока не поддерживает".into())
         }
-        "vless" | "ss" | "hysteria2" | "hy2" => match unbihex_engine::link::parse_link(link, "proxy") {
-            Ok(OutboundConfig::Vless(v)) if v.is_plaintext() => {
-                Some("VLESS без TLS передаёт UUID и трафик открыто".into())
+        "vless" | "vmess" | "ss" | "hysteria2" | "hy2" => {
+            match unbihex_engine::link::parse_link(link, "proxy") {
+                Ok(OutboundConfig::Vless(v)) if v.is_plaintext() => {
+                    Some("VLESS без TLS передаёт UUID и трафик открыто".into())
+                }
+                Ok(_) => None,
+                Err(e) => Some(explain_engine_error(&e.to_string())),
             }
-            Ok(_) => None,
-            Err(e) => Some(explain_engine_error(&e.to_string())),
-        },
+        }
         "socks" | "socks5" => socks_parts(link).err().map(|e| e.to_string()),
-        "vmess" => Some("VMess пока не поддерживается ядром".into()),
         "trojan" => Some("Trojan пока не поддерживается ядром".into()),
         "hysteria" => Some("Hysteria 1 пока не поддерживается ядром".into()),
         "tuic" => Some("TUIC пока не поддерживается ядром".into()),
@@ -329,12 +350,13 @@ pub fn outbound_json(server: &Server) -> Result<Value> {
         return Err(ClientError::Unsupported(why.clone()));
     }
     match server.protocol.as_str() {
-        "vless" | "ss" | "hysteria2" => {
+        "vless" | "vmess" | "ss" | "hysteria2" => {
             Ok(json!({ "type": "link", "tag": "proxy", "url": server.link }))
         }
         "socks" => {
             let p = socks_parts(&server.link)?;
-            let mut v = json!({ "type": "socks", "tag": "proxy", "server": p.host, "port": p.port });
+            let mut v =
+                json!({ "type": "socks", "tag": "proxy", "server": p.host, "port": p.port });
             if let Some(u) = p.user {
                 v["username"] = json!(u);
             }
@@ -375,9 +397,15 @@ mod tests {
         assert_eq!(s.transport, "tcp+reality · vision");
         assert!(s.is_supported(), "{:?}", s.unsupported);
         assert_eq!(outbound_json(&s).unwrap()["type"], "link");
-        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&flow=xtls-rprx-vision#V")).unwrap();
+        let s = parse_server(&format!(
+            "vless://{UUID}@h.com:443?security=tls&flow=xtls-rprx-vision#V"
+        ))
+        .unwrap();
         assert!(s.is_supported(), "{:?}", s.unsupported);
-        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=reality&pbk=x#B")).unwrap();
+        let s = parse_server(&format!(
+            "vless://{UUID}@h.com:443?security=reality&pbk=x#B"
+        ))
+        .unwrap();
         assert!(s.unsupported.unwrap().contains("REALITY"));
         let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=ws#W")).unwrap();
         assert!(s.unsupported.unwrap().contains("ws"));
@@ -408,14 +436,20 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(j)
         );
         let s = parse_server(&l).unwrap();
-        assert_eq!((s.name.as_str(), s.host.as_str(), s.port), ("VM", "vm.example", 443));
+        assert_eq!(
+            (s.name.as_str(), s.host.as_str(), s.port),
+            ("VM", "vm.example", 443)
+        );
         assert_eq!(s.transport, "ws+tls");
         assert!(!s.is_supported());
         let s = parse_server("trojan://pw@t.example:443?sni=t.example#T").unwrap();
         assert_eq!(s.transport, "tcp+tls");
         assert!(!s.is_supported());
         let s = parse_server("hy2://pw@[2001:db8::1]:8443#H").unwrap();
-        assert_eq!((s.protocol.as_str(), s.host.as_str(), s.port), ("hysteria2", "2001:db8::1", 8443));
+        assert_eq!(
+            (s.protocol.as_str(), s.host.as_str(), s.port),
+            ("hysteria2", "2001:db8::1", 8443)
+        );
         assert!(s.is_supported());
         let s = parse_server("hysteria://pw@legacy.example:443").unwrap();
         assert!(!s.is_supported());
@@ -471,5 +505,44 @@ mod tests {
     fn not_a_link() {
         assert!(parse_server("https://example.com/sub").is_err());
         assert!(!is_share_link("hello"));
+    }
+}
+
+#[cfg(test)]
+mod vmess_tests {
+    use super::*;
+    #[test]
+    fn manual_vmess_import_and_persisted_revalidation_use_real_capability() {
+        let value = json!({"v":"2","ps":"VMess","add":"127.0.0.1","port":"10000","id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":"0","net":"tcp","scy":"auto"});
+        let link = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(value.to_string())
+        );
+        let mut server = parse_server(&link).unwrap();
+        assert!(server.is_supported());
+        assert_eq!(outbound_json(&server).unwrap()["type"], "link");
+        server.unsupported = Some("previous engine".into());
+        let id = server.id;
+        assert!(refresh_support(&mut server));
+        assert_eq!(server.id, id);
+        assert!(server.is_supported());
+        for (field, value) in [
+            ("aid", json!(1)),
+            ("scy", json!("none")),
+            ("net", json!("grpc")),
+            ("allowInsecure", json!("1")),
+            ("unsupported-json-options", json!(true)),
+        ] {
+            let mut changed = value_for(&link);
+            changed[field] = value;
+            let link = format!(
+                "vmess://{}",
+                base64::engine::general_purpose::STANDARD.encode(changed.to_string())
+            );
+            assert!(!parse_server(&link).unwrap().is_supported(), "{field}");
+        }
+    }
+    fn value_for(link: &str) -> Value {
+        serde_json::from_slice(&b64_decode(link.trim_start_matches("vmess://")).unwrap()).unwrap()
     }
 }
