@@ -669,6 +669,28 @@ async fn xhttp_against_xray() {
     assert!(log.contains("accepted"), "the server never saw a request");
 }
 
+/// 70,000 one-byte writes are 70,000 chunks: Xray must follow the chunk counter past
+/// 65,535 (it wraps on both sides). Then a clean close both ways: our end chunk, the
+/// echo closes, Xray's end chunk comes back as EOF.
+async fn vmess_wrap_and_close(ob: &dyn Outbound, echo: SocketAddr) {
+    let s = ob.connect_tcp(&session(echo)).await.unwrap();
+    let (mut r, mut w) = tokio::io::split(s);
+    let writer = tokio::spawn(async move {
+        for i in 0..70_000u32 {
+            w.write_all(&[(i % 251) as u8]).await.unwrap();
+        }
+        w.shutdown().await.unwrap();
+    });
+    let mut back = Vec::new();
+    tokio::time::timeout(Duration::from_secs(60), r.read_to_end(&mut back))
+        .await
+        .expect("wrap/close timed out")
+        .unwrap();
+    writer.await.unwrap();
+    assert_eq!(back.len(), 70_000);
+    assert!(back.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
+}
+
 /// VMess (AEAD header, masked and padded chunks) against Xray's VMess inbound:
 /// both ciphers over TCP, WebSocket and HTTPUpgrade, each with and without TLS;
 /// TCP and UDP echo through every one.
@@ -747,6 +769,9 @@ async fn vmess_against_xray() {
                 eprintln!("vmess {network} tls={tls} {security}");
                 plain_roundtrip(&ob, echo).await;
                 udp_roundtrip(&ob, uecho).await;
+                if security == "aes-128-gcm" {
+                    vmess_wrap_and_close(&ob, echo).await;
+                }
             }
         }
     }

@@ -240,8 +240,10 @@ pub struct WsStream<S> {
     out: PendingOut,
     /// A write waiting for `out` to drain; a read that drains it wakes the write.
     writer: Option<Waker>,
-    /// A close frame came in (or went out): no more data either way.
+    /// A close frame came in: no more data either way.
     closed: bool,
+    /// Our side is done (a close frame or the TCP half-close went out): nothing,
+    /// not even a pong, is written any more.
     close_sent: bool,
 }
 
@@ -397,13 +399,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsStream<S> {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // Only the TCP half-close, no close frame: WebSocket has no half-close, and a
+        // server that stops reading after the protocol's own end marker (Xray after
+        // VMess's end chunk) would leave the frame unread and reset the connection,
+        // losing what it still sends. Xray's client does not send one here either.
         let this = &mut *self;
-        if !this.close_sent {
-            ready!(this.poll_drain_write(cx))?;
-            put_frame(this.out.buf_mut(), OP_CLOSE, &1000u16.to_be_bytes());
-            this.close_sent = true;
-        }
         ready!(this.poll_drain_write(cx))?;
+        this.close_sent = true;
         Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }

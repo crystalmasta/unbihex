@@ -597,9 +597,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VmessStream<S> {
                 &mut this.rbuf
             ))?;
             if n == 0 {
+                // Xray's server may close without the end chunk once its idle timers
+                // fire, and its client reads a close between chunks as EOF too.
+                // Only a cut inside the response header or a chunk is an error.
+                if this.response.done && this.dec.head.is_none() && this.rbuf.is_empty() {
+                    this.eof = true;
+                    continue;
+                }
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    "vmess: the server closed without ending the stream",
+                    "vmess: the stream was cut off mid-chunk",
                 )));
             }
         }
@@ -647,7 +654,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VmessStream<S> {
             this.end_sent = true;
         }
         ready!(this.poll_drain_write(cx))?;
-        Pin::new(&mut this.inner).poll_shutdown(cx)
+        // The end chunk is the half-close; the transport stays open until the stream
+        // is dropped, as with Xray's client. Xray stops reading after the end chunk,
+        // so a TLS close_notify or a WebSocket close sent now would sit unread and
+        // make it reset the connection, losing the rest of the response.
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 }
 
@@ -1102,6 +1113,59 @@ mod tests {
             assert_eq!(back, data);
             writer.await.unwrap();
             srv.await.unwrap();
+        }
+    }
+
+    /// Xray may close without the end chunk once its timers fire; a close between
+    /// chunks is EOF, a close inside one is an error.
+    #[tokio::test]
+    async fn close_between_chunks_is_eof_inside_one_is_an_error() {
+        for cut in [false, true] {
+            let req = encode_request(
+                &UUID,
+                Security::Aes128Gcm,
+                CMD_TCP,
+                &"1.2.3.4:80".parse().unwrap(),
+            )
+            .unwrap();
+            let (key, iv, check) = (req.response.key, req.response.iv, req.response.check);
+            let (client, mut server) = tokio::io::duplex(1 << 16);
+            let mut s = VmessStream::new(client, req);
+            let mut wire = seal(
+                &kdf16(&key, &[b"AEAD Resp Header Len Key"]),
+                &kdf12(&iv, &[b"AEAD Resp Header Len IV"]),
+                b"",
+                &4u16.to_be_bytes(),
+            )
+            .unwrap();
+            wire.extend(
+                seal(
+                    &kdf16(&key, &[b"AEAD Resp Header Key"]),
+                    &kdf12(&iv, &[b"AEAD Resp Header IV"]),
+                    b"",
+                    &[check, 0, 0, 0],
+                )
+                .unwrap(),
+            );
+            Chunker::new(Security::Aes128Gcm, &key, &iv)
+                .seal_into(b"hello", &mut wire)
+                .unwrap();
+            if cut {
+                wire.truncate(wire.len() - 3);
+            }
+            // The request goes out first, as it always does before an answer.
+            s.write_all(b"ping").await.unwrap();
+            s.flush().await.unwrap();
+            server.write_all(&wire).await.unwrap();
+            drop(server);
+            let mut back = Vec::new();
+            let r = s.read_to_end(&mut back).await;
+            if cut {
+                assert!(r.is_err());
+            } else {
+                r.unwrap();
+                assert_eq!(back, b"hello");
+            }
         }
     }
 
