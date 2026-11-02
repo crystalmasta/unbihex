@@ -232,6 +232,16 @@ pub struct XhttpConfig {
     /// Minimum pause between upload POSTs in packet-up mode, ms, default 30.
     #[serde(default)]
     pub sc_min_posts_interval_ms: Option<Range>,
+    /// Packet-up upload placement: `body` (default), `auto`, `header`, `cookie`.
+    #[serde(default)]
+    pub uplink_data_placement: String,
+    /// Header/cookie key; defaults to `X-Data` for headers, `x_data` for cookies.
+    #[serde(default)]
+    pub uplink_data_key: String,
+    /// Bytes of base64url data per header/cookie; Xray defaults to 3-4 KB
+    /// (headers) or 2-3 KB (cookies).
+    #[serde(default)]
+    pub uplink_chunk_size: Option<Range>,
     /// Connection reuse; Xray's defaults when absent.
     #[serde(default)]
     pub xmux: Option<XmuxConfig>,
@@ -285,6 +295,51 @@ impl XhttpConfig {
             }
             validate_key(self.padding_key())?;
             validate_key(self.padding_header())?;
+        }
+        if !matches!(
+            self.uplink_data_placement.as_str(),
+            "" | "auto" | "body" | "header" | "cookie"
+        ) {
+            return Err(Error::config("xhttp: unsupported uplink data placement"));
+        }
+        if !self.uplink_data_key.is_empty() {
+            if self.uplink_placement() == "cookie" {
+                validate_cookie_key(self.uplink_data_key())?;
+            } else {
+                validate_key(self.uplink_data_key())?;
+            }
+        }
+        // The upload headers/cookies share the request namespace with padding.
+        if self.x_padding_obfs_mode {
+            let placement = match self.padding_placement() {
+                "header" | "queryInHeader" => "header",
+                "cookie" => "cookie",
+                _ => "",
+            };
+            let data_placement = self.uplink_placement();
+            if placement == data_placement && matches!(data_placement, "header" | "cookie") {
+                let sep = if placement == "header" { '-' } else { '_' };
+                let pad = if placement == "header" {
+                    self.padding_header().to_ascii_lowercase()
+                } else {
+                    self.padding_key().to_string()
+                };
+                let base = if placement == "header" {
+                    self.uplink_data_key().to_ascii_lowercase()
+                } else {
+                    self.uplink_data_key().to_string()
+                };
+                let prefix = format!("{base}{sep}");
+                let same = pad == base
+                    || pad
+                        .strip_prefix(&prefix)
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                if same {
+                    return Err(Error::config(
+                        "xhttp: padding and uplink data use the same key",
+                    ));
+                }
+            }
         }
         let mut keys = vec![
             (self.session_placement(), self.session_key()),
@@ -445,6 +500,32 @@ impl XhttpConfig {
     pub fn uplink_method(&self) -> &str {
         default_str(&self.uplink_http_method, "POST")
     }
+    /// Effective packet-up upload placement (`body`, `auto`, `header`, `cookie`).
+    pub fn uplink_placement(&self) -> &str {
+        default_str(&self.uplink_data_placement, "body")
+    }
+    /// Effective upload header/cookie key.
+    pub fn uplink_data_key(&self) -> &str {
+        default_str(
+            &self.uplink_data_key,
+            if self.uplink_placement() == "cookie" {
+                "x_data"
+            } else {
+                "X-Data"
+            },
+        )
+    }
+    /// Bytes of base64url data per upload header/cookie, mirroring Xray.
+    pub fn uplink_chunk_size(&self) -> Range {
+        match self.uplink_chunk_size {
+            Some(r) if r.to > 0 => Range { from: r.from.max(64), to: r.to.max(64) },
+            _ => match self.uplink_data_placement.as_str() {
+                "cookie" => Range { from: 2 * 1024, to: 3 * 1024 },
+                "header" => Range { from: 3_000, to: 4_000 },
+                _ => self.max_post(),
+            },
+        }
+    }
 
     /// GET uploads exist only in packet-up.
     pub fn check_uplink(&self, mode: XhttpMode) -> Result<()> {
@@ -452,6 +533,13 @@ impl XhttpConfig {
             && matches!(mode, XhttpMode::StreamUp | XhttpMode::StreamOne)
         {
             return Err(Error::config("xhttp: GET uplink requires packet-up mode"));
+        }
+        if matches!(self.uplink_placement(), "header" | "cookie")
+            && mode != XhttpMode::PacketUp
+        {
+            return Err(Error::config(
+                "xhttp: header/cookie uplink data requires packet-up mode",
+            ));
         }
         Ok(())
     }
@@ -593,13 +681,10 @@ impl XhttpConfig {
                 "seqPlacement" => cfg.seq_placement = s(k)?.unwrap_or_default(),
                 "seqKey" => cfg.seq_key = s(k)?.unwrap_or_default(),
                 "uplinkDataPlacement" => {
-                    if !matches!(s(k)?.as_deref(), None | Some("") | Some("auto") | Some("body")) {
-                        return Err(unsupported(k));
-                    }
+                    cfg.uplink_data_placement = s(k)?.unwrap_or_default()
                 }
-                "uplinkDataKey" | "uplinkChunkSize" => {
-                    // Only meaningful with xPaddingObfsMode or non-default placements.
-                }
+                "uplinkDataKey" => cfg.uplink_data_key = s(k)?.unwrap_or_default(),
+                "uplinkChunkSize" => cfg.uplink_chunk_size = r(k)?,
                 "downloadSettings" => {
                     if !val.is_null() {
                         return Err(unsupported(k));
@@ -637,6 +722,18 @@ fn validate_key(key: &str) -> Result<()> {
         return Err(Error::config(
             "xhttp: invalid or reserved metadata/padding key",
         ));
+    }
+    Ok(())
+}
+
+fn validate_cookie_key(key: &str) -> Result<()> {
+    // RFC 6265 cookie-name is an RFC 7230 token, which is also stricter than a
+    // bare base64url string but accepts every valid header name.
+    fn token(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+    }
+    if key.is_empty() || !key.bytes().all(token) {
+        return Err(Error::config("xhttp: invalid uplink data cookie key"));
     }
     Ok(())
 }
@@ -715,8 +812,13 @@ mod tests {
             serde_json::json!({"xPaddingBytes":1000000}),
             serde_json::json!({"seqPlacement":"query", "seqKey":"same", "sessionIDPlacement":"query", "sessionIDKey":"same"}),
             serde_json::json!({"uplinkHTTPMethod":"HEAD"}),
-            serde_json::json!({"uplinkDataPlacement":"header"}),
-            serde_json::json!({"uplinkDataPlacement":"cookie"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"nope"}),
+            serde_json::json!({"mode":"stream-up","uplinkDataPlacement":"header"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"header","uplinkDataKey":"bad key"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"cookie","uplinkDataKey":"bad;key"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"header","xPaddingObfsMode":true,"xPaddingPlacement":"header","xPaddingHeader":"X-Data"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"header","xPaddingObfsMode":true,"xPaddingPlacement":"header","xPaddingHeader":"X-Data-0"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"cookie","xPaddingObfsMode":true,"xPaddingPlacement":"cookie","xPaddingKey":"x_data_0"}),
             serde_json::json!({"sessionIDPlacement":"header", "sessionIDKey":"Referer"}),
             serde_json::json!({"xPaddingObfsMode":true, "sessionIDPlacement":"header", "sessionIDKey":"X-Padding"}),
             serde_json::json!({"xPaddingObfsMode":true, "xPaddingHeader":"Cookie"}),
@@ -731,6 +833,62 @@ mod tests {
         ] {
             assert!(XhttpConfig::from_xray(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn uplink_payload_placements_and_defaults() {
+        let header = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "header"
+        }))
+        .unwrap();
+        assert_eq!(header.uplink_placement(), "header");
+        assert_eq!(header.uplink_data_key(), "X-Data");
+        assert_eq!(header.uplink_chunk_size(), Range { from: 3_000, to: 4_000 });
+
+        let cookie = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "cookie"
+        }))
+        .unwrap();
+        assert_eq!(cookie.uplink_placement(), "cookie");
+        assert_eq!(cookie.uplink_data_key(), "x_data");
+        assert_eq!(cookie.uplink_chunk_size(), Range { from: 2 * 1024, to: 3 * 1024 });
+
+        for placement in ["auto", "body"] {
+            let body = XhttpConfig::from_xray(&serde_json::json!({
+                "mode": "packet-up", "uplinkDataPlacement": placement
+            }))
+            .unwrap();
+            assert_eq!(body.uplink_placement(), placement);
+            assert_eq!(body.uplink_data_key(), "X-Data");
+            assert_eq!(body.uplink_chunk_size(), Range::fixed(1_000_000));
+        }
+        let unset = XhttpConfig::from_xray(&serde_json::json!({"mode": "packet-up"})).unwrap();
+        assert_eq!(unset.uplink_placement(), "body");
+        assert_eq!(unset.uplink_data_key(), "X-Data");
+
+        let custom = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "header",
+            "uplinkDataKey": "X-Custom", "uplinkChunkSize": "512-1024"
+        }))
+        .unwrap();
+        assert_eq!(custom.uplink_data_key(), "X-Custom");
+        assert_eq!(custom.uplink_chunk_size(), Range { from: 512, to: 1024 });
+
+        let small = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "cookie",
+            "uplinkChunkSize": 8
+        }))
+        .unwrap();
+        assert_eq!(small.uplink_chunk_size(), Range { from: 64, to: 64 });
+
+        let engine: XhttpConfig = serde_json::from_str(
+            r#"{"mode":"packet-up","uplink_data_placement":"cookie",
+                "uplink_data_key":"c","uplink_chunk_size":"100-200"}"#,
+        )
+        .unwrap();
+        assert_eq!(engine.uplink_placement(), "cookie");
+        assert_eq!(engine.uplink_data_key(), "c");
+        assert_eq!(engine.uplink_chunk_size(), Range { from: 100, to: 200 });
     }
 
     /// A per-session connection made the XHTTP path pay a handshake for every

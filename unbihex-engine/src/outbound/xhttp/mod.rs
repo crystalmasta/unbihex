@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use bytes::Bytes;
 use h2::client::SendRequest;
 use h2::{RecvStream, SendStream};
@@ -226,6 +227,35 @@ fn remove_cookie(headers: &mut Vec<(String, String)>, key: &str) {
     if !value.is_empty() {
         headers.push(("Cookie".into(), value));
     }
+}
+
+/// Appends one cookie pair to the single `Cookie` header.
+fn add_cookie(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    let pair = format!("{name}={value}");
+    let value = match headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+    {
+        Some((_, old)) => format!("{old}; {pair}"),
+        None => pair,
+    };
+    set_header(headers, "Cookie", value);
+}
+
+/// Splits an upload packet the way Xray does: base64url the whole packet, then
+/// cut the encoded string into random chunks. The server concatenates the
+/// chunks before decoding, so chunk boundaries may fall inside a base64 group.
+fn upload_chunks(cfg: &XhttpConfig, data: &[u8]) -> Vec<String> {
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data);
+    let range = cfg.uplink_chunk_size();
+    let mut chunks = Vec::new();
+    let mut rest = encoded.as_str();
+    while !rest.is_empty() {
+        let n = (range.pick() as usize).min(rest.len());
+        chunks.push(rest[..n].to_string());
+        rest = &rest[n..];
+    }
+    chunks
 }
 
 fn huffman_bits(c: u8) -> usize {
@@ -581,15 +611,28 @@ impl XhttpClient {
         }
     }
 
-    fn h2_request(
+    /// Adds packet-up payload headers/cookies to a request shape.
+    fn add_uplink_payload(&self, shape: &mut RequestShape, data: &[u8]) {
+        let placement = self.cfg.uplink_placement();
+        if !matches!(placement, "header" | "cookie") {
+            return;
+        }
+        let key = self.cfg.uplink_data_key();
+        for (i, chunk) in upload_chunks(&self.cfg, data).into_iter().enumerate() {
+            if placement == "header" {
+                set_header(&mut shape.headers, &format!("{key}-{i}"), chunk);
+            } else {
+                add_cookie(&mut shape.headers, &format!("{key}_{i}"), &chunk);
+            }
+        }
+    }
+
+    fn h2_request_shape(
         &self,
         method: http::Method,
-        session: Option<&str>,
-        seq: Option<u64>,
-        stream_body: bool,
+        shape: RequestShape,
         len: Option<usize>,
     ) -> Result<http::Request<()>> {
-        let shape = self.request_shape(session, seq, stream_body);
         let mut b = http::Request::builder()
             .method(method)
             .uri(format!("{}://{}{}", self.scheme, self.host, shape.target));
@@ -653,6 +696,32 @@ impl XhttpClient {
             }
         });
         Some(stop)
+    }
+
+    fn h2_request(
+        &self,
+        method: http::Method,
+        session: Option<&str>,
+        seq: Option<u64>,
+        stream_body: bool,
+        len: Option<usize>,
+    ) -> Result<http::Request<()>> {
+        let shape = self.request_shape(session, seq, stream_body);
+        self.h2_request_shape(method, shape, len)
+    }
+
+    /// A packet-up request whose payload travels in headers or cookies.
+    fn h2_request_with_payload(
+        &self,
+        method: http::Method,
+        session: &str,
+        seq: u64,
+        data: &[u8],
+    ) -> Result<http::Request<()>> {
+        let mut shape = self.request_shape(Some(session), Some(seq), false);
+        self.add_uplink_payload(&mut shape, data);
+        // Xray sends a POST with no body in these placements.
+        self.h2_request_shape(method, shape, Some(0))
     }
 
     async fn dial_h2(&self) -> Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)> {
@@ -809,6 +878,7 @@ impl XhttpClient {
         let max = self.cfg.max_post().pick().max(1) as usize;
         let mut buf = vec![0u8; max.min(1 << 20)];
         let interval = self.cfg.post_interval();
+        let in_metadata = matches!(self.cfg.uplink_placement(), "header" | "cookie");
         let failed = Arc::new(AtomicBool::new(false));
         let mut last = None;
         let mut seq = 0u64;
@@ -817,22 +887,33 @@ impl XhttpClient {
             if n == 0 || failed.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let req = self.h2_request(
-                self.uplink_method(),
-                Some(session),
-                Some(seq),
-                false,
-                Some(n),
-            )?;
+            let req = if in_metadata {
+                self.h2_request_with_payload(
+                    self.uplink_method(),
+                    session,
+                    seq,
+                    &buf[..n],
+                )?
+            } else {
+                self.h2_request(
+                    self.uplink_method(),
+                    Some(session),
+                    Some(seq),
+                    false,
+                    Some(n),
+                )?
+            };
             seq += 1;
             let (resp, mut tx) = lease
                 .request()
                 .ready()
                 .await
                 .map_err(h2_err)?
-                .send_request(req, false)
+                .send_request(req, in_metadata)
                 .map_err(h2_err)?;
-            send_data(&mut tx, Bytes::copy_from_slice(&buf[..n]), true).await?;
+            if !in_metadata {
+                send_data(&mut tx, Bytes::copy_from_slice(&buf[..n]), true).await?;
+            }
             let failed = failed.clone();
             tokio::spawn(async move {
                 match resp.await {
@@ -891,6 +972,7 @@ impl XhttpClient {
         let max = self.cfg.max_post().pick().max(1) as usize;
         let mut buf = vec![0u8; max.min(1 << 20)];
         let interval = self.cfg.post_interval();
+        let in_metadata = matches!(self.cfg.uplink_placement(), "header" | "cookie");
         let mut last = None;
         let mut seq = 0u64;
         type Conn = (BufReader<ReadHalf<BoxStream>>, WriteHalf<BoxStream>);
@@ -900,7 +982,13 @@ impl XhttpClient {
             if n == 0 {
                 return Ok(());
             }
-            let shape = self.request_shape(Some(session), Some(seq), false);
+            let mut shape = self.request_shape(Some(session), Some(seq), false);
+            let body: &[u8] = if in_metadata {
+                self.add_uplink_payload(&mut shape, &buf[..n]);
+                &[]
+            } else {
+                &buf[..n]
+            };
             seq += 1;
             let mut attempt = 0;
             loop {
@@ -920,7 +1008,7 @@ impl XhttpClient {
                         &shape.target,
                         &self.host,
                         &shape.headers,
-                        Some(&buf[..n]),
+                        Some(body),
                     )
                     .await?;
                     let head = h1::read_head(cr).await?;
@@ -1479,4 +1567,138 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn upload_chunks_split_encoded_data_and_round_trip() {
+        use base64::Engine as _;
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "header",
+            "uplinkChunkSize": 3000
+        }))
+        .unwrap();
+        let data: Vec<u8> = (0..10 * 1024).map(|i| (i % 251) as u8).collect();
+        let chunks = upload_chunks(&cfg, &data);
+        // 10240 raw bytes encode to 13656 base64 characters: five 3000-char chunks.
+        assert_eq!(chunks.len(), 5);
+        assert!(chunks.iter().all(|c| !c.contains('=')));
+        assert_eq!(chunks.iter().map(String::len).sum::<usize>(), 13_654);
+        let encoded = chunks.concat();
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn upload_chunks_round_trip_around_the_chunk_boundary() {
+        use base64::Engine as _;
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "cookie",
+            "uplinkDataKey": "d", "uplinkChunkSize": 64
+        }))
+        .unwrap();
+        for n in [0usize, 1, 63, 64, 65] {
+            let data: Vec<u8> = (0..n).map(|i| (i % 253) as u8).collect();
+            let chunks = upload_chunks(&cfg, &data);
+            assert!(chunks.iter().all(|c| !c.contains('=')), "{n}");
+            assert_eq!(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(chunks.concat())
+                    .unwrap(),
+                data,
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_upload_uses_one_cookie_header_with_semicolons() {
+        use base64::Engine as _;
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "cookie",
+            "uplinkChunkSize": 3000
+        }))
+        .unwrap();
+        let c = client(cfg);
+        let data = vec![0xa5u8; 10 * 1024];
+        let mut shape = c.request_shape(Some("s"), Some(0), false);
+        c.add_uplink_payload(&mut shape, &data);
+        let cookie = shape
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+            .expect("one Cookie header")
+            .1
+            .clone();
+        assert_eq!(
+            shape
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+                .count(),
+            1
+        );
+        assert!(cookie.contains("x_data_0="), "{cookie}");
+        assert!(cookie.contains("; x_data_1="), "{cookie}");
+        let pairs: Vec<&str> = cookie.split(';').map(str::trim).collect();
+        for pair in &pairs {
+            // A browser cookie is limited to 4096 bytes, name included.
+            assert!(pair.len() < 4096, "{pair}");
+        }
+        let chunks: Vec<String> = pairs
+            .iter()
+            .filter_map(|p| p.strip_prefix("x_data_"))
+            .filter_map(|p| p.split_once('=').map(|(_, v)| v.to_string()))
+            .collect();
+        assert_eq!(chunks.len(), 5);
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(chunks.concat())
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn packet_requests_carry_metadata_headers_and_an_empty_body() {
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "header",
+            "uplinkDataKey": "X-Data", "uplinkChunkSize": 64
+        }))
+        .unwrap();
+        let c = client(cfg);
+        let data = vec![0x5au8; 200];
+        let req = c
+            .h2_request_with_payload(http::Method::POST, "s", 7, &data)
+            .unwrap();
+        assert_eq!(req.headers()["content-length"], "0");
+        let chunks: Vec<String> = (0..)
+            .map_while(|i| {
+                req.headers()
+                    .get(format!("x-data-{i}").as_str())
+                    .map(|v| v.to_str().unwrap().to_string())
+            })
+            .collect();
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|c| !c.contains('=')));
+
+        let mut shape = c.request_shape(Some("s"), Some(7), false);
+        c.add_uplink_payload(&mut shape, &data);
+        let h1 = shape
+            .headers
+            .iter()
+            .filter(|(k, _)| k.starts_with("X-Data-"))
+            .count();
+        assert_eq!(h1, chunks.len());
+        assert_eq!(
+            shape
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+                .count(),
+            0
+        );
+    }
 }
