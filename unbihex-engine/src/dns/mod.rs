@@ -5,7 +5,7 @@ pub mod fakeip;
 pub mod server;
 
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +28,29 @@ pub enum Resolver {
 
 /// How long the OS resolver may take before the own client is asked instead.
 const SYSTEM_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Proxy-server bootstrap on mobile: DNS of the physical network first, with
+/// configured upstreams retained as fallbacks. Never use the VPN's fake DNS.
+pub(crate) fn bootstrap_resolver(
+    network_dns: &[SocketAddr],
+    configured: &[SocketAddr],
+    sockets: Arc<crate::net::SocketFactory>,
+    system_bypasses_tun: bool,
+) -> Resolver {
+    let mut servers = Vec::new();
+    for &server in network_dns.iter().chain(configured) {
+        if !servers.contains(&server) {
+            servers.push(server);
+        }
+    }
+    let client = Arc::new(DnsClient::new(servers, sockets));
+    if system_bypasses_tun {
+        // Keep Android Private DNS / DoT working when raw port 53 is blocked.
+        Resolver::SystemThenUpstream(client)
+    } else {
+        Resolver::Upstream(client)
+    }
+}
 
 impl Resolver {
     /// Resolves a host name; IP literals are returned as is.
@@ -83,6 +106,64 @@ mod tests {
 
     const A: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1));
     const B: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 2));
+
+    #[tokio::test]
+    async fn bootstrap_uses_network_dns_when_public_dns_is_silent() {
+        use hickory_proto::op::{Message, OpCode};
+        use hickory_proto::rr::{RData, Record, rdata::A as DnsA};
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let network = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let network_addr = network.local_addr().unwrap();
+        let responder = tokio::spawn(async move {
+            let mut buf = [0; 1500];
+            let (n, peer) = network.recv_from(&mut buf).await.unwrap();
+            let query = Message::from_vec(&buf[..n]).unwrap();
+            let mut answer = Message::response(query.metadata.id, OpCode::Query);
+            answer.add_queries(query.queries.iter().cloned());
+            answer.add_answer(Record::from_rdata(
+                query.queries[0].name().clone(),
+                60,
+                RData::A(DnsA(std::net::Ipv4Addr::new(192, 0, 2, 1))),
+            ));
+            network
+                .send_to(&answer.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+        let resolver = bootstrap_resolver(
+            &[network_addr, network_addr],
+            &[silent.local_addr().unwrap(), network_addr],
+            Default::default(),
+            false,
+        );
+        let Resolver::Upstream(client) = &resolver else {
+            panic!("expected bypass DNS")
+        };
+        assert_eq!(
+            client.upstream(),
+            &[network_addr, silent.local_addr().unwrap()]
+        );
+        let ips = tokio::time::timeout(Duration::from_secs(1), resolver.resolve("cdn.example"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ips, [A]);
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_keeps_system_dns_when_raw_dns_is_unavailable() {
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let resolver = bootstrap_resolver(
+            &[silent.local_addr().unwrap()],
+            &[],
+            Default::default(),
+            true,
+        );
+        assert!(matches!(resolver, Resolver::SystemThenUpstream(_)));
+        let ips = resolver.resolve("localhost").await.unwrap();
+        assert!(!ips.is_empty() && ips.iter().all(IpAddr::is_loopback));
+    }
 
     async fn pick(first: Result<Vec<IpAddr>>, delay: Duration) -> Result<Vec<IpAddr>> {
         let first = async move {

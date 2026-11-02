@@ -57,6 +57,9 @@ pub struct PlatformHooks {
     /// service excludes the app). Server names and direct targets then resolve
     /// through it first and through `dns.upstream` only if it fails.
     pub system_dns_bypasses_tun: bool,
+    /// Mobile: DNS servers of the physical network, captured before the VPN is
+    /// established. Used only for proxy-server bootstrap (including hot reload).
+    pub bootstrap_dns: Vec<std::net::SocketAddr>,
 }
 
 /// A running engine.
@@ -133,6 +136,18 @@ impl Instance {
             Resolver::Upstream(dns_client.clone())
         });
         let system = Arc::new(Resolver::System);
+        let server_resolver = if mobile && !hooks.bootstrap_dns.is_empty() {
+            Arc::new(dns::bootstrap_resolver(
+                &hooks.bootstrap_dns,
+                &config.dns.upstream,
+                sockets.clone(),
+                hooks.system_dns_bypasses_tun,
+            ))
+        } else if mobile {
+            upstream.clone()
+        } else {
+            system.clone()
+        };
         let fakeip = tun_cfg.as_ref().map(|_| {
             // Clients may cache an answer for its whole TTL (and often longer).
             let ttl = Duration::from_secs(u64::from(config.dns.ttl) * 4);
@@ -150,7 +165,7 @@ impl Instance {
                 system.clone()
             },
             // Server names are resolved before traffic is captured; mobile has no such window.
-            server_resolver: if mobile { upstream.clone() } else { system },
+            server_resolver,
             fakeip: fakeip.clone(),
         };
 
@@ -161,7 +176,9 @@ impl Instance {
         let fakeip_exclude = config.dns.fakeip_exclude_suffixes()?;
         let reload_ctx = OutboundContext {
             // After the TUN is up the system resolver answers with fake IPs.
-            server_resolver: if tun_cfg.is_some() {
+            server_resolver: if mobile {
+                ctx.server_resolver.clone()
+            } else if tun_cfg.is_some() {
                 ctx.resolver.clone()
             } else {
                 ctx.server_resolver.clone()
