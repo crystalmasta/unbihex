@@ -138,11 +138,24 @@ pub struct XmuxConfig {
 }
 
 impl XmuxConfig {
-    /// Xray's defaults when `xmux` is absent.
+    /// Defaults when `xmux` is absent.
+    ///
+    /// Concurrency is unlimited, as in Xray: sessions share the pooled
+    /// connections instead of dialing their own. With a per-session connection
+    /// every proxied connection paid a fresh TLS + REALITY handshake, so the
+    /// XHTTP path had the connection rate of plain TCP (about 500 conn/s
+    /// against Xray's 1400-1800) and a TTFB three times higher.
+    ///
+    /// The pool grows on demand up to eight connections: a new one is dialed
+    /// only while every connection already carries a session. One download
+    /// stream then uses one tunnel, while eight parallel streams spread over
+    /// eight, which is what their CPU pipelines need. A fixed size is worse at
+    /// both ends: four connections halve the throughput of eight streams at
+    /// RTT 0, and eight dial tunnels that a single stream never uses.
     pub fn xray_default() -> XmuxConfig {
         XmuxConfig {
-            max_concurrency: Some(Range::fixed(1)),
-            max_connections: None,
+            max_concurrency: None,
+            max_connections: Some(Range::fixed(8)),
             c_max_reuse_times: None,
             h_max_request_times: Some(Range { from: 600, to: 900 }),
             h_max_reusable_secs: Some(Range { from: 1800, to: 3000 }),
@@ -699,6 +712,15 @@ mod tests {
         ] {
             assert!(XhttpConfig::from_xray(&bad).is_err(), "{bad}");
         }
+    }
+
+    /// A per-session connection made the XHTTP path pay a handshake for every
+    /// proxied connection; the default must share the pool instead.
+    #[test]
+    fn default_xmux_shares_the_pool() {
+        let d = XmuxConfig::xray_default();
+        assert!(d.max_concurrency.is_none(), "sessions must share a connection");
+        assert_eq!(d.max_connections.map(|r| r.pick()), Some(8));
     }
 
     #[test]

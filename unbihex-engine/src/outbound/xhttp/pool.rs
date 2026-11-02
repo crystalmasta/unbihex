@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use h2::client::SendRequest;
 use parking_lot::Mutex;
-use rand::Rng;
 
 use super::config::{Range, XmuxConfig};
 use crate::error::Result;
@@ -80,17 +79,31 @@ impl H2Pool {
     fn take(&self) -> Option<Lease> {
         let mut conns = self.conns.lock();
         conns.retain(|c| c.usable());
-        if conns.is_empty() || (self.connections > 0 && conns.len() < self.connections) {
+        if conns.is_empty() {
+            return None;
+        }
+        // Grow on demand: a new connection is dialed only while every one we
+        // already have is carrying a session. A fixed pool is worse at both
+        // ends — four connections halve the throughput of eight parallel
+        // streams, eight dial tunnels that a single stream never uses.
+        let room = self.connections == 0 || conns.len() < self.connections;
+        if room && conns.iter().all(|c| c.open.load(Ordering::Relaxed) > 0) {
             return None;
         }
         let free: Vec<&Arc<PooledConn>> = conns
             .iter()
             .filter(|c| self.concurrency == 0 || c.open.load(Ordering::Relaxed) < self.concurrency)
             .collect();
-        if free.is_empty() {
-            return None;
-        }
-        let c = free[rand::thread_rng().gen_range(0..free.len())].clone();
+        // At the cap with everything busy the least loaded one is still shared.
+        let pickable = if free.is_empty() {
+            conns.iter().collect::<Vec<_>>()
+        } else {
+            free
+        };
+        let c = pickable
+            .iter()
+            .min_by_key(|c| c.open.load(Ordering::Relaxed))
+            .map(|c| (*c).clone())?;
         if c.left_usage.load(Ordering::Relaxed) > 0 {
             c.left_usage.fetch_sub(1, Ordering::Relaxed);
         }
@@ -133,5 +146,68 @@ impl H2Pool {
     /// Whether there are no live connections.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_at(cap: u32) -> H2Pool {
+        H2Pool::new(XmuxConfig {
+            max_connections: Some(Range::fixed(cap)),
+            ..XmuxConfig::xray_default()
+        })
+    }
+
+    async fn conn(open: usize) -> Arc<PooledConn> {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            if let Ok(mut conn) = h2::server::handshake(server_io).await {
+                while let Some(Ok(_)) = conn.accept().await {}
+            }
+        });
+        let (send, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        Arc::new(PooledConn {
+            send,
+            closed: Arc::new(AtomicBool::new(false)),
+            open: AtomicUsize::new(open),
+            left_usage: AtomicI64::new(-1),
+            left_requests: AtomicI64::new(i64::MAX),
+            until: None,
+        })
+    }
+
+    /// An idle connection is reused: a single stream must not dial its own
+    /// tunnel, that is what costs a handshake per proxied connection.
+    #[tokio::test]
+    async fn reuses_an_idle_connection() {
+        let pool = pool_at(8);
+        let c = conn(0).await;
+        pool.conns.lock().push(c);
+        assert!(pool.take().is_some());
+    }
+
+    /// While every connection carries a session, the pool grows: eight parallel
+    /// streams spread over eight connections instead of queuing on one.
+    #[tokio::test]
+    async fn grows_while_every_connection_is_busy() {
+        let pool = pool_at(8);
+        let c = conn(1).await;
+        pool.conns.lock().push(c);
+        assert!(pool.take().is_none(), "a busy pool with room must dial");
+    }
+
+    /// At the cap a busy connection is shared rather than dialing past it.
+    #[tokio::test]
+    async fn shares_at_the_cap() {
+        let pool = pool_at(1);
+        let c = conn(1).await;
+        pool.conns.lock().push(c);
+        let lease = pool.take().expect("the cap is reached, so the connection is shared");
+        assert_eq!(lease.0.open.load(Ordering::Relaxed), 2);
     }
 }
