@@ -26,7 +26,12 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if std::thread::panicking() {eprintln!("Xray logs: {}",std::fs::read_to_string(self.dir.join("server.log")).unwrap_or_default());}
+        if std::thread::panicking() {
+            eprintln!(
+                "Xray logs: {}",
+                std::fs::read_to_string(self.dir.join("server.log")).unwrap_or_default()
+            );
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -50,7 +55,7 @@ async fn start(tls: bool, ws: bool) -> Server {
     }
     if tls {
         cfg["inbounds"][0]["streamSettings"]["security"] = serde_json::json!("tls");
-        cfg["inbounds"][0]["streamSettings"]["tlsSettings"] = serde_json::json!({"alpn":["http/1.1"],"certificates":[{"certificateFile":dir.join("cert.pem"),"keyFile":dir.join("key.pem")}]});
+        cfg["inbounds"][0]["streamSettings"]["tlsSettings"] = serde_json::json!({"alpn":["h2","http/1.1"],"certificates":[{"certificateFile":dir.join("cert.pem"),"keyFile":dir.join("key.pem")}]});
     }
     let path = dir.join("config.json");
     std::fs::write(&path, cfg.to_string()).unwrap();
@@ -84,7 +89,14 @@ async fn start(tls: bool, ws: bool) -> Server {
     }
     panic!("Xray did not start");
 }
-fn outbound(s: &Server, security: &str, tls: bool, good_auth: bool, trust: bool, ws: bool) -> VmessOutbound {
+fn outbound(
+    s: &Server,
+    security: &str,
+    tls: bool,
+    good_auth: bool,
+    trust: bool,
+    ws: bool,
+) -> VmessOutbound {
     let cfg = VmessConfig {
         tag: "test".into(),
         server: "127.0.0.1".into(),
@@ -100,14 +112,14 @@ fn outbound(s: &Server, security: &str, tls: bool, good_auth: bool, trust: bool,
         security: security.into(),
         websocket: ws.then(|| unbihex_engine::config::VmessWebsocket {
             path: "/vmess-test".into(),
-            host: None,
+            host: Some("cdn.test:8443".into()),
         }),
         tls: tls.then(|| TlsConfig {
             enabled: true,
             sni: Some("vmess.test".into()),
-            alpn: vec!["http/1.1".into()],
+            alpn: vec![],
             pinned_sha256: vec![],
-            fingerprint: Some("none".into()),
+            fingerprint: None,
         }),
     };
     let ob = VmessOutbound::new(
@@ -149,19 +161,22 @@ async fn official_xray_tcp_udp_ciphers_and_tls() {
                 tokio::io::copy(&mut r, &mut w).await.unwrap();
             });
             let ob = outbound(&server, cipher, tls, true, true, ws);
-            let mut stream = ob.connect_tcp(&sess(port, Network::Tcp)).await.unwrap();
-            let data: Vec<u8> = (0..40000).map(|i| (i % 251) as u8).collect();
+            let stream = ob.connect_tcp(&sess(port, Network::Tcp)).await.unwrap();
+            let data: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
             tokio::time::timeout(Duration::from_secs(10), async {
-                stream.write_all(&data).await.unwrap();
-                stream.flush().await.unwrap();
+                let (mut reader, mut writer) = tokio::io::split(stream);
                 let mut got = vec![0; data.len()];
-                stream.read_exact(&mut got).await.unwrap();
+                let upload = async {
+                    writer.write_all(&data).await.unwrap();
+                    writer.flush().await.unwrap();
+                };
+                let download = async { reader.read_exact(&mut got).await.unwrap() };
+                tokio::join!(upload, download);
                 assert_eq!(got, data);
-                stream.shutdown().await.unwrap();
+                writer.shutdown().await.unwrap();
             })
             .await
             .expect("TCP interop timeout");
-            drop(stream);
             echo.abort();
             let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let port = udp.local_addr().unwrap().port();
@@ -187,7 +202,7 @@ async fn official_xray_tcp_udp_ciphers_and_tls() {
             .expect("UDP interop timeout");
             assert!(flow.send(&vec![0; 8175]).await.is_err());
             echo.abort();
-            eprintln!("PASS Xray TCP 40k/UDP boundaries cipher={cipher} tls={tls} ws={ws}");
+            eprintln!("PASS Xray TCP 1MiB/UDP boundaries cipher={cipher} tls={tls} ws={ws}");
         }
         let ob = outbound(&server, "auto", tls, false, true, ws);
         let result = tokio::time::timeout(Duration::from_secs(2), async {

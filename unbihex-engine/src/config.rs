@@ -1432,6 +1432,13 @@ impl VmessConfig {
             return Err(Error::config("vmess: omit tls instead of enabled=false"));
         }
         if let Some(ws) = &self.websocket {
+            if self.tls.as_ref().is_some_and(|t| {
+                !t.alpn.is_empty() && !t.alpn.iter().any(|p| p == "http/1.1")
+            }) {
+                return Err(Error::Unsupported(
+                    "vmess: WebSocket TLS requires HTTP/1.1 ALPN".into(),
+                ));
+            }
             if !ws.path.starts_with('/')
                 || ws.path.contains(['\r', '\n', '#'])
                 || ws.path.len() > 8192

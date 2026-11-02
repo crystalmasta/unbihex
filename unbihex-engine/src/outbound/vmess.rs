@@ -205,7 +205,8 @@ impl Codec {
         src.advance(len + 2);
         if plain.is_empty() {
             self.eof = true;
-            return Ok(None);
+            // Surface logical VMess EOF without waiting for the transport's FIN.
+            return Ok(Some(Bytes::new()));
         }
         Ok(Some(plain.into()))
     }
@@ -240,7 +241,14 @@ impl AsyncRead for TcpStream {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        ready!(Pin::new(&mut self.wire).poll_flush(cx))?;
+        if self.pending.is_empty() && self.wire.codec().eof {
+            return Poll::Ready(Ok(()));
+        }
+        // Drive buffered uploads, but never gate readable download data on
+        // write-side backpressure (the peer may need us to read before draining).
+        if let Poll::Ready(Err(e)) = Pin::new(&mut self.wire).poll_flush(cx) {
+            return Poll::Ready(Err(e));
+        }
         if self.pending.is_empty() {
             match ready!(Pin::new(&mut self.wire).poll_next(cx)) {
                 Some(Ok(b)) => self.pending = b,
@@ -312,6 +320,9 @@ impl PacketStream for UdpFlow {
             .next()
             .await
             .ok_or_else(|| Error::protocol("vmess: UDP flow ended"))??;
+        if frame.is_empty() {
+            return Err(Error::protocol("vmess: UDP flow ended"));
+        }
         if frame.len() > buf.len() {
             return Err(Error::protocol("vmess: receive buffer too small"));
         }
@@ -334,13 +345,20 @@ impl VmessOutbound {
         sockets: Arc<SocketFactory>,
     ) -> Result<Self> {
         cfg.validate()?;
+        let mut cfg = cfg.clone();
+        if cfg.websocket.is_some() {
+            if let Some(tls) = &mut cfg.tls {
+                // This transport uses HTTP/1.1 Upgrade, not RFC 8441 over h2.
+                tls.alpn = vec!["http/1.1".into()];
+            }
+        }
         let tls = cfg
             .tls
             .as_ref()
             .map(|t| TlsClient::new(t, &cfg.server))
             .transpose()?;
         Ok(Self {
-            cfg: cfg.clone(),
+            cfg,
             server,
             sockets,
             tls,
@@ -366,7 +384,9 @@ impl VmessOutbound {
         };
         if let Some(ws) = &self.cfg.websocket {
             use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-            let host = ws.host.as_deref().unwrap_or(&self.cfg.server);
+            // Host override is an HTTP header, not the dial URI authority. It
+            // may already include a port, independently of TLS SNI/server IP.
+            let host = self.cfg.server.as_str();
             let host = if host.contains(':') && !host.starts_with('[') {
                 format!("[{host}]")
             } else {
@@ -527,6 +547,77 @@ fn request(cfg: &VmessConfig, target: &TargetAddr, command: u8) -> Result<(Vec<u
     Ok((wire, codec))
 }
 
+struct WebsocketStream {
+    socket: tokio_tungstenite::WebSocketStream<BoxStream>,
+    pending: Bytes,
+}
+impl AsyncRead for WebsocketStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        while self.pending.is_empty() {
+            if let Poll::Ready(Err(e)) = Pin::new(&mut self.socket).poll_flush(cx) {
+                return Poll::Ready(Err(io::Error::other(e.to_string())));
+            }
+            match ready!(Pin::new(&mut self.socket).poll_next(cx)) {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
+                    self.pending = bytes
+                }
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => {
+                    return Poll::Ready(Ok(()));
+                }
+                Some(Ok(
+                    tokio_tungstenite::tungstenite::Message::Ping(_)
+                    | tokio_tungstenite::tungstenite::Message::Pong(_),
+                )) => continue,
+                Some(Ok(_)) => return Poll::Ready(Err(bad("vmess: non-binary WebSocket data"))),
+                Some(Err(e)) => return Poll::Ready(Err(io::Error::other(e.to_string()))),
+            }
+        }
+        let n = buf.remaining().min(self.pending.len());
+        buf.put_slice(&self.pending.split_to(n));
+        Poll::Ready(Ok(()))
+    }
+}
+impl AsyncWrite for WebsocketStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if data.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        ready!(Pin::new(&mut self.socket).poll_ready(cx))
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let n = data.len().min(65536);
+        Pin::new(&mut self.socket)
+            .start_send(tokio_tungstenite::tungstenite::Message::Binary(
+                Bytes::copy_from_slice(&data[..n]),
+            ))
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        if let Poll::Ready(Err(e)) = Pin::new(&mut self.socket).poll_flush(cx) {
+            return Poll::Ready(Err(io::Error::other(e.to_string())));
+        }
+        Poll::Ready(Ok(n))
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket)
+            .poll_flush(cx)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.socket)
+            .poll_close(cx)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -585,6 +676,7 @@ mod tests {
             partial.extend_from_slice(&wire);
             assert_eq!(dec.decode(&mut partial).unwrap().unwrap(), b"first"[..]);
             assert_eq!(dec.decode(&mut partial).unwrap().unwrap(), b"second"[..]);
+            assert!(dec.decode(&mut partial).unwrap().unwrap().is_empty());
             assert!(dec.decode_eof(&mut partial).unwrap().is_none());
             assert!(codec(chacha).decode_eof(&mut BytesMut::new()).is_err());
             let mut d = codec(chacha);
@@ -621,72 +713,173 @@ mod tests {
     }
 }
 
-struct WebsocketStream {
-    socket: tokio_tungstenite::WebSocketStream<BoxStream>,
-    pending: Bytes,
-}
-impl AsyncRead for WebsocketStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        if buf.remaining() == 0 {
-            return Poll::Ready(Ok(()));
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod stream_regressions {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn websocket_read_progresses_despite_write_backpressure() {
+        use tokio_tungstenite::{
+            WebSocketStream,
+            tungstenite::{Message, protocol::Role},
+        };
+        let (client, server) = tokio::io::duplex(64);
+        let socket =
+            WebSocketStream::from_raw_socket(Box::new(client) as BoxStream, Role::Client, None)
+                .await;
+        let mut peer = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let mut stream = WebsocketStream {
+            socket,
+            pending: Bytes::new(),
+        };
+        stream.write_all(&[42; 1024]).await.unwrap();
+        peer.send(Message::Binary(Bytes::from_static(b"reply")))
+            .await
+            .unwrap();
+        let mut reply = [0; 5];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            stream.read_exact(&mut reply),
+        )
+        .await
+        .expect("WebSocket read must not wait for upload drain")
+        .unwrap();
+        assert_eq!(&reply, b"reply");
+    }
+    fn codec() -> Codec {
+        let cipher = || BodyCipher {
+            key: [0x11; 16],
+            iv: [0x22; 16],
+            count: 0,
+            chacha: false,
+        };
+        Codec {
+            enc: cipher(),
+            dec: cipher(),
+            response: None,
+            eof: false,
+            failed: false,
         }
-        while self.pending.is_empty() {
-            ready!(Pin::new(&mut self.socket).poll_flush(cx))
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            match ready!(Pin::new(&mut self.socket).poll_next(cx)) {
-                Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
-                    self.pending = bytes
-                }
-                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => {
-                    return Poll::Ready(Ok(()));
-                }
-                Some(Ok(
-                    tokio_tungstenite::tungstenite::Message::Ping(_)
-                    | tokio_tungstenite::tungstenite::Message::Pong(_),
-                )) => continue,
-                Some(Ok(_)) => return Poll::Ready(Err(bad("vmess: non-binary WebSocket data"))),
-                Some(Err(e)) => return Poll::Ready(Err(io::Error::other(e.to_string()))),
-            }
-        }
-        let n = buf.remaining().min(self.pending.len());
-        buf.put_slice(&self.pending.split_to(n));
-        Poll::Ready(Ok(()))
+    }
+    #[tokio::test]
+    async fn authenticated_eof_must_not_wait_for_underlying_tcp_fin() {
+        let (client, mut server) = tokio::io::duplex(64);
+        let mut wire = BytesMut::new();
+        codec().encode(Bytes::new(), &mut wire).unwrap();
+        server.write_all(&wire).await.unwrap();
+        let mut stream = TcpStream {
+            wire: Framed::new(Box::new(client), codec()),
+            pending: Bytes::new(),
+            closing: false,
+        };
+        let mut byte = [0u8; 1];
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            stream.read(&mut byte),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Ok(0))),
+            "authenticated EOF failed to surface: {result:?}"
+        );
+    }
+    #[tokio::test]
+    async fn read_must_progress_despite_write_backpressure() {
+        let (client, mut server) = tokio::io::duplex(64);
+        let mut stream = TcpStream {
+            wire: Framed::new(Box::new(client), codec()),
+            pending: Bytes::new(),
+            closing: false,
+        };
+        stream.write_all(&[42; 1024]).await.unwrap();
+        let mut wire = BytesMut::new();
+        codec()
+            .encode(Bytes::from_static(b"reply"), &mut wire)
+            .unwrap();
+        server.write_all(&wire).await.unwrap();
+        let mut bytes = [0u8; 5];
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            stream.read_exact(&mut bytes),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "read blocked on pending writes although authenticated reply is readable"
+        );
     }
 }
-impl AsyncWrite for WebsocketStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if data.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        ready!(Pin::new(&mut self.socket).poll_ready(cx))
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        let n = data.len().min(65536);
-        Pin::new(&mut self.socket)
-            .start_send(tokio_tungstenite::tungstenite::Message::Binary(
-                Bytes::copy_from_slice(&data[..n]),
-            ))
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        if let Poll::Ready(Err(e)) = Pin::new(&mut self.socket).poll_flush(cx) {
-            return Poll::Ready(Err(io::Error::other(e.to_string())));
-        }
-        Poll::Ready(Ok(n))
-    }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket)
-            .poll_flush(cx)
-            .map_err(|e| io::Error::other(e.to_string()))
-    }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket)
-            .poll_close(cx)
-            .map_err(|e| io::Error::other(e.to_string()))
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod alpn_regressions {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+    #[tokio::test]
+    async fn default_wss_must_offer_only_http11() {
+        let ck = rcgen::generate_simple_self_signed(vec!["vmess.test".into()]).unwrap();
+        let cert = ck.cert.der().clone();
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der());
+        let mut tls_cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key.into())
+        .unwrap();
+        tls_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_rustls::TlsAcceptor::from(Arc::new(tls_cfg))
+                .accept(socket)
+                .await
+                .unwrap();
+            let alpn = socket.get_ref().1.alpn_protocol().map(|p| p.to_vec());
+            let mut request = [0u8; 4];
+            socket.read_exact(&mut request).await.unwrap();
+            assert_ne!(
+                alpn.as_deref(),
+                Some(b"h2".as_slice()),
+                "WSS negotiated h2 but sent HTTP1 Upgrade prefix {:?}",
+                request
+            );
+        });
+        let cfg = VmessConfig {
+            tag: "review".into(),
+            server: "127.0.0.1".into(),
+            port: addr.port(),
+            uuid: crate::config::Secret("b831381d-6324-4d53-ad4f-8cda48b30811".into()),
+            security: "auto".into(),
+            websocket: Some(crate::config::VmessWebsocket {
+                path: "/".into(),
+                host: None,
+            }),
+            tls: Some(crate::config::TlsConfig {
+                enabled: true,
+                sni: Some("vmess.test".into()),
+                alpn: vec![],
+                pinned_sha256: vec![],
+                fingerprint: None,
+            }),
+        };
+        let outbound = VmessOutbound::new(
+            &cfg,
+            ServerEndpoint {
+                host: cfg.server.clone(),
+                port: cfg.port,
+                addrs: vec![addr],
+            },
+            Arc::new(SocketFactory::new(None, None)),
+        )
+        .unwrap()
+        .with_extra_roots(vec![cert])
+        .unwrap();
+        let target = "127.0.0.1:9".parse().unwrap();
+        let _ = outbound.open(&target, 1).await;
+        peer.await.unwrap();
     }
 }
