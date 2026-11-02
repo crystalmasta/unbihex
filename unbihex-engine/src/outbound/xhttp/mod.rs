@@ -31,6 +31,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream
 
 pub use config::{Range, XhttpConfig, XhttpMode, XmuxConfig};
 
+use super::fingerprint::Fingerprint;
 use super::fragment::FragmentConfig;
 use super::reality::RealityClient;
 use super::tls::TlsClient;
@@ -39,6 +40,130 @@ use crate::error::{Error, Result};
 use crate::net::SocketFactory;
 
 const PIPE: usize = 64 * 1024;
+
+/// The HTTP/2 SETTINGS and connection window a browser sends after its preface.
+///
+/// `None` fields are not advertised, matching the reference captures that omit them. The
+/// reference is the per-target table in curl-impersonate's `patches/curl.patch`
+/// (`http2_settings` and `http2_window_update`): a browser sends a connection WINDOW_UPDATE
+/// with `http2_window_update` as the increment, so the target window below is that value
+/// plus the protocol's initial 65 535 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct H2Settings {
+    header_table_size: Option<u32>,
+    enable_push: Option<bool>,
+    initial_window_size: u32,
+    max_header_list_size: Option<u32>,
+    max_concurrent_streams: Option<u32>,
+    max_frame_size: Option<u32>,
+    /// Target connection-level receive window (`http2_window_update + 65_535`).
+    connection_window: u32,
+}
+
+impl H2Settings {
+    /// Chromium 119+ from the reference: `1:65536;2:0;4:6291456;6:262144`, plus a
+    /// 15 663 105 WINDOW_UPDATE. This is also the historical default here.
+    const CHROME: Self = Self {
+        header_table_size: Some(65_536),
+        enable_push: Some(false),
+        initial_window_size: 6_291_456,
+        max_header_list_size: Some(262_144),
+        max_concurrent_streams: None,
+        max_frame_size: None,
+        connection_window: 15_728_640,
+    };
+
+    /// Firefox 133+ from the reference: `1:65536;2:0;4:131072;5:16384`, plus a
+    /// 12 517 377 WINDOW_UPDATE.
+    const FIREFOX: Self = Self {
+        header_table_size: Some(65_536),
+        enable_push: Some(false),
+        initial_window_size: 131_072,
+        max_header_list_size: None,
+        max_concurrent_streams: None,
+        max_frame_size: Some(16_384),
+        connection_window: 12_582_912,
+    };
+
+    /// Safari 26.x from the reference: `2:0;3:100;4:2097152;9:1`, plus a
+    /// 10 420 225 WINDOW_UPDATE. Setting 9 (`NO_RFC7540_PRIORITIES`) has no h2-crate
+    /// builder method, so it is the one reference byte we cannot send.
+    const SAFARI: Self = Self {
+        header_table_size: None,
+        enable_push: Some(false),
+        initial_window_size: 2_097_152,
+        max_header_list_size: None,
+        max_concurrent_streams: Some(100),
+        max_frame_size: None,
+        connection_window: 10_485_760,
+    };
+
+    /// OkHttp 4 / Android from the reference: `2:0;4:4194304;3:100`, plus a
+    /// 10 485 760 WINDOW_UPDATE. utls's Android 11 preset is also OkHttp, but the
+    /// reference has no Android 11 row, so this is the closest documented set.
+    const ANDROID: Self = Self {
+        header_table_size: None,
+        enable_push: Some(false),
+        initial_window_size: 4_194_304,
+        max_header_list_size: None,
+        max_concurrent_streams: Some(100),
+        max_frame_size: None,
+        connection_window: 10_551_295,
+    };
+
+    /// Edge 99 from the reference: `1:65536;3:1000;4:6291456;6:262144`, plus a
+    /// 15 663 105 WINDOW_UPDATE. utls's Edge 85 preset has no reference row, so this
+    /// Chromium set is the closest documented one. Edge does not send ENABLE_PUSH.
+    const EDGE: Self = Self {
+        header_table_size: Some(65_536),
+        enable_push: None,
+        initial_window_size: 6_291_456,
+        max_header_list_size: Some(262_144),
+        max_concurrent_streams: Some(1000),
+        max_frame_size: None,
+        connection_window: 15_728_640,
+    };
+
+    /// Picks the set for a profile. There is no reference row for 360 Browser or QQ
+    /// Browser; both are Chromium forks, so they keep the Chromium set, as do
+    /// `random`/`randomized` (whose TLS profile is built from modern Chromium lists).
+    /// `none`/`rustls` keep the historical Chrome values.
+    fn for_fingerprint(fingerprint: Option<Fingerprint>) -> Self {
+        match fingerprint {
+            Some(Fingerprint::Firefox) => Self::FIREFOX,
+            Some(Fingerprint::Safari) => Self::SAFARI,
+            // No documented iOS 14 row; use the Apple desktop set.
+            Some(Fingerprint::Ios) => Self::SAFARI,
+            Some(Fingerprint::Android) => Self::ANDROID,
+            Some(Fingerprint::Edge) => Self::EDGE,
+            Some(Fingerprint::Browser360) | Some(Fingerprint::Qq) => Self::CHROME,
+            Some(Fingerprint::Chrome)
+            | Some(Fingerprint::Random)
+            | Some(Fingerprint::Randomized)
+            | None => Self::CHROME,
+        }
+    }
+
+    fn apply(self, builder: &mut h2::client::Builder) {
+        if let Some(size) = self.header_table_size {
+            builder.header_table_size(size);
+        }
+        if let Some(enabled) = self.enable_push {
+            builder.enable_push(enabled);
+        }
+        builder.initial_window_size(self.initial_window_size);
+        builder.initial_connection_window_size(self.connection_window);
+        if let Some(size) = self.max_header_list_size {
+            builder.max_header_list_size(size);
+        }
+        if let Some(max) = self.max_concurrent_streams {
+            builder.max_concurrent_streams(max);
+        }
+        if let Some(max) = self.max_frame_size {
+            builder.max_frame_size(max);
+        }
+    }
+}
 
 // By dubr1k (github.com/dubr1k), PR #32: CDN request shapes (padding, session
 // and sequence placements, GET uploads).
@@ -228,6 +353,7 @@ pub struct XhttpClient {
     query: String,
     dialer: Dialer,
     pool: pool::H2Pool,
+    fingerprint: Option<Fingerprint>,
 }
 
 impl std::fmt::Debug for XhttpClient {
@@ -281,6 +407,10 @@ impl XhttpClient {
             .clone()
             .or_else(|| sni.map(str::to_string))
             .unwrap_or_else(|| server.host.clone());
+        let fingerprint = reality
+            .as_ref()
+            .and_then(RealityClient::fingerprint)
+            .or_else(|| tls.as_ref().and_then(TlsClient::fingerprint));
         Ok(XhttpClient {
             mode,
             http,
@@ -297,12 +427,18 @@ impl XhttpClient {
                 reality,
                 fragment,
             },
+            fingerprint,
         })
     }
 
     /// The mode in use.
     pub fn mode(&self) -> XhttpMode {
         self.mode
+    }
+
+    /// The HTTP/2 SETTINGS chosen from the outbound's browser fingerprint.
+    fn h2_settings(&self) -> H2Settings {
+        H2Settings::for_fingerprint(self.fingerprint)
     }
 
     // By dubr1k (github.com/dubr1k), PR #32.
@@ -449,16 +585,9 @@ impl XhttpClient {
 
     async fn dial_h2(&self) -> Result<(SendRequest<Bytes>, Arc<AtomicBool>)> {
         let io = self.dialer.dial().await?;
-        // Chrome's SETTINGS values.
-        let (send, conn) = h2::client::Builder::new()
-            .header_table_size(65_536)
-            .enable_push(false)
-            .initial_window_size(6_291_456)
-            .initial_connection_window_size(15_728_640)
-            .max_header_list_size(262_144)
-            .handshake::<_, Bytes>(io)
-            .await
-            .map_err(h2_err)?;
+        let mut builder = h2::client::Builder::new();
+        self.h2_settings().apply(&mut builder);
+        let (send, conn) = builder.handshake::<_, Bytes>(io).await.map_err(h2_err)?;
         let closed = Arc::new(AtomicBool::new(false));
         let flag = closed.clone();
         tokio::spawn(async move {
@@ -815,6 +944,73 @@ mod tests {
         let tls = TlsClient::new(&tls_cfg, "srv.example").ok();
         XhttpClient::new(&cfg, server, Arc::new(SocketFactory::default()), tls, &[], None, None, None)
             .unwrap()
+    }
+
+    #[test]
+    fn h2_settings_by_fingerprint() {
+        let cases = [
+            (Fingerprint::Chrome, H2Settings::CHROME),
+            (Fingerprint::Firefox, H2Settings::FIREFOX),
+            (Fingerprint::Safari, H2Settings::SAFARI),
+            (Fingerprint::Ios, H2Settings::SAFARI),
+            (Fingerprint::Android, H2Settings::ANDROID),
+            (Fingerprint::Edge, H2Settings::EDGE),
+            (Fingerprint::Browser360, H2Settings::CHROME),
+            (Fingerprint::Qq, H2Settings::CHROME),
+            (Fingerprint::Random, H2Settings::CHROME),
+            (Fingerprint::Randomized, H2Settings::CHROME),
+        ];
+        for (fingerprint, expected) in cases {
+            assert_eq!(
+                H2Settings::for_fingerprint(Some(fingerprint)),
+                expected,
+                "{fingerprint:?}"
+            );
+        }
+        assert_eq!(H2Settings::FIREFOX.header_table_size, Some(65_536));
+        assert_eq!(H2Settings::FIREFOX.enable_push, Some(false));
+        assert_eq!(H2Settings::FIREFOX.initial_window_size, 131_072);
+        assert_eq!(H2Settings::FIREFOX.max_header_list_size, None);
+        assert_eq!(H2Settings::FIREFOX.max_frame_size, Some(16_384));
+    }
+
+    #[test]
+    fn h2_settings_default_matches_chrome() {
+        assert_eq!(H2Settings::for_fingerprint(None), H2Settings::CHROME);
+        assert_eq!(H2Settings::CHROME.header_table_size, Some(65_536));
+        assert_eq!(H2Settings::CHROME.enable_push, Some(false));
+        assert_eq!(H2Settings::CHROME.initial_window_size, 6_291_456);
+        assert_eq!(H2Settings::CHROME.max_header_list_size, Some(262_144));
+        assert_eq!(H2Settings::CHROME.connection_window, 15_728_640);
+    }
+
+    #[test]
+    fn client_picks_settings_for_its_fingerprint() {
+        let tls_cfg: crate::config::TlsConfig =
+            serde_json::from_str(r#"{"fingerprint":"firefox"}"#).unwrap();
+        let tls = TlsClient::new(&tls_cfg, "srv.example").unwrap();
+        let cfg = XhttpConfig::default();
+        let server = ServerEndpoint {
+            host: "srv.example".into(),
+            port: 443,
+            addrs: vec![],
+        };
+        let client = XhttpClient::new(
+            &cfg,
+            server,
+            Arc::new(SocketFactory::default()),
+            Some(tls),
+            &["h2".into()],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.h2_settings(), H2Settings::FIREFOX);
+        assert_eq!(
+            client.h2_settings(),
+            H2Settings::for_fingerprint(Some(Fingerprint::Firefox))
+        );
     }
 
     #[test]
