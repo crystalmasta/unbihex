@@ -110,24 +110,27 @@ async fn tls_echo(p: &Pem) -> SocketAddr {
     addr
 }
 
-/// A TLS 1.3 site for REALITY's `dest` (only contacted for unauthenticated clients).
-async fn tls_site(p: &Pem) -> SocketAddr {
-    let acceptor = tokio_rustls::TlsAcceptor::from(server_config(p));
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((s, _)) = l.accept().await {
-            let acceptor = acceptor.clone();
-            tokio::spawn(async move {
-                if let Ok(mut tls) = acceptor.accept(s).await {
-                    let _ = tls
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                        .await;
-                }
-            });
+/// REALITY's `dest`: a TLS inbound of the same Xray. REALITY mirrors the real site's
+/// handshake record by record (ServerHello, ChangeCipherSpec, then one record per
+/// encrypted message, as Go, nginx and other real sites send them) and waits for the
+/// next record otherwise; rustls packs the whole flight into one record, which REALITY
+/// since 2026-09 never finishes reading.
+fn site_inbound(p: &Pem, dir: &std::path::Path) -> (SocketAddr, serde_json::Value) {
+    std::fs::write(dir.join("site.pem"), &p.cert_pem).unwrap();
+    std::fs::write(dir.join("site.key"), &p.key_pem).unwrap();
+    let port = free_port();
+    let inbound = serde_json::json!({
+        "listen": "127.0.0.1", "port": port, "protocol": "vless",
+        "settings": { "clients": [{ "id": UUID }], "decryption": "none" },
+        "streamSettings": {
+            "network": "tcp", "security": "tls",
+            "tlsSettings": { "certificates": [{
+                "certificateFile": dir.join("site.pem"),
+                "keyFile": dir.join("site.key")
+            }]}
         }
     });
-    addr
+    (SocketAddr::from(([127, 0, 0, 1], port)), inbound)
 }
 
 fn x25519_keys(bin: &str) -> (String, String) {
@@ -279,17 +282,17 @@ async fn vision_and_reality_against_xray() {
     let site = cert("reality.test");
     let echo = tcp_echo().await;
     let tls_echo_addr = tls_echo(&inner).await;
-    let dest = tls_site(&site).await;
     let (private_key, public_key) = x25519_keys(&bin);
 
     let dir = std::env::temp_dir().join(format!("unbihex-pem-{}", rand::random::<u64>()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("cert.pem"), &outer.cert_pem).unwrap();
     std::fs::write(dir.join("key.pem"), &outer.key_pem).unwrap();
+    let (dest, site_inbound) = site_inbound(&site, &dir);
 
     let (tls_port, reality_port, plain_port) = (free_port(), free_port(), free_port());
     let client = serde_json::json!([{ "id": UUID, "flow": "xtls-rprx-vision" }]);
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "log": { "loglevel": "debug" },
         "inbounds": [
             {
@@ -331,6 +334,7 @@ async fn vision_and_reality_against_xray() {
         ],
         "outbounds": [loopback_freedom()]
     });
+    config["inbounds"].as_array_mut().unwrap().push(site_inbound);
     let xray = start_xray(&bin, config).await;
     let uuid = *uuid::Uuid::parse_str(UUID).unwrap().as_bytes();
     let sockets = Arc::new(SocketFactory::default());
@@ -538,17 +542,17 @@ async fn xhttp_against_xray() {
     let site = cert("reality.test");
     let echo = tcp_echo().await;
     let uecho = udp_echo().await;
-    let dest = tls_site(&site).await;
     let (private_key, public_key) = x25519_keys(&bin);
     let dir = std::env::temp_dir().join(format!("unbihex-pem-{}", rand::random::<u64>()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("cert.pem"), &outer.cert_pem).unwrap();
     std::fs::write(dir.join("key.pem"), &outer.key_pem).unwrap();
+    let (dest, site_inbound) = site_inbound(&site, &dir);
 
     let (tls_port, reality_port, plain_port) = (free_port(), free_port(), free_port());
     let clients = serde_json::json!([{ "id": UUID }]);
     let xs = serde_json::json!({ "path": "/xh", "mode": "auto" });
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "log": { "loglevel": "debug" },
         "inbounds": [
             {
@@ -583,6 +587,7 @@ async fn xhttp_against_xray() {
         ],
         "outbounds": [loopback_freedom()]
     });
+    config["inbounds"].as_array_mut().unwrap().push(site_inbound);
     let xray = start_xray(&bin, config).await;
     let uuid = *uuid::Uuid::parse_str(UUID).unwrap().as_bytes();
     let sockets = Arc::new(SocketFactory::default());
