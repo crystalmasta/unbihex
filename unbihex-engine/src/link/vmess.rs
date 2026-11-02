@@ -245,6 +245,7 @@ mod tests {
             serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"reality"}),
             serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"tls","allowInsecure":"1"}),
             serde_json::json!({"add":"a","port":1,"id":UUID,"scy":"none"}),
+            serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"tls","fp":"netscape"}),
             serde_json::json!({"add":"a","port":1,"id":"not-a-uuid"}),
             serde_json::json!({"add":"a","port":0,"id":UUID}),
         ] {

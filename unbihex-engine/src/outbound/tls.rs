@@ -23,6 +23,7 @@ pub struct TlsClient {
     connector: TlsConnector,
     config: Arc<ClientConfig>,
     server_name: ServerName<'static>,
+    fingerprint: Option<Fingerprint>,
 }
 
 impl std::fmt::Debug for TlsClient {
@@ -89,7 +90,7 @@ impl TlsClient {
         extra_roots: Vec<CertificateDer<'static>>,
         trust: &Trust,
     ) -> Result<TlsClient> {
-        let fingerprint = Fingerprint::from_name(cfg.fingerprint.as_deref());
+        let fingerprint = Fingerprint::from_name(cfg.fingerprint.as_deref())?;
         let provider = Arc::new(match fingerprint {
             Some(fp) => fp.provider(),
             None => rustls::crypto::ring::default_provider(),
@@ -158,7 +159,13 @@ impl TlsClient {
             connector: TlsConnector::from(config.clone()),
             config,
             server_name,
+            fingerprint,
         })
+    }
+
+    /// The browser profile whose ClientHello this client sends, if any.
+    pub fn fingerprint(&self) -> Option<Fingerprint> {
+        self.fingerprint
     }
 
     /// Runs the TLS handshake over a TCP connection, returning a record-exact stream

@@ -536,13 +536,17 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = домен (1 B длина + байты), 0x0
   `ClientConfig` один на outbound.
 - **Отпечаток браузера** (`fingerprint`, `fp` ссылки). ClientHello rustls легко отличить от браузерного (JA3/JA4), и
   DPI блокирует по нему. Патч `vendor/rustls` отдаёт закодированный ClientHello до хеширования и отправки; ядро
-  пересобирает его как Chrome 152 (`outbound/fingerprint.rs`): GREASE в шифрах, группах, версиях и расширениях; набор
-  шифров BoringSSL; перемешанные на каждое соединение расширения между ведущим и замыкающим GREASE; key share
-  X25519MLKEM768 и X25519; GREASE ECH; ALPS; signature_algorithms как у Chrome 152. JA4:
-  `t13d1516h2_8daaf6152771_806a8c22fdea`. Сохраняется всё, от чего зависит состояние rustls: random, session_id
-  (токен REALITY), SNI, ALPN, key share, cookie HelloRetryRequest. Случайность пересборки выводится из random
-  ClientHello, поэтому повторный hello и второй проход REALITY дают те же байты. Chrome — по умолчанию и для любого
-  имени браузера, пока нет других шаблонов; `none` (или `rustls`) — родной ClientHello rustls.
+  пересобирает его по профилю браузера (`outbound/fingerprint.rs`, таблица `Profile` по пресетам uTLS, на которых
+  работает Xray): `chrome` (по умолчанию), `firefox`, `safari`, `ios`, `android`, `edge`, `360`, `qq`, `random`,
+  `randomized`; другое имя — `Unsupported`, `none` (или `rustls`) — родной ClientHello rustls. Chrome: GREASE в
+  шифрах, группах, версиях и расширениях; набор шифров BoringSSL; перемешанные на каждое соединение расширения между
+  ведущим и замыкающим GREASE; key share X25519MLKEM768 и X25519; ALPS. GREASE ECH не отправляется (как и в uTLS):
+  rustls не понимает ответ сервера с ECH и рвёт соединение (Cloudflare), поэтому JA4 —
+  `t13d1515h2_8daaf6152771_eac8ad812b09`, на одно расширение короче браузерного. ALPN из конфига сохраняется, профиль
+  подставляет свой, только если в конфиге его нет. Сохраняется всё, от чего зависит состояние rustls: random,
+  session_id (токен REALITY), SNI, ALPN, key share, cookie HelloRetryRequest. Случайность пересборки выводится из random
+  ClientHello, поэтому повторный hello и второй проход REALITY дают те же байты. XHTTP по HTTP/2 шлёт SETTINGS и
+  WINDOW_UPDATE того же браузера (таблица curl-impersonate).
 - **X25519MLKEM768** (0x11ec, draft-ietf-tls-ecdhe-mlkem; `outbound/pq.rs`): share клиента — ключ инкапсуляции
   ML-KEM-768 (1184 Б) и X25519 (32 Б), share сервера — шифртекст (1088 Б) и X25519, секрет — ключ ML-KEM и секрет X25519.
   Половина X25519 предлагается и отдельным key share, поэтому сервер без ML-KEM укладывается в один RTT.

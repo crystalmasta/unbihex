@@ -545,13 +545,17 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
   normal verification. One `ClientConfig` per outbound.
 - **Browser fingerprint** (`fingerprint`, a link's `fp`). rustls's ClientHello is easy to tell from a browser's
   (JA3/JA4), and DPI blocks by it. The `vendor/rustls` patch hands the encoded ClientHello over before it is hashed and
-  sent; the engine rebuilds it as Chrome 152 (`outbound/fingerprint.rs`): GREASE in ciphers, groups, versions and
-  extensions; BoringSSL's cipher suites; extensions shuffled per connection between a leading and a trailing GREASE
-  extension; X25519MLKEM768 and X25519 key shares; GREASE ECH; ALPS; signature_algorithms as Chrome 152. JA4:
-  `t13d1516h2_8daaf6152771_806a8c22fdea`. Everything rustls's state depends on is kept: the random, session_id
+  sent; the engine rebuilds it from a browser profile (`outbound/fingerprint.rs`, a `Profile` table after the uTLS
+  presets Xray runs on): `chrome` (the default), `firefox`, `safari`, `ios`, `android`, `edge`, `360`, `qq`, `random`,
+  `randomized`; another name is `Unsupported`, `none` (or `rustls`) sends rustls's own ClientHello. Chrome: GREASE in
+  ciphers, groups, versions and extensions; BoringSSL's cipher suites; extensions shuffled per connection between a
+  leading and a trailing GREASE extension; X25519MLKEM768 and X25519 key shares; ALPS. No GREASE ECH (uTLS sends none
+  either): rustls cannot take a server's ECH answer and drops the connection (Cloudflare), so JA4 is
+  `t13d1515h2_8daaf6152771_eac8ad812b09`, one extension short of the browser's. The config's ALPN is kept; a profile
+  puts in its own only when the config has none. Everything rustls's state depends on is kept: the random, session_id
   (REALITY's token), SNI, ALPN, key shares, a HelloRetryRequest cookie. The rebuild's randomness is derived from the
-  ClientHello random, so a retried hello and REALITY's second pass rebuild the same bytes. Chrome is the default and
-  serves every browser name until other templates exist; `none` (or `rustls`) sends rustls's own ClientHello.
+  ClientHello random, so a retried hello and REALITY's second pass rebuild the same bytes. XHTTP over HTTP/2 sends the
+  same browser's SETTINGS and WINDOW_UPDATE (curl-impersonate's table).
 - **X25519MLKEM768** (0x11ec, draft-ietf-tls-ecdhe-mlkem; `outbound/pq.rs`): the client share is the ML-KEM-768
   encapsulation key (1184 B) and X25519 (32 B), the server share the ciphertext (1088 B) and X25519, the secret the
   ML-KEM key and the X25519 secret. The X25519 half is also offered as a separate key share, so a server without ML-KEM

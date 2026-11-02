@@ -431,6 +431,9 @@ impl VmessConfig {
         uuid::Uuid::parse_str(self.uuid.expose())
             .map_err(|_| Error::config(format!("outbound {}: invalid uuid", self.tag)))?;
         crate::outbound::vmess::Security::parse(&self.security)?;
+        if let Some(t) = &self.tls {
+            crate::outbound::fingerprint::Fingerprint::from_name(t.fingerprint.as_deref())?;
+        }
         if let Some(ws) = &self.ws {
             ws.validate()?;
         }
@@ -723,6 +726,15 @@ impl VlessConfig {
             r.public_key_bytes()?;
             r.short_id_bytes()?;
         }
+        for fp in [
+            self.tls.as_ref().and_then(|t| t.fingerprint.as_deref()),
+            self.reality.as_ref().and_then(|r| r.fingerprint.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            crate::outbound::fingerprint::Fingerprint::from_name(Some(fp))?;
+        }
         Ok(())
     }
 
@@ -755,8 +767,9 @@ pub struct TlsConfig {
     /// Hex SHA-256 of the leaf certificate (DER). Checked in addition to normal validation.
     #[serde(default)]
     pub pinned_sha256: Vec<String>,
-    /// Browser whose ClientHello is sent (`fp` of a link): Chrome by default and for every
-    /// browser name until more templates exist; `none` sends rustls's own ClientHello.
+    /// Browser whose ClientHello is sent (`fp` of a link): `chrome`, `firefox`, `safari`,
+    /// `ios`, `android`, `edge`, `360`, `qq`, `random` or `randomized`; `none` sends
+    /// rustls's own ClientHello.
     #[serde(default)]
     pub fingerprint: Option<String>,
 }
