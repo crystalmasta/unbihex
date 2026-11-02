@@ -109,7 +109,7 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
         .ok_or_else(|| ClientError::State("VPN-сервис не вернул дескриптор TUN".into()))?;
     match client
         .controller
-        .connect_tun_fd(&server, &settings, &geo, fd, None)
+        .connect_tun_fd_with_dns(&server, &settings, &geo, fd, None, &resp.bootstrap_dns)
         .await
     {
         Ok(info) => {

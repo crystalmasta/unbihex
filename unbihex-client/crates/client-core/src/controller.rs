@@ -296,6 +296,21 @@ impl Controller {
         tun_fd: i32,
         protect: Option<unbihex_engine::ProtectFn>,
     ) -> Result<ConnectionInfo> {
+        self.connect_tun_fd_with_dns(server, settings, geo, tun_fd, protect, &[]).await
+    }
+
+    // By dubr1k (github.com/dubr1k), PR #36.
+    /// Android: start with the physical network's DNS for proxy-server bootstrap.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn connect_tun_fd_with_dns(
+        &self,
+        server: &Server,
+        settings: &Settings,
+        geo: &Geo,
+        tun_fd: i32,
+        protect: Option<unbihex_engine::ProtectFn>,
+        bootstrap_dns: &[std::net::SocketAddr],
+    ) -> Result<ConnectionInfo> {
         let mut guard = self.running.lock().await;
         if guard.is_some() {
             return Err(ClientError::State("уже подключено".into()));
@@ -308,6 +323,7 @@ impl Controller {
             // UnbihexVpnService excludes the app from its own VPN: the system resolver
             // works for the engine even where 1.1.1.1 / 8.8.8.8 are blocked (issue #14).
             system_dns_bypasses_tun: cfg!(target_os = "android"),
+            bootstrap_dns: bootstrap_dns.to_vec(),
         };
         let instance = Instance::start(config, hooks).await.map_err(explain_start)?;
         self.set_ping_env(PingEnv {

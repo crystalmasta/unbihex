@@ -138,6 +138,7 @@ pub struct PlatformHooks {
     pub protect: Option<ProtectFn>,          // Android: VpnService.protect(fd)
     pub bind_interface: Option<InterfaceBinding>,  // desktop: the physical interface (§9)
     pub system_dns_bypasses_tun: bool,       // the process's system DNS bypasses the TUN (Android)
+    pub bootstrap_dns: Vec<SocketAddr>,     // physical-network DNS captured before VPN startup (mobile)
 }
 impl Instance {
     pub async fn start(config: Config, hooks: PlatformHooks) -> Result<Instance>;
@@ -388,6 +389,12 @@ impl Dispatcher {
   1 s stagger and a resend after 1 s (a flow through a proxy takes a few RTTs to open). The resend runs alongside the
   receive loop, never by cancelling it: UDP over TCP (VLESS) must not lose a half-read packet.
 - A TTL-aware cache: up to 4096 entries, TTL from 5 s to 1 h. `resolve(domain)` asks for A.
+- On Android, capture the active physical network's DNS before establishing the VPN (never another VPN's DNS).
+  Proxy-server names at startup and hot reload retain the system resolver for up to 3 s (including Android
+  Private DNS/DoT), falling back to a separate client: `bootstrap_dns` first, then `dns.upstream`,
+  deduplicated, with the usual staggered fallback. IPv6 DNS retains its numeric scope ID. This does not change
+  user-traffic DNS, saved configuration or TLS SNI. An empty list preserves the previous resolver selection.
+  After a physical-network change, reconnect the VPN to refresh the list.
 - Resolvers: `System` (the OS resolver), `Upstream` (the client above), `SystemThenUpstream` (the OS first, up to 3 s,
   the upstream on failure; Android, where the VPN excludes the app itself). With a TUN, direct destinations resolve
   through the upstream: the system resolver would answer with fake IPs.

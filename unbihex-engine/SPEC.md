@@ -138,6 +138,7 @@ pub struct PlatformHooks {
     pub protect: Option<ProtectFn>,          // Android: VpnService.protect(fd)
     pub bind_interface: Option<InterfaceBinding>,  // desktop: физический интерфейс (§9)
     pub system_dns_bypasses_tun: bool,       // системный DNS процесса идёт мимо TUN (Android)
+    pub bootstrap_dns: Vec<SocketAddr>,     // DNS физической сети до запуска VPN (mobile)
 }
 impl Instance {
     pub async fn start(config: Config, hooks: PlatformHooks) -> Result<Instance>;
@@ -386,6 +387,12 @@ impl Dispatcher {
   повтором через 1 с (поток через прокси открывается за несколько RTT). Повтор идёт параллельно приёму, а не прерывая
   его: UDP поверх TCP (VLESS) не должен терять наполовину прочитанный пакет.
 - Кеш с учётом TTL: до 4096 записей, TTL от 5 с до 1 ч. `resolve(domain)` спрашивает A.
+- На Android до создания VPN сохраняются DNS активной физической сети (не другой VPN). Для адресов
+  прокси-серверов при подключении и hot reload сохраняется системный резолвер до 3 с (в том числе Android
+  Private DNS/DoT); при ошибке используется отдельный клиент: сначала `bootstrap_dns`, затем
+  `dns.upstream`, без повторов адресов и с обычным параллельным fallback. IPv6 DNS сохраняют числовой scope ID.
+  Это не меняет DNS пользовательского трафика, сохранённую конфигурацию или TLS SNI. Если список пуст,
+  сохраняется прежний выбор резолвера. При смене физической сети список обновляется при переподключении VPN.
 - Резолверы: `System` (резолвер ОС), `Upstream` (клиент выше), `SystemThenUpstream` (сначала ОС до 3 с, при ошибке —
   upstream; Android, где VPN исключает само приложение). С TUN цели direct резолвятся через upstream: системный
   резолвер отвечал бы fake-IP.

@@ -5,6 +5,8 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
@@ -14,6 +16,8 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import org.json.JSONArray
+import java.net.Inet6Address
 
 @InvokeArg
 class StartArgs {
@@ -73,11 +77,15 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         if (args.notification) {
             askNotificationPermission()
         }
+        // Snapshot before establish(): afterwards the default network may be the
+        // VPN, whose fake DNS cannot bootstrap the proxy server itself.
+        val bootstrapDns = physicalDns()
         UnbihexVpnService.onEstablished = { fd, stopFd, error ->
             if (fd != null) {
                 val res = JSObject()
                 res.put("fd", fd)
                 res.put("stopFd", stopFd)
+                res.put("bootstrapDns", JSONArray(bootstrapDns))
                 invoke.resolve(res)
             } else {
                 invoke.reject(error ?: "Не удалось запустить VPN")
@@ -100,6 +108,36 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             UnbihexVpnService.onEstablished = null
             invoke.reject("Не удалось запустить VPN-сервис: ${e.message}")
+        }
+    }
+
+    // By dubr1k (github.com/dubr1k), PR #36.
+    private fun physicalDns(): List<String> {
+        val cm = activity.applicationContext.getSystemService(ConnectivityManager::class.java)
+            ?: return emptyList()
+        return try {
+            // Prefer the active Wi-Fi/mobile network; never pick another VPN's
+            // DNS, even while replacing an existing VPN connection.
+            val networks = (listOfNotNull(cm.activeNetwork) + cm.allNetworks.toList()).distinct()
+            val physical = networks.firstOrNull { network ->
+                val caps = cm.getNetworkCapabilities(network)
+                caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            }
+            physical?.let { cm.getLinkProperties(it)?.dnsServers }
+                ?.mapNotNull { address ->
+                    val host = address.hostAddress?.substringBefore('%') ?: return@mapNotNull null
+                    if (address is Inet6Address) {
+                        val scope = if (address.scopeId > 0) "%${address.scopeId}" else ""
+                        "[$host$scope]:53"
+                    } else {
+                        "$host:53"
+                    }
+                }
+                ?.distinct() ?: emptyList()
+        } catch (_: SecurityException) {
+            // Preserve the existing system/public-DNS fallback on restricted devices.
+            emptyList()
         }
     }
 

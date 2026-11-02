@@ -34,6 +34,10 @@ pub struct StartResponse {
     /// Android: the read end of a pipe the service closes when the VPN goes away
     /// (stop, revoke, the notification's "Отключить"); ours to close.
     pub stop_fd: Option<i32>,
+    /// Android: physical-network DNS captured before establishing the VPN.
+    /// Older plugins and iOS may omit this field.
+    #[serde(default)]
+    pub bootstrap_dns: Vec<std::net::SocketAddr>,
 }
 
 /// Result of `ui_signal`.
@@ -53,4 +57,23 @@ pub struct StatusResponse {
     pub active: bool,
     /// `connected`, `connecting`, `disconnecting`, `disconnected`, `invalid`.
     pub state: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_response_accepts_physical_dns_and_ipv6_scope() {
+        let response: StartResponse =
+            serde_json::from_str(r#"{"fd":7,"bootstrapDns":["192.0.2.53:53","[fe80::1%4]:53"]}"#)
+                .unwrap();
+        assert_eq!(response.bootstrap_dns[0], "192.0.2.53:53".parse().unwrap());
+        let std::net::SocketAddr::V6(v6) = response.bootstrap_dns[1] else {
+            panic!("expected IPv6 DNS");
+        };
+        assert_eq!(v6.scope_id(), 4);
+        let old: StartResponse = serde_json::from_str(r#"{"fd":7}"#).unwrap();
+        assert!(old.bootstrap_dns.is_empty());
+    }
 }
