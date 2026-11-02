@@ -81,12 +81,33 @@ impl Drop for Lease {
     }
 }
 
+impl Clone for Lease {
+    /// Another holder on the same connection: the connection counts as busy
+    /// until every clone is gone.
+    fn clone(&self) -> Lease {
+        self.0.open.fetch_add(1, Ordering::Relaxed);
+        Lease(self.0.clone())
+    }
+}
+
+/// Counts a dial in flight against the connection cap until it lands.
+struct DialSlot<'a>(&'a AtomicUsize);
+
+impl Drop for DialSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// The connections of one outbound.
 pub struct H2Pool {
     conns: Mutex<Vec<Arc<PooledConn>>>,
     xmux: XmuxConfig,
     concurrency: usize,
     connections: usize,
+    /// Dials that have not produced a connection yet, counted against
+    /// `connections` so a burst of sessions cannot open more than the cap.
+    dialing: AtomicUsize,
 }
 
 fn pick(r: Option<Range>) -> u32 {
@@ -100,32 +121,57 @@ impl H2Pool {
             concurrency: pick(xmux.max_concurrency) as usize,
             connections: pick(xmux.max_connections) as usize,
             conns: Mutex::new(Vec::new()),
+            dialing: AtomicUsize::new(0),
             xmux,
         }
     }
 
-    /// Closes the longest-idle connection once it has been quiet for a while,
-    /// never going below `IDLE_KEEP`.
-    fn retire_one(&self, conns: &mut Vec<Arc<PooledConn>>) {
-        if conns.len() <= IDLE_KEEP {
-            return;
+    /// Whether a new connection may be dialed: below the cap, counting dials
+    /// already in flight. With no cap at all the pool shares what it has
+    /// instead of growing without bound (Xray does the same).
+    fn room(&self, conns: &[Arc<PooledConn>]) -> bool {
+        if self.connections == 0 {
+            return self.concurrency > 0;
         }
-        let now = Instant::now();
-        let victim = conns
-            .iter()
-            .enumerate()
-            .filter_map(|(i, c)| c.idle_for(now).filter(|d| *d > IDLE_RETIRE).map(|d| (i, d)))
-            .max_by_key(|(_, d)| *d)
-            .map(|(i, _)| i);
-        if let Some(i) = victim {
-            conns.remove(i);
+        conns.len() + self.dialing.load(Ordering::Relaxed) < self.connections
+    }
+
+    /// Reserves one dial slot, or refuses when the cap is reached.
+    fn reserve(&self) -> bool {
+        let conns = self.conns.lock();
+        if self.connections > 0
+            && conns.len() + self.dialing.load(Ordering::Relaxed) >= self.connections
+        {
+            return false;
+        }
+        self.dialing.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Closes every connection that has been quiet for a while, never going
+    /// below `IDLE_KEEP`.
+    fn retire_idle(&self, conns: &mut Vec<Arc<PooledConn>>) {
+        while conns.len() > IDLE_KEEP {
+            let now = Instant::now();
+            let victim = conns
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| c.idle_for(now).filter(|d| *d > IDLE_RETIRE).map(|d| (i, d)))
+                .max_by_key(|(_, d)| *d)
+                .map(|(i, _)| i);
+            match victim {
+                Some(i) => {
+                    conns.remove(i);
+                }
+                None => return,
+            }
         }
     }
 
     fn take(&self) -> Option<Lease> {
         let mut conns = self.conns.lock();
         conns.retain(|c| c.usable());
-        self.retire_one(&mut conns);
+        self.retire_idle(&mut conns);
         if conns.is_empty() {
             return None;
         }
@@ -133,8 +179,7 @@ impl H2Pool {
         // already have is carrying a session. A fixed pool is worse at both
         // ends — four connections halve the throughput of eight parallel
         // streams, eight dial tunnels that a single stream never uses.
-        let room = self.connections == 0 || conns.len() < self.connections;
-        if room && conns.iter().all(|c| c.open.load(Ordering::Relaxed) > 0) {
+        if self.room(&conns) && conns.iter().all(|c| c.open.load(Ordering::Relaxed) > 0) {
             return None;
         }
         let free: Vec<&Arc<PooledConn>> = conns
@@ -147,8 +192,12 @@ impl H2Pool {
         } else {
             free
         };
+        // Least loaded, and among equals the freshest: reusing the stalest
+        // connection is how the first request after an idle period gets a
+        // tunnel that a NAT has already reaped.
         let c = pickable
             .iter()
+            .rev()
             .min_by_key(|c| c.open.load(Ordering::Relaxed))
             .map(|c| (*c).clone())?;
         *c.idle_at.lock() = None;
@@ -168,6 +217,26 @@ impl H2Pool {
         if let Some(l) = self.take() {
             return Ok(l);
         }
+        // A burst of sessions must not dial a connection each: while one dial
+        // is in flight the others wait for it or for a free connection.
+        let mut reserved = false;
+        let mut waited = 0u32;
+        while !reserved {
+            if self.reserve() {
+                reserved = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            if let Some(l) = self.take() {
+                return Ok(l);
+            }
+            waited += 1;
+            if waited > 2_500 {
+                // Five seconds: dial anyway rather than stall the session.
+                break;
+            }
+        }
+        let _slot = reserved.then(|| DialSlot(&self.dialing));
         let (send, closed, ping_stop) = dial().await?;
         let reuse = pick(self.xmux.c_max_reuse_times);
         let requests = pick(self.xmux.h_max_request_times);
@@ -182,7 +251,13 @@ impl H2Pool {
             idle_at: Mutex::new(None),
             ping_stop,
         });
-        self.conns.lock().push(conn.clone());
+        // A dial that outlived the cap (the pool filled while it was in
+        // flight) serves this session and is not kept.
+        let mut conns = self.conns.lock();
+        if self.connections == 0 || conns.len() < self.connections {
+            conns.push(conn.clone());
+        }
+        drop(conns);
         Ok(Lease(conn))
     }
 
@@ -253,10 +328,11 @@ mod tests {
         assert!(pool.take().is_none(), "a busy pool with room must dial");
     }
 
-    /// A connection quiet for minutes is closed: it holds a socket and its
-    /// TCP state has decayed, so the next session is better off dialing.
+    /// Connections quiet for minutes are closed in one pass: they hold sockets
+    /// and their TCP state has decayed, so the next sessions are better off
+    /// dialing.
     #[tokio::test]
-    async fn retires_a_long_idle_connection() {
+    async fn retires_every_long_idle_connection() {
         let pool = pool_at(8);
         for age in [180u64, 170, 160, 0] {
             let c = conn(0).await;
@@ -264,7 +340,7 @@ mod tests {
             pool.conns.lock().push(c);
         }
         let _ = pool.take();
-        assert_eq!(pool.len(), 3, "the longest-idle connection is closed");
+        assert_eq!(pool.len(), 2, "every connection past the idle limit is closed");
     }
 
     /// Two are always kept: the next session must not pay a handshake.
