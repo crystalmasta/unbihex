@@ -336,29 +336,39 @@ impl AsyncWrite for H2Stream {
 type FlowKey = (SocketAddr, SocketAddr);
 type Flows = Arc<parking_lot::Mutex<HashMap<FlowKey, mpsc::Sender<Vec<u8>>>>>;
 struct UdpMux {
-    send: Mutex<tokio::io::WriteHalf<H2Stream>>,
+    send: mpsc::Sender<Vec<u8>>,
     flows: Flows,
     closed: Arc<AtomicBool>,
     next: AtomicU16,
     reader: JoinHandle<()>,
+    writer: JoinHandle<()>,
+    cancel: tokio_util::sync::CancellationToken,
 }
 impl Drop for UdpMux {
     fn drop(&mut self) {
+        self.cancel.cancel();
         self.reader.abort();
+        self.writer.abort();
     }
 }
 impl UdpMux {
-    fn new(stream: H2Stream) -> Self {
-        let (mut recv, send) = tokio::io::split(stream);
+    fn new<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S) -> Self {
+        let (mut recv, mut wire) = tokio::io::split(stream);
+        // One bounded, whole-packet writer owns the stream. Dropping an
+        // application send future can only discard a packet before enqueue,
+        // never interrupt a frame already being written for another flow.
+        let (send, mut queued) = mpsc::channel::<Vec<u8>>(16);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let read_cancel = cancel.clone();
         let flows: Flows = Arc::default();
         let routing = flows.clone();
         let closed = Arc::new(AtomicBool::new(false));
         let signal = closed.clone();
         let reader = tokio::spawn(async move {
             loop {
-                let packet = match read_packet(&mut recv).await {
-                    Ok(p) => p,
-                    Err(_) => break,
+                let packet = tokio::select! {
+                    _ = read_cancel.cancelled() => break,
+                    packet = read_packet(&mut recv) => match packet { Ok(p) => p, Err(_) => break },
                 };
                 let src = decode_addr(&packet[..16], &packet[16..18]);
                 let dst = decode_addr(&packet[18..34], &packet[34..36]);
@@ -368,13 +378,34 @@ impl UdpMux {
             }
             signal.store(true, Ordering::Release);
             routing.lock().clear();
+            read_cancel.cancel();
+        });
+        let write_cancel = cancel.clone();
+        let write_closed = closed.clone();
+        let write_flows = flows.clone();
+        let writer = tokio::spawn(async move {
+            loop {
+                let packet = tokio::select! {
+                    _ = write_cancel.cancelled() => break,
+                    packet = queued.recv() => match packet { Some(packet) => packet, None => break },
+                };
+                tokio::select! {
+                    _ = write_cancel.cancelled() => break,
+                    result = wire.write_all(&packet) => if result.is_err() { break; },
+                }
+            }
+            write_closed.store(true, Ordering::Release);
+            write_flows.lock().clear();
+            write_cancel.cancel();
         });
         Self {
-            send: Mutex::new(send),
+            send,
             flows,
             closed,
             next: AtomicU16::new(1),
             reader,
+            writer,
+            cancel,
         }
     }
 }
@@ -442,7 +473,11 @@ impl PacketStream for UdpFlow {
         encode_addr(&mut packet, self.key.1);
         packet.push(0);
         packet.extend_from_slice(payload);
-        self.mux.send.lock().await.write_all(&packet).await?;
+        self.mux
+            .send
+            .send(packet)
+            .await
+            .map_err(|_| Error::protocol("trusttunnel: UDP writer closed"))?;
         Ok(())
     }
     async fn recv(&self, buf: &mut [u8]) -> Result<usize> {
@@ -465,6 +500,7 @@ impl PacketStream for UdpFlow {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::future::Future as _;
     #[tokio::test]
     async fn bounded_udp_framing_rejects_truncated_and_oversized() {
         for len in [0, 35, MAX_PACKET + 1, u32::MAX as usize] {
@@ -543,6 +579,73 @@ mod tests {
             let error = driver.await.unwrap().unwrap_err();
             assert_eq!(error.reason(), Some(h2::Reason::ENHANCE_YOUR_CALM));
             server.abort();
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn cancelled_backpressured_udp_send_preserves_other_flows_and_closes_cleanly() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (wire, mut peer) = tokio::io::duplex(8);
+            let mux = Arc::new(UdpMux::new(wire));
+            let key = (
+                "10.0.0.1:1234".parse().unwrap(),
+                "127.0.0.1:53".parse().unwrap(),
+            );
+            let (tx, rx) = mpsc::channel(4);
+            mux.flows.lock().insert(key, tx);
+            let a = UdpFlow {
+                mux: mux.clone(),
+                key,
+                receiver: Mutex::new(rx),
+            };
+            a.send(&vec![1; 65000]).await.unwrap();
+            // The writer has emitted a partial frame and is now backpressured.
+            let mut prefix = [0; 8];
+            peer.read_exact(&mut prefix).await.unwrap();
+            for _ in 0..16 {
+                a.send(b"queued").await.unwrap();
+            }
+            assert_eq!(mux.send.capacity(), 0);
+            let mut cancelled = Box::pin(a.send(b"must-not-appear"));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(cancelled.as_mut().poll(cx).is_pending()))
+                    .await
+            );
+            drop(cancelled);
+            assert!(!mux.closed.load(Ordering::Acquire));
+            let read = tokio::spawn(async move {
+                let len = u32::from_be_bytes(prefix[..4].try_into().unwrap()) as usize;
+                let mut first = vec![0; len];
+                first[..4].copy_from_slice(&prefix[4..]);
+                peer.read_exact(&mut first[4..]).await.unwrap();
+                assert_eq!(&first[37..], vec![1; 65000]);
+                for _ in 0..16 {
+                    let p = read_packet(&mut peer).await.unwrap();
+                    assert_eq!(&p[37..], b"queued");
+                }
+                let p = read_packet(&mut peer).await.unwrap();
+                assert_eq!(&p[37..], b"other-flow");
+                // Closing the peer must stop both pumps and invalidate the mux.
+            });
+            let (tx, rx) = mpsc::channel(4);
+            let other = ("10.0.0.1:1235".parse().unwrap(), key.1);
+            mux.flows.lock().insert(other, tx);
+            let b = UdpFlow {
+                mux: mux.clone(),
+                key: other,
+                receiver: Mutex::new(rx),
+            };
+            b.send(b"other-flow").await.unwrap();
+            read.await.unwrap();
+            while !mux.closed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+            assert!(mux.flows.lock().is_empty());
+            assert!(a.send(b"closed").await.is_err());
+            while !mux.reader.is_finished() || !mux.writer.is_finished() {
+                tokio::task::yield_now().await;
+            }
         })
         .await
         .unwrap();

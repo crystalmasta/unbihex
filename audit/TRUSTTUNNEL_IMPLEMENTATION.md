@@ -107,3 +107,34 @@ The patch requires independent security review before publication.
 Independent security/correctness review and publication are owned by parent;
 this implementation report is not an independent approval. Android APK, Android
 socket protection on a real device, iOS and production server operation are unverified.
+
+## Independent-review fix — cancellation-safe shared UDP writer
+
+The reviewer identified that caller cancellation during `write_all` could leave
+half a length-prefixed datagram in the shared `_udp2` stream. The next flow would
+append another frame and corrupt the multiplexer. Replaced caller-owned writes
+with a single dedicated writer task and bounded queue of **16 whole packets**.
+`Sender::send` cancellation before enqueue sends no packet; after enqueue the
+writer owns the complete packet independently of the caller. There is no
+unbounded per-packet task. A read/write failure marks the mux closed, clears flow
+receivers and cancels both pumps; `connect_udp` then creates a fresh mux. Dropping
+the mux also aborts both bounded tasks.
+
+Deterministic regression uses the actual `UdpMux`/`UdpFlow` over an 8-byte duplex:
+a 65000-byte packet is partially written and backpressured; 16 packets fill the
+queue; a blocked send future is polled then cancelled; a different flow sends a
+packet. The peer parses every complete original frame and the other flow's frame
+with no cancelled payload. Peer EOF then invalidates the mux, clears all flow
+state, finishes both pumps and makes further sends fail. Targeted regression
+passed; official endpoint, full affected suites and strict clippy rerun below.
+
+Cancellation-fix verification:
+- `cargo test --locked --manifest-path unbihex-engine/Cargo.toml --lib cancelled_backpressured_udp_send -- --nocapture`: 1 passed.
+- Full engine suite: 139 unit + 4 fingerprint + 13 integration + 3 environment-gated
+  Xray cases passed; 2 ignored; no new claim of Xray wire verification.
+- Full client-core/FFI suite: 64 core unit + 1 e2e + 1 FFI passed; 1 official ignored.
+- Strict engine and client-core/FFI all-targets clippy commands above: passed.
+- Official endpoint command with `TT_STRESS_BYTES=67108864` above: passed in
+  2.48 s, including shared multi-flow UDP and 65000-byte datagrams. IPv6 still
+  explicitly unverified because the test host lacks IPv6 loopback.
+- `git diff --check`: passed.

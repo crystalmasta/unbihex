@@ -874,3 +874,8 @@ for the precise unsupported scope; HTTP/3 and ICMP are not implemented.
 
 Empty UDP datagrams are explicitly refused: the official v1.1.0 endpoint buffers
 an isolated zero-payload frame until another packet arrives.
+
+The shared TrustTunnel UDP writer has a separate bounded queue of 16 complete
+packets. Application-task cancellation cannot interrupt an already queued frame.
+Read/write failure invalidates the mux and closes both pumps; subsequent new
+flows reconnect instead of appending to an incomplete frame.
