@@ -17,9 +17,10 @@
 //! GREASE extension, X25519MLKEM768 and X25519 key shares and ALPS. It deliberately does
 //! not send Chrome's GREASE ECH: rustls treats the server's ECH ack as unsolicited and
 //! drops the connection, so JA4 is `t13d1515h2_8daaf6152771_eac8ad812b09` (one extension
-//! short of Chromium 152's `...1516...806a8c22fdea`). Firefox 120+ (NSS) has no GREASE,
-//! its own order, an X25519-only key share and delegated_credentials; the lists follow
-//! utls's `HelloFirefox_120`.
+//! short of Chromium 152's `...1516...806a8c22fdea`). Firefox (NSS) has no GREASE, its
+//! own order, X25519MLKEM768 and X25519 key shares and delegated_credentials; the lists
+//! follow utls's `HelloFirefox_148`, which is what Xray sends for `fp=firefox` (REALITY
+//! servers since 2026-09 refuse a hello without an X25519MLKEM768 share).
 //!
 //! The other rows mirror utls's presets (`u_parrots.go`): `HelloSafari_26_3`,
 //! `HelloIOS_14` (`HelloIOS_Auto`), `HelloAndroid_11_OkHttp`, `HelloEdge_85`
@@ -45,7 +46,7 @@ use crate::error::{Error, Result};
 pub enum Fingerprint {
     /// Chrome / Chromium.
     Chrome,
-    /// Desktop Firefox 120+.
+    /// Desktop Firefox 148 (`HelloFirefox_Auto` in utls).
     Firefox,
     /// Safari 26.3 (`HelloSafari_Auto` in utls).
     Safari,
@@ -172,9 +173,8 @@ enum Alpn {
 enum KeyShareMode {
     /// A one-byte GREASE share, then rustls's shares (Chrome, Safari, iOS, Edge, 360, QQ).
     GreaseThenRustls,
-    /// Only the X25519 share on the first flight (Firefox).
-    X25519Only,
-    /// rustls's shares unchanged; the profile has no GREASE share (randomized, Android).
+    /// rustls's shares unchanged; the profile has no GREASE share (Firefox, randomized,
+    /// Android).
     RustlsOnly,
 }
 
@@ -249,13 +249,15 @@ const CHROME_SIGALGS: [u16; 11] = [
     0x0904, 0x0905, 0x0906, 0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
 ];
 
-/// Firefox 120 cipher suites, from `HelloFirefox_120` in utls (same as NSS).
-const FIREFOX_SUITES: [u16; 15] = [
-    0x1301, 0x1303, 0x1302, 0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030, 0xc013, 0xc014, 0x009c,
-    0x009d, 0x002f, 0x0035,
+/// Firefox 148 cipher suites, from `HelloFirefox_148` in utls (same as NSS). The ECDSA
+/// CBC pair is advertisement only, like iOS's CBC suites.
+const FIREFOX_SUITES: [u16; 17] = [
+    0x1301, 0x1303, 0x1302, 0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030, 0xc00a, 0xc009, 0xc013,
+    0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
 ];
-const FIREFOX_GROUPS: [u16; 6] = [0x001d, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101];
-/// Firefox 120 signature schemes: the ECDSA curves, then RSA-PSS, then the PKCS#1 and
+/// P-521 and the FFDHE groups are advertisement only.
+const FIREFOX_GROUPS: [u16; 7] = [0x11ec, 0x001d, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101];
+/// Firefox 148 signature schemes: the ECDSA curves, then RSA-PSS, then the PKCS#1 and
 /// SHA-1 legacy tail.
 const FIREFOX_SIGALGS: [u16; 11] = [
     0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601, 0x0203, 0x0201,
@@ -368,26 +370,25 @@ const CHROME_EXTS: &[Ext] = &[
     Ext::Alps(ALPS),
 ];
 
-// Firefox 120's wire order; note that signature_algorithms follows supported_versions
-// (unlike Chrome's, which precedes SCT and key_share). The preset also advertises an
-// X25519+P-256 key share and an ECH grease extension; both are omitted because rustls
-// only ever builds a share for its first group and cannot answer an ECH ack. A
-// HelloRetryRequest covers P-256.
+// Firefox 148's wire order; signature_algorithms follows supported_versions (unlike
+// Chrome's, which precedes SCT and key_share). The preset also sends a P-256 key share
+// and a GREASE ECH extension; both are left out: rustls holds no P-256 secret to finish a
+// handshake on it (a HelloRetryRequest still covers P-256), and cannot answer an ECH ack.
 const FIREFOX_EXTS: &[Ext] = &[
     Ext::Sni,
     Ext::Ems,
     Ext::Reneg,
     Ext::Groups,
     Ext::Points,
-    Ext::SessionTicket,
     Ext::Alpn,
     Ext::Status,
     Ext::DelegatedCredentials,
+    Ext::Sct,
     Ext::KeyShare,
     Ext::Versions,
     Ext::Sigalgs,
-    Ext::PskModes,
     Ext::RecordSizeLimit,
+    Ext::CompressCertificate(&[1, 2, 3]),
 ];
 
 const SAFARI_EXTS: &[Ext] = &[
@@ -512,12 +513,12 @@ static FIREFOX_PROFILE: Profile = Profile {
     sigalgs: &FIREFOX_SIGALGS,
     extensions: FIREFOX_EXTS,
     alpn: Alpn::HelloOrFixed(ALPN_H2_HTTP1),
-    key_share: KeyShareMode::X25519Only,
+    key_share: KeyShareMode::RustlsOnly,
     versions: VersionMode::Rustls,
     grease: false,
     shuffle: false,
     pad_to_512: false,
-    kx: &[Kx::X25519, Kx::P256, Kx::P384],
+    kx: &[Kx::Mlkem, Kx::X25519, Kx::P256, Kx::P384],
 };
 
 static SAFARI_PROFILE: Profile = Profile {
@@ -986,10 +987,6 @@ fn rewrite_profile(p: &Profile, h: &ParsedHello<'_>) -> Option<Vec<u8>> {
                     let ks = h.ext(KEY_SHARE)?;
                     exts.push((KEY_SHARE, key_share(ks, grease_group)?));
                 }
-                KeyShareMode::X25519Only => {
-                    let ks = h.ext(KEY_SHARE)?;
-                    exts.push((KEY_SHARE, firefox_key_share(ks)?));
-                }
                 KeyShareMode::RustlsOnly => {
                     exts.push((KEY_SHARE, h.ext(KEY_SHARE)?.to_vec()));
                 }
@@ -1040,8 +1037,15 @@ fn rewrite_profile(p: &Profile, h: &ParsedHello<'_>) -> Option<Vec<u8>> {
         .extensions
         .iter()
         .any(|e| matches!(e, Ext::CompressCertificate(_)));
+    // psk_key_exchange_modes only matters next to a pre_shared_key, which rustls sends
+    // only when resuming; a preset without it (Firefox 148) does not get it back.
+    let profile_psk_modes = p.extensions.iter().any(|e| matches!(e, Ext::PskModes));
+    let resuming = h.ext(PRE_SHARED_KEY).is_some();
     for (t, d) in &h.extensions {
         if *t == COMPRESS_CERTIFICATE && !profile_compresses {
+            continue;
+        }
+        if *t == PSK_KEY_EXCHANGE_MODES && !profile_psk_modes && !resuming {
             continue;
         }
         if !exts.iter().any(|(m, _)| m == t) {
@@ -1149,28 +1153,6 @@ fn randomized(h: &ParsedHello<'_>, fixed_seed: bool) -> Option<Vec<u8>> {
 #[cfg(test)]
 fn firefox_alpn() -> Vec<u8> {
     alpn_bytes(ALPN_H2_HTTP1)
-}
-
-/// Firefox's key_share: the X25519 share alone on the first flight. A HelloRetryRequest
-/// can still select another advertised curve, so keep rustls's entries if X25519 is absent.
-fn firefox_key_share(rustls_ks: &[u8]) -> Option<Vec<u8>> {
-    let entries = Reader(rustls_ks).vec16()?;
-    let mut r = Reader(entries);
-    let mut list = Vec::new();
-    while !r.0.is_empty() {
-        let group = r.u16()?;
-        let data = r.vec16()?;
-        if group == 0x001d {
-            put_u16(&mut list, group);
-            put_vec16(&mut list, data);
-        }
-    }
-    if list.is_empty() {
-        return Some(rustls_ks.to_vec());
-    }
-    let mut out = Vec::new();
-    put_vec16(&mut out, &list);
-    Some(out)
 }
 
 /// Rebuilds a hello as Chrome's (kept as a named entry point for the tests).
@@ -1647,23 +1629,25 @@ mod tests {
         let h = ParsedHello::parse(&hello).unwrap();
         assert_eq!(h.cipher_suites, FIREFOX_SUITES);
         let order: Vec<u16> = h.extensions.iter().map(|(t, _)| *t).collect();
+        // HelloFirefox_148 without its P-256 share and GREASE ECH: nothing else, in order.
         let expected = [
             SERVER_NAME,
             EXTENDED_MASTER_SECRET,
             RENEGOTIATION_INFO,
             SUPPORTED_GROUPS,
             EC_POINT_FORMATS,
-            SESSION_TICKET,
             ALPN,
             STATUS_REQUEST,
             DELEGATED_CREDENTIALS,
+            SCT,
             KEY_SHARE,
             SUPPORTED_VERSIONS,
             SIGNATURE_ALGORITHMS,
-            PSK_KEY_EXCHANGE_MODES,
             RECORD_SIZE_LIMIT,
+            COMPRESS_CERTIFICATE,
         ];
-        assert_eq!(&order[..expected.len()], &expected);
+        assert_eq!(order, expected);
+        assert_eq!(h.ext(COMPRESS_CERTIFICATE).unwrap().to_vec(), [6, 0, 1, 0, 2, 0, 3]);
         // No GREASE value anywhere, in any list.
         assert!(h.cipher_suites.iter().all(|v| !is_grease(*v)));
         assert!(order.iter().all(|v| !is_grease(*v)));
@@ -1681,10 +1665,10 @@ mod tests {
                 .collect();
         assert_eq!(sigalgs, FIREFOX_SIGALGS);
         assert!(groups.iter().chain(&sigalgs).all(|v| !is_grease(*v)));
-        // An X25519-only key share, like Firefox's first flight.
+        // X25519MLKEM768, then X25519 (REALITY servers refuse a hello without the hybrid).
         let mut ks = Reader(Reader(h.ext(KEY_SHARE).unwrap()).vec16().unwrap());
-        assert_eq!(ks.u16().unwrap(), 0x001d);
-        assert_eq!(ks.vec16().unwrap().len(), 32);
+        assert_eq!((ks.u16().unwrap(), ks.vec16().unwrap().len()), (0x11ec, 1216));
+        assert_eq!((ks.u16().unwrap(), ks.vec16().unwrap().len()), (0x001d, 32));
         assert!(ks.0.is_empty());
         assert_eq!(h.ext(ALPN).unwrap().to_vec(), firefox_alpn());
         assert_eq!(h.ext(RECORD_SIZE_LIMIT).unwrap().to_vec(), [0x40, 0x01]);

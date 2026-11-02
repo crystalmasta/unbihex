@@ -406,6 +406,23 @@ async fn vision_and_reality_against_xray() {
         .with_reality(Some(reality("")));
     plain_roundtrip(&ob, echo).await;
 
+    // Every profile with an X25519MLKEM768 share passes REALITY, which since 2026-09
+    // forwards a hello without one to the real site.
+    for fp in ["chrome", "firefox", "safari"] {
+        let rc = RealityClient::new(&RealityConfig {
+            server_name: "reality.test".into(),
+            public_key: public_key.clone(),
+            short_id: "0123abcd".into(),
+            alpn: Vec::new(),
+            fingerprint: Some(fp.into()),
+        })
+        .unwrap();
+        let ob = VlessOutbound::from_parts("reality-fp", uuid, endpoint(reality_port), None, sockets.clone())
+            .with_reality(Some(rc))
+            .with_vision(true);
+        plain_roundtrip(&ob, echo).await;
+    }
+
     // A wrong public key must be refused (the server forwards us to the real site).
     let wrong = RealityClient::new(&RealityConfig {
         server_name: "reality.test".into(),
