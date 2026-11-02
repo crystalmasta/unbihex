@@ -68,13 +68,31 @@ impl TlsClient {
         default_sni: &str,
         extra_roots: Vec<CertificateDer<'static>>,
     ) -> Result<TlsClient> {
+        Self::build_with_roots(cfg, default_sni, extra_roots, true)
+    }
+
+    /// Use only the explicitly supplied TrustTunnel trust chain, not system CAs.
+    pub(crate) fn with_trust_roots(
+        cfg: &TlsConfig,
+        default_sni: &str,
+        roots: Vec<CertificateDer<'static>>,
+    ) -> Result<TlsClient> {
+        Self::build_with_roots(cfg, default_sni, roots, false)
+    }
+
+    fn build_with_roots(
+        cfg: &TlsConfig,
+        default_sni: &str,
+        extra_roots: Vec<CertificateDer<'static>>,
+        system_roots: bool,
+    ) -> Result<TlsClient> {
         let fingerprint = Fingerprint::from_name(cfg.fingerprint.as_deref());
         let provider = Arc::new(match fingerprint {
             Some(fp) => fp.provider(),
             None => rustls::crypto::ring::default_provider(),
         });
         let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        if system_roots { roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()); }
         for r in extra_roots {
             roots.add(r).map_err(|e| Error::Tls(e.to_string()))?;
         }

@@ -12,8 +12,22 @@ use crate::model::Server;
 
 /// Schemes recognised as share links (supported or not).
 const SCHEMES: &[&str] = &[
-    "vless", "vmess", "trojan", "ss", "ssr", "socks", "socks5", "hysteria", "hysteria2", "hy2",
-    "tuic", "wireguard", "wg", "anytls", "naive+https",
+    "vless",
+    "vmess",
+    "trojan",
+    "ss",
+    "ssr",
+    "socks",
+    "socks5",
+    "hysteria",
+    "hysteria2",
+    "hy2",
+    "tt",
+    "tuic",
+    "wireguard",
+    "wg",
+    "anytls",
+    "naive+https",
 ];
 
 /// Whether `line` looks like a share link.
@@ -50,6 +64,17 @@ pub fn parse_server(link: &str) -> Result<Server> {
         .filter(|s| SCHEMES.contains(&s.as_str()))
         .ok_or_else(|| ClientError::Input("это не ссылка на сервер".into()))?;
     let mut server = match scheme.as_str() {
+        "tt" => {
+            let (c, name) = unbihex_engine::trusttunnel_link::parse(link, "proxy")
+                .map_err(|e| ClientError::Input(e.to_string()))?;
+            let mut s = blank("trusttunnel");
+            s.link = link.into();
+            s.name = name;
+            s.host = c.server;
+            s.port = c.port;
+            s.transport = "http2+tls".into();
+            s
+        }
         "vmess" => parse_vmess(link)?,
         _ => parse_generic(link, &scheme)?,
     };
@@ -64,8 +89,19 @@ pub fn parse_server(link: &str) -> Result<Server> {
 /// Capability is derived from the current engine, not a permanent property of
 /// saved state. Preserve identity, user labels and subscription membership.
 pub(crate) fn refresh_support(server: &mut Server) -> bool {
-    let Ok(parsed) = parse_server(&server.link) else {
-        return false;
+    let parsed = match parse_server(&server.link) {
+        Ok(parsed) => parsed,
+        Err(e) if scheme_of(&server.link).as_deref() == Some("tt") => {
+            let reason = Some(e.to_string());
+            if server.unsupported != reason {
+                server.unsupported = reason;
+                server.ping_ms = None;
+                server.ping_error = None;
+                return true;
+            }
+            return false;
+        }
+        Err(_) => return false,
     };
     let changed = server.unsupported != parsed.unsupported
         || server.host != parsed.host
@@ -230,13 +266,15 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
         "hysteria2" | "hy2" if json_options_dropped(link) => {
             Some("в профиле есть настройки Hysteria 2, которых клиент пока не поддерживает".into())
         }
-        "vless" | "ss" | "hysteria2" | "hy2" => match unbihex_engine::link::parse_link(link, "proxy") {
-            Ok(OutboundConfig::Vless(v)) if v.is_plaintext() => {
-                Some("VLESS без TLS передаёт UUID и трафик открыто".into())
+        "tt" | "vless" | "ss" | "hysteria2" | "hy2" => {
+            match unbihex_engine::link::parse_link(link, "proxy") {
+                Ok(OutboundConfig::Vless(v)) if v.is_plaintext() => {
+                    Some("VLESS без TLS передаёт UUID и трафик открыто".into())
+                }
+                Ok(_) => None,
+                Err(e) => Some(explain_engine_error(&e.to_string())),
             }
-            Ok(_) => None,
-            Err(e) => Some(explain_engine_error(&e.to_string())),
-        },
+        }
         "socks" | "socks5" => socks_parts(link).err().map(|e| e.to_string()),
         "vmess" => Some("VMess пока не поддерживается ядром".into()),
         "trojan" => Some("Trojan пока не поддерживается ядром".into()),
@@ -329,12 +367,13 @@ pub fn outbound_json(server: &Server) -> Result<Value> {
         return Err(ClientError::Unsupported(why.clone()));
     }
     match server.protocol.as_str() {
-        "vless" | "ss" | "hysteria2" => {
+        "trusttunnel" | "vless" | "ss" | "hysteria2" => {
             Ok(json!({ "type": "link", "tag": "proxy", "url": server.link }))
         }
         "socks" => {
             let p = socks_parts(&server.link)?;
-            let mut v = json!({ "type": "socks", "tag": "proxy", "server": p.host, "port": p.port });
+            let mut v =
+                json!({ "type": "socks", "tag": "proxy", "server": p.host, "port": p.port });
             if let Some(u) = p.user {
                 v["username"] = json!(u);
             }
@@ -350,6 +389,18 @@ pub fn outbound_json(server: &Server) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn trusttunnel_import_and_persisted_capability_revalidation() {
+        let uri=unbihex_engine::trusttunnel_link::from_json(json!({"hostname":"vpn.example","address":"127.0.0.1:443","username":"test","password":"test","name":"TT"})).unwrap();
+        assert!(is_share_link(&uri));
+        let mut server=parse_server(&uri).unwrap();
+        assert_eq!(server.protocol,"trusttunnel");assert_eq!(server.transport,"http2+tls");assert!(server.is_supported());
+        assert_eq!(outbound_json(&server).unwrap()["url"],uri);
+        let id=server.id;server.unsupported=Some("old unsupported".into());assert!(refresh_support(&mut server));assert!(server.is_supported());assert_eq!(server.id,id);
+        server.link="tt://?bad".into();assert!(refresh_support(&mut server));assert!(!server.is_supported());assert!(outbound_json(&server).is_err());
+    }
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 

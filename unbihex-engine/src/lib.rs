@@ -19,6 +19,8 @@ pub mod rules;
 pub mod session;
 pub mod sniff;
 pub mod stats;
+/// Official TrustTunnel deep-link importer.
+pub mod trusttunnel_link;
 
 use std::net::IpAddr;
 use std::sync::Arc;

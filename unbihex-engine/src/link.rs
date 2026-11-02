@@ -13,7 +13,9 @@ use crate::error::{Error, Result};
 /// Turns a supported proxy share link into an outbound config with `tag`.
 pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
     let url = url.trim();
-    if let Some(rest) = strip_scheme(url, "vless://") {
+    if strip_scheme(url, "tt://?").is_some() {
+        crate::trusttunnel_link::parse(url, tag).map(|(c, _)| OutboundConfig::Trusttunnel(c))
+    } else if let Some(rest) = strip_scheme(url, "vless://") {
         parse_vless(rest, tag)
     } else if let Some(rest) = strip_scheme(url, "ss://") {
         parse_ss(rest, tag)

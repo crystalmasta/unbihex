@@ -847,3 +847,30 @@ All on `127.0.0.1`, our client against our server (`test_server/tests/`):
 - TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users;
 - REALITY with Vision and the Chrome fingerprint, a fragmented ClientHello, one `dest` probe per ClientHello shape;
 - what strangers see: the real site over TLS and HTTP.
+
+## Native TrustTunnel HTTP/2 outbound
+
+`type: "trusttunnel"`: `tag`, IP/domain dial `server`, nonzero TCP `port`, TLS
+identity `hostname`, secret `username` / `password`, optional `certificates`
+(array of base64 DER trust anchors, replacing public CA roots for this profile). Unknown settings fail validation. The engine
+verifies WebPKI or supplied trust roots plus hostname, requires ALPN `h2`, performs
+Basic-authenticated CONNECT per stream, and shares its HTTP/2 connection. A 407
+invalidates the connection and active streams; reconnect never bypasses TLS or
+authentication. HTTP/2 receive/send window credits follow actual consumption.
+
+One `_udp2` stream multiplexes at most 256 live IP-destination flows, with four
+queued datagrams per flow; congestion drops UDP instead of allocating unbounded
+memory. Wire packets have a checked 32-bit length before allocation, padded IPv4
+or raw IPv6 addresses, ports and payload; outgoing app-name length is zero.
+Datagrams over 65507 bytes and undersized receive buffers fail. Domains are
+explicitly unsupported for UDP, not locally resolved. No external executable is
+launched by the engine.
+
+`type:"link"` accepts official `tt://?` base64url TLV deep links through format v2,
+including DER chains; known security/policy options outside this implementation
+are refused. Unknown TLV tags are ignored and duplicate singleton tags use the
+last value per upstream specification. Input is limited to 128 KiB. See README
+for the precise unsupported scope; HTTP/3 and ICMP are not implemented.
+
+Empty UDP datagrams are explicitly refused: the official v1.1.0 endpoint buffers
+an isolated zero-payload frame until another packet arrives.

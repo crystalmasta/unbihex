@@ -353,6 +353,8 @@ pub enum OutboundConfig {
     // By dubr1k (github.com/dubr1k), PR #33.
     /// Hysteria 2 over QUIC (TCP streams and UDP datagrams).
     Hysteria2(Hysteria2Config),
+    /// TrustTunnel over verified TLS and HTTP/2.
+    Trusttunnel(TrustTunnelConfig),
     /// Shadowsocks AEAD.
     Shadowsocks(ShadowsocksConfig),
     /// Upstream SOCKS5 proxy.
@@ -371,6 +373,7 @@ impl OutboundConfig {
         match self {
             OutboundConfig::Vless(c) => &c.tag,
             OutboundConfig::Hysteria2(c) => &c.tag,
+            OutboundConfig::Trusttunnel(c) => &c.tag,
             OutboundConfig::Shadowsocks(c) => &c.tag,
             OutboundConfig::Socks(c) => &c.tag,
             OutboundConfig::Link(c) => &c.tag,
@@ -383,10 +386,76 @@ impl OutboundConfig {
         match self {
             OutboundConfig::Vless(c) => Some((&c.server, c.port)),
             OutboundConfig::Hysteria2(c) => Some((&c.server, c.port)),
+            OutboundConfig::Trusttunnel(c) => Some((&c.server, c.port)),
             OutboundConfig::Shadowsocks(c) => Some((&c.server, c.port)),
             OutboundConfig::Socks(c) => Some((&c.server, c.port)),
             _ => None,
         }
+    }
+}
+
+/// Native TrustTunnel HTTP/2 settings. Unsupported transports/options are rejected.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustTunnelConfig {
+    /// Routing tag.
+    pub tag: String,
+    /// Dial address, distinct from the TLS identity.
+    pub server: String,
+    /// Endpoint TCP port.
+    pub port: u16,
+    /// TLS certificate identity / SNI.
+    pub hostname: String,
+    /// Basic authentication username.
+    pub username: Secret,
+    /// Basic authentication password.
+    pub password: Secret,
+    /// Explicit trust chain, base64 DER (replaces public CA roots for this profile).
+    #[serde(default)]
+    pub certificates: Vec<String>,
+}
+impl TrustTunnelConfig {
+    /// Validate before DNS, TLS or any network side effects.
+    pub fn validate(&self) -> Result<()> {
+        if self.server.is_empty()
+            || self.port == 0
+            || self.username.expose().is_empty()
+            || self.username.expose().contains(':')
+            || self.username.expose().len() > 4096
+            || self.password.expose().is_empty()
+            || self.password.expose().len() > 4096
+        {
+            return Err(Error::config(
+                "trusttunnel: invalid endpoint or credentials",
+            ));
+        }
+        rustls::pki_types::ServerName::try_from(self.hostname.as_str())
+            .map_err(|_| Error::config("trusttunnel: invalid TLS hostname"))?;
+        self.roots()?;
+        Ok(())
+    }
+    pub(crate) fn roots(&self) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        use base64::Engine as _;
+        if self.certificates.len() > 16 {
+            return Err(Error::config("trusttunnel: too many certificates"));
+        }
+        let mut store = rustls::RootCertStore::empty();
+        self.certificates
+            .iter()
+            .map(|s| {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(s)
+                    .map_err(|_| Error::config("trusttunnel: invalid certificate encoding"))?;
+                if bytes.len() > 65536 {
+                    return Err(Error::config("trusttunnel: certificate too large"));
+                }
+                let cert = rustls::pki_types::CertificateDer::from(bytes);
+                store
+                    .add(cert.clone())
+                    .map_err(|_| Error::config("trusttunnel: invalid certificate"))?;
+                Ok(cert)
+            })
+            .collect()
     }
 }
 
@@ -1055,6 +1124,9 @@ impl Config {
             }
             if let OutboundConfig::Shadowsocks(s) = o {
                 crate::outbound::shadowsocks::Method::parse(&s.method)?;
+            }
+            if let OutboundConfig::Trusttunnel(t) = o {
+                t.validate()?;
             }
             if let OutboundConfig::Hysteria2(h) = o {
                 h.validate()?;

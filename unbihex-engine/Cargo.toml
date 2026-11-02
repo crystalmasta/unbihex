@@ -104,3 +104,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [patch.crates-io]
 rustls = { path = "vendor/rustls" }
 ipstack = { path = "vendor/ipstack" }
+
+# TrustTunnel: opt-in bounded empty DATA allowance (see vendor/h2/UNBIHEX-PATCH.md).
+h2 = { path = "vendor/h2" }

@@ -35,6 +35,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rustls = { path = "../unbihex-engine/vendor/rustls" }
 ipstack = { path = "../unbihex-engine/vendor/ipstack" }
 
+# TrustTunnel: opt-in bounded empty DATA allowance (see vendor/h2/UNBIHEX-PATCH.md).
+h2 = { path = "../unbihex-engine/vendor/h2" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

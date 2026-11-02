@@ -132,7 +132,7 @@ impl Client {
                 Some(links) if !links.is_empty() => text = links.join("\n"),
                 _ => {
                     return Err(ClientError::Input(
-                        "в JSON нет серверов: нужен конфиг Xray или sing-box с outbounds".into(),
+                        "в JSON нет серверов: нужен конфиг Xray/sing-box с outbounds или поддерживаемый профиль TrustTunnel".into(),
                     ));
                 }
             }

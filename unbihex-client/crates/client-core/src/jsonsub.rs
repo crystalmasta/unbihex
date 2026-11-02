@@ -529,6 +529,20 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
 pub fn links_from_json(body: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(body).ok()?;
     let mut out = Vec::new();
+    if v.get("hostname").is_some() && v.get("address").is_some() {
+        return unbihex_engine::trusttunnel_link::from_json(v)
+            .ok()
+            .map(|l| vec![l]);
+    }
+    if let Some(array) = v.as_array()
+        && array.iter().any(|p| p.get("hostname").is_some()) {
+            return array
+                .iter()
+                .cloned()
+                .map(unbihex_engine::trusttunnel_link::from_json)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .ok();
+    }
     match &v {
         Value::Array(configs) => {
             for c in configs {

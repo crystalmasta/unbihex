@@ -43,3 +43,27 @@ products. Each version becomes Mozilla Public License 2.0 four years after its r
 client 0.2.6, engine 0.1.6 and test_server 0.0.2 were released under it already.
 Report vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
 To send changes see [`CONTRIBUTING.md`](CONTRIBUTING.md); pull request authors accept the [CLA](CLA.md) once.
+
+### TrustTunnel (native HTTP/2)
+
+The engine supports native TrustTunnel TCP CONNECT and IP-address UDP flows over
+verified TLS/HTTP/2. Import official `tt://?` deep links (versions 0–2) or the
+endpoint's subscription JSON (single object or array). Certificate chains in
+links/JSON replace the public CA roots for that profile; hostname validation remains
+mandatory. Each outbound shares one authenticated HTTP/2 session and one `_udp2`
+stream. UDP queues and packet framing are bounded.
+
+Currently rejected, not silently downgraded: HTTP/3, ICMP, disabled certificate
+verification, custom SNI different from the verification hostname, anti-DPI,
+client-random customizations, IPv6-disabled policies, per-profile DNS upstreams,
+multiple dial addresses and embedded subscription URLs (including subscription-only
+links). UDP destinations must be IP addresses: domain UDP flows are refused
+instead of leaking DNS to a local resolver. Regular HTTPS subscription URLs
+containing supported official JSON still use the client's existing subscription
+fetch/refresh path. Android/device operation has not been tested.
+
+Empty UDP datagrams are explicitly refused: the official v1.1.0 endpoint buffers
+an isolated zero-payload frame until another packet arrives.
+
+IPv6 wire framing has unit coverage; real IPv6 endpoint roundtrip is unverified
+on the test host because it has no IPv6 loopback address.

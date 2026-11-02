@@ -12,6 +12,8 @@ pub mod shadowsocks;
 pub mod socks;
 pub mod tls;
 pub mod tls_stream;
+/// Native TrustTunnel HTTP/2 outbound.
+pub mod trusttunnel;
 pub mod vision;
 pub mod vless;
 pub mod xhttp;
@@ -158,9 +160,22 @@ pub async fn build_outbound(
             Arc::new(vless::VlessOutbound::new(c, server, ctx.sockets.clone())?)
         }
         // By dubr1k (github.com/dubr1k), PR #33.
+        OutboundConfig::Trusttunnel(c) => {
+            c.validate()?;
+            let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
+            Arc::new(trusttunnel::TrustTunnelOutbound::new(
+                c,
+                server,
+                ctx.sockets.clone(),
+            )?)
+        }
         OutboundConfig::Hysteria2(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
-            Arc::new(hysteria2::Hysteria2Outbound::new(c, server, ctx.sockets.clone())?)
+            Arc::new(hysteria2::Hysteria2Outbound::new(
+                c,
+                server,
+                ctx.sockets.clone(),
+            )?)
         }
         OutboundConfig::Shadowsocks(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
