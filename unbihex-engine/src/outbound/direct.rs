@@ -1,4 +1,4 @@
-//! Direct outbound (SPEC §11.10).
+//! Direct outbound (SPEC §11.13).
 
 use std::net::{IpAddr, SocketAddr};
 

@@ -150,6 +150,14 @@ fn chrome_version() -> u64 {
     144 + now.saturating_sub(BASE) / (35 * 86_400)
 }
 
+/// The User-Agent of today's Chrome on Windows.
+pub(crate) fn chrome_user_agent() -> String {
+    let v = chrome_version();
+    format!(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v}.0.0.0 Safari/537.36"
+    )
+}
+
 /// Browser-like headers of a `fetch()` request (what Xray sends by default).
 fn browser_headers(user: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
     let mut h: Vec<(String, String)> = user.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -168,13 +176,7 @@ fn browser_headers(user: &std::collections::BTreeMap<String, String>) -> Vec<(St
         );
         set(&mut h, "Sec-CH-UA-Mobile", "?0".into());
         set(&mut h, "Sec-CH-UA-Platform", "\"Windows\"".into());
-        set(
-            &mut h,
-            "User-Agent",
-            format!(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v}.0.0.0 Safari/537.36"
-            ),
-        );
+        set(&mut h, "User-Agent", chrome_user_agent());
         set(&mut h, "Accept-Language", "en-US,en;q=0.9".into());
     }
     set(&mut h, "Sec-Fetch-Mode", "cors".into());

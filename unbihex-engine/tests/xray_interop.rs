@@ -3,7 +3,8 @@
 //! Runs only when `XRAY_BIN` points to an `xray` binary, e.g.
 //! `XRAY_BIN=/path/to/xray cargo test --test xray_interop`.
 //! Covers VLESS + TLS + Vision and VLESS + REALITY + Vision with plain TCP and with
-//! inner TLS 1.3 (which makes the server switch to direct copy).
+//! inner TLS 1.3 (which makes the server switch to direct copy), XHTTP, and VMess over
+//! TCP, WebSocket and HTTPUpgrade with and without TLS.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -666,4 +667,88 @@ async fn xhttp_against_xray() {
     let _ = std::fs::remove_dir_all(dir);
     let log = std::fs::read_to_string(xray.dir.join("xray.log")).unwrap_or_default();
     assert!(log.contains("accepted"), "the server never saw a request");
+}
+
+/// VMess (AEAD header, masked and padded chunks) against Xray's VMess inbound:
+/// both ciphers over TCP, WebSocket and HTTPUpgrade, each with and without TLS;
+/// TCP and UDP echo through every one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vmess_against_xray() {
+    use unbihex_engine::config::{TlsConfig, VmessConfig};
+    use unbihex_engine::outbound::vmess::VmessOutbound;
+    use unbihex_engine::outbound::ws::WsConfig;
+
+    let Some(bin) = xray_bin() else {
+        eprintln!("XRAY_BIN is not set: skipping the VMess interop test");
+        return;
+    };
+    init_tracing();
+    let pem = cert("vmess.test");
+    let echo = tcp_echo().await;
+    let uecho = udp_echo().await;
+    let dir = std::env::temp_dir().join(format!("unbihex-pem-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("cert.pem"), &pem.cert_pem).unwrap();
+    std::fs::write(dir.join("key.pem"), &pem.key_pem).unwrap();
+
+    for network in ["tcp", "ws", "httpupgrade"] {
+        for tls in [false, true] {
+            let port = free_port();
+            let mut stream = serde_json::json!({ "network": network });
+            if network != "tcp" {
+                stream[format!("{network}Settings")] = serde_json::json!({ "path": "/vm" });
+            }
+            if tls {
+                stream["security"] = "tls".into();
+                stream["tlsSettings"] = serde_json::json!({ "certificates": [{
+                    "certificateFile": dir.join("cert.pem"), "keyFile": dir.join("key.pem")
+                }]});
+            }
+            let config = serde_json::json!({
+                "log": { "loglevel": "debug" },
+                "inbounds": [{
+                    "listen": "127.0.0.1", "port": port, "protocol": "vmess",
+                    "settings": { "clients": [{ "id": UUID }] },
+                    "streamSettings": stream
+                }],
+                "outbounds": [loopback_freedom()]
+            });
+            let _xray = start_xray(&bin, config).await;
+            for security in ["aes-128-gcm", "chacha20-poly1305", "auto"] {
+                let cfg = VmessConfig {
+                    tag: "vm".into(),
+                    server: "127.0.0.1".into(),
+                    port,
+                    uuid: unbihex_engine::config::Secret(UUID.into()),
+                    security: security.into(),
+                    tls: tls.then(|| TlsConfig {
+                        enabled: true,
+                        sni: Some("vmess.test".into()),
+                        alpn: Vec::new(),
+                        pinned_sha256: Vec::new(),
+                        fingerprint: None,
+                    }),
+                    fragment: None,
+                    ws: (network != "tcp").then(|| WsConfig {
+                        path: "/vm?ed=2048".into(),
+                        host: Some("cdn.test".into()),
+                        httpupgrade: network == "httpupgrade",
+                    }),
+                };
+                let server = ServerEndpoint {
+                    host: "127.0.0.1".into(),
+                    port,
+                    addrs: vec![SocketAddr::from(([127, 0, 0, 1], port))],
+                };
+                let ob = VmessOutbound::new(&cfg, server, Arc::new(SocketFactory::new(None, None)))
+                    .unwrap()
+                    .with_extra_roots(&cfg, vec![pem.cert_der.clone()])
+                    .unwrap();
+                eprintln!("vmess {network} tls={tls} {security}");
+                plain_roundtrip(&ob, echo).await;
+                udp_roundtrip(&ob, uecho).await;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }

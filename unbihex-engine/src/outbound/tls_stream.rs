@@ -385,6 +385,11 @@ impl TlsRecordStream {
         self.conn.protocol_version()
     }
 
+    /// The negotiated ALPN protocol.
+    pub fn alpn_protocol(&self) -> Option<&[u8]> {
+        self.conn.alpn_protocol()
+    }
+
     /// Stops reading through TLS: returns plaintext that was already decrypted
     /// (to be delivered before anything else) and reads the socket directly from now on.
     pub fn switch_to_raw_read(&mut self) -> io::Result<Vec<u8>> {

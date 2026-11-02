@@ -1,5 +1,6 @@
 //! Share links: display metadata for any common scheme, and the outbound the
-//! engine needs for the ones it supports (`vless://`, `ss://`, `socks://`, `hy2://`).
+//! engine needs for the ones it supports (`vless://`, `vmess://`, `ss://`,
+//! `socks://`, `hy2://`, `tt://`).
 
 use base64::Engine as _;
 use percent_encoding::percent_decode_str;
@@ -13,7 +14,7 @@ use crate::model::Server;
 /// Schemes recognised as share links (supported or not).
 const SCHEMES: &[&str] = &[
     "vless", "vmess", "trojan", "ss", "ssr", "socks", "socks5", "hysteria", "hysteria2", "hy2",
-    "tuic", "wireguard", "wg", "anytls", "naive+https",
+    "tuic", "wireguard", "wg", "anytls", "naive+https", "tt",
 ];
 
 /// Whether `line` looks like a share link.
@@ -51,6 +52,7 @@ pub fn parse_server(link: &str) -> Result<Server> {
         .ok_or_else(|| ClientError::Input("это не ссылка на сервер".into()))?;
     let mut server = match scheme.as_str() {
         "vmess" => parse_vmess(link)?,
+        "tt" => parse_trusttunnel(link),
         _ => parse_generic(link, &scheme)?,
     };
     server.unsupported = support_problem(link, &scheme);
@@ -103,6 +105,20 @@ fn blank(protocol: &str) -> Server {
 fn parse_vmess(link: &str) -> Result<Server> {
     let body = &link["vmess://".len()..];
     let body = body.split('#').next().unwrap_or(body);
+    // The URL form (`vmess://uuid@host:port?type=ws...`) reads like VLESS.
+    if body.contains('@') {
+        let mut s = parse_generic(link, "vmess")?;
+        let net = url::form_urlencoded::parse(body.split_once('?').map_or("", |(_, q)| q).as_bytes())
+            .find(|(k, _)| k == "type")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        let sec = url::form_urlencoded::parse(body.split_once('?').map_or("", |(_, q)| q).as_bytes())
+            .find(|(k, _)| k == "security")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        s.transport = transport_label(if net.is_empty() { "tcp" } else { &net }, &sec);
+        return Ok(s);
+    }
     let json: Value = b64_decode(body)
         .and_then(|b| serde_json::from_slice(&b).ok())
         .ok_or_else(|| ClientError::Input("vmess: не удалось разобрать ссылку".into()))?;
@@ -120,6 +136,20 @@ fn parse_vmess(link: &str) -> Result<Server> {
     let tls = field("tls");
     s.transport = transport_label(if net.is_empty() { "tcp" } else { &net }, &tls);
     Ok(s)
+}
+
+/// A `tt://` link: everything is inside the encoded payload, so the engine reads it.
+fn parse_trusttunnel(link: &str) -> Server {
+    let mut s = blank("trusttunnel");
+    s.link = link.into();
+    s.name = unbihex_engine::link::tt_name(link).unwrap_or_default();
+    s.transport = "http2+tls".into();
+    if let Ok(OutboundConfig::Trusttunnel(t)) = unbihex_engine::link::parse_link(link, "proxy")
+        && let Some(a) = t.addresses.first()
+    {
+        (s.host, s.port) = split_host_port(a);
+    }
+    s
 }
 
 fn transport_label(net: &str, security: &str) -> String {
@@ -230,7 +260,7 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
         "hysteria2" | "hy2" if json_options_dropped(link) => {
             Some("в профиле есть настройки Hysteria 2, которых клиент пока не поддерживает".into())
         }
-        "vless" | "ss" | "hysteria2" | "hy2" => match unbihex_engine::link::parse_link(link, "proxy") {
+        "vless" | "vmess" | "ss" | "hysteria2" | "hy2" | "tt" => match unbihex_engine::link::parse_link(link, "proxy") {
             Ok(OutboundConfig::Vless(v)) if v.is_plaintext() => {
                 Some("VLESS без TLS передаёт UUID и трафик открыто".into())
             }
@@ -238,7 +268,6 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
             Err(e) => Some(explain_engine_error(&e.to_string())),
         },
         "socks" | "socks5" => socks_parts(link).err().map(|e| e.to_string()),
-        "vmess" => Some("VMess пока не поддерживается ядром".into()),
         "trojan" => Some("Trojan пока не поддерживается ядром".into()),
         "hysteria" => Some("Hysteria 1 пока не поддерживается ядром".into()),
         "tuic" => Some("TUIC пока не поддерживается ядром".into()),
@@ -250,6 +279,17 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
 /// Turns the engine's English refusal into a short Russian explanation.
 pub fn explain_engine_error(msg: &str) -> String {
     let m = msg.to_ascii_lowercase();
+    if m.contains("trusttunnel") || m.starts_with("tt link") {
+        return explain_trusttunnel(&m, msg);
+    }
+    if m.contains("vmess") {
+        if m.contains("vmess security=") && !m.contains("reality") && !m.contains("tls") {
+            return "шифрование VMess не поддерживается (есть auto, aes-128-gcm, chacha20-poly1305)".into();
+        }
+        if m.contains("insecure") {
+            return "VMess без проверки сертификата не поддерживается".into();
+        }
+    }
     if m.contains("pbk") || m.contains("public_key") || m.contains("short_id") {
         "неверные параметры REALITY (pbk/sid)".into()
     } else if m.contains("flow") {
@@ -259,8 +299,9 @@ pub fn explain_engine_error(msg: &str) -> String {
     } else if m.contains("xhttp") {
         format!("эти настройки XHTTP пока не поддерживаются ({msg})")
     } else if let Some(t) = m.split("type=").nth(1) {
+        let have = if m.contains("vmess") { "tcp, ws и httpupgrade" } else { "tcp и xhttp" };
         format!(
-            "транспорт {} пока не поддерживается (есть tcp и xhttp)",
+            "транспорт {} пока не поддерживается (есть {have})",
             t.split_whitespace().next().unwrap_or(t)
         )
     } else if m.contains("headertype") {
@@ -275,6 +316,22 @@ pub fn explain_engine_error(msg: &str) -> String {
         "этот вид защиты соединения не поддерживается".into()
     } else {
         format!("ссылка не распознана: {msg}")
+    }
+}
+
+fn explain_trusttunnel(m: &str, msg: &str) -> String {
+    if m.contains("skip_verification") {
+        "TrustTunnel без проверки сертификата не поддерживается".into()
+    } else if m.contains("http/3") {
+        "TrustTunnel поверх HTTP/3 пока не поддерживается".into()
+    } else if m.contains("client_random") {
+        "фильтр client_random у TrustTunnel пока не поддерживается".into()
+    } else if m.contains("subscription-only") {
+        "в ссылке TrustTunnel только адрес подписки: добавьте саму подписку".into()
+    } else if m.contains("newer link version") {
+        "ссылка TrustTunnel новой версии, обновите клиент".into()
+    } else {
+        format!("ссылка TrustTunnel не распознана: {msg}")
     }
 }
 
@@ -329,7 +386,7 @@ pub fn outbound_json(server: &Server) -> Result<Value> {
         return Err(ClientError::Unsupported(why.clone()));
     }
     match server.protocol.as_str() {
-        "vless" | "ss" | "hysteria2" => {
+        "vless" | "vmess" | "ss" | "hysteria2" | "trusttunnel" => {
             Ok(json!({ "type": "link", "tag": "proxy", "url": server.link }))
         }
         "socks" => {
@@ -401,16 +458,44 @@ mod tests {
     }
 
     #[test]
-    fn vmess_trojan_and_legacy_hysteria_remain_unsupported() {
-        let j = r#"{"v":"2","ps":"VM","add":"vm.example","port":"443","id":"x","net":"ws","tls":"tls"}"#;
-        let l = format!(
-            "vmess://{}",
-            base64::engine::general_purpose::STANDARD.encode(j)
-        );
-        let s = parse_server(&l).unwrap();
+    fn vmess_links() {
+        let vmess = |j: &str| format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(j));
+        let j = format!(r#"{{"v":"2","ps":"VM","add":"vm.example","port":"443","id":"{UUID}","net":"ws","tls":"tls","host":"cdn.example","path":"/ws"}}"#);
+        let s = parse_server(&vmess(&j)).unwrap();
         assert_eq!((s.name.as_str(), s.host.as_str(), s.port), ("VM", "vm.example", 443));
         assert_eq!(s.transport, "ws+tls");
-        assert!(!s.is_supported());
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        assert_eq!(outbound_json(&s).unwrap()["url"], s.link);
+        let s = parse_server(&format!("vmess://{UUID}@vm.example:8443?type=httpupgrade&security=tls#U")).unwrap();
+        assert_eq!((s.name.as_str(), s.port, s.transport.as_str()), ("U", 8443, "httpupgrade+tls"));
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","net":"grpc"}}"#))).unwrap();
+        assert!(s.unsupported.unwrap().contains("grpc"));
+        let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","scy":"none"}}"#))).unwrap();
+        assert!(s.unsupported.unwrap().contains("шифрование VMess"));
+    }
+
+    #[test]
+    fn trusttunnel_links() {
+        let link = unbihex_engine::link::tt_link_from_json(&json!({"hostname": "vpn.example",
+            "address": "203.0.113.1:443", "username": "u", "password": "p", "name": "TT"}))
+        .unwrap();
+        assert!(is_share_link(&link));
+        let s = parse_server(&link).unwrap();
+        assert_eq!((s.protocol.as_str(), s.name.as_str()), ("trusttunnel", "TT"));
+        assert_eq!((s.host.as_str(), s.port), ("203.0.113.1", 443));
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        assert_eq!(outbound_json(&s).unwrap()["url"], link);
+        let h3 = unbihex_engine::link::tt_link_from_json(&json!({"hostname": "vpn.example",
+            "address": "203.0.113.1:443", "username": "u", "password": "p", "upstream_protocol": "http3"}))
+        .unwrap();
+        let s = parse_server(&h3).unwrap();
+        assert!(s.unsupported.unwrap().contains("HTTP/3"));
+        assert!(parse_server("tt://?***").unwrap().unsupported.is_some());
+    }
+
+    #[test]
+    fn trojan_and_legacy_hysteria_remain_unsupported() {
         let s = parse_server("trojan://pw@t.example:443?sni=t.example#T").unwrap();
         assert_eq!(s.transport, "tcp+tls");
         assert!(!s.is_supported());

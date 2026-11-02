@@ -1,4 +1,10 @@
-//! Share links: `vless://`, `ss://`, `hy2://` and `hysteria2://` (SPEC §5.4).
+//! Share links: `vless://`, `vmess://`, `ss://`, `hy2://`, `hysteria2://` and
+//! TrustTunnel's `tt://` (SPEC §5.4).
+
+mod tt;
+mod vmess;
+
+pub use tt::{tt_link_from_json, tt_name};
 
 use base64::Engine;
 use percent_encoding::percent_decode_str;
@@ -15,6 +21,10 @@ pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
     let url = url.trim();
     if let Some(rest) = strip_scheme(url, "vless://") {
         parse_vless(rest, tag)
+    } else if let Some(rest) = strip_scheme(url, "vmess://") {
+        vmess::parse(rest, tag)
+    } else if strip_scheme(url, "tt://").is_some() {
+        tt::parse(url, tag)
     } else if let Some(rest) = strip_scheme(url, "ss://") {
         parse_ss(rest, tag)
     } else if let Some(rest) =
@@ -23,7 +33,8 @@ pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
         parse_hysteria2(rest, tag)
     } else {
         Err(Error::Unsupported(
-            "only vless://, ss://, hysteria2:// and hy2:// links are supported".into(),
+            "only vless://, vmess://, ss://, hysteria2://, hy2:// and tt:// links are supported"
+                .into(),
         ))
     }
 }

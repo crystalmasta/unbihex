@@ -56,6 +56,9 @@ chacha20poly1305 = "0.10"
 hkdf = "0.12"
 md-5 = "0.10"
 sha1 = "0.10"
+# VMess: the auth ID checksum and the chunk length mask (both already in the tree).
+crc32fast = "1"
+shake = "0.1"
 sha2 = "0.10"
 # REALITY: our own X25519 key (shared by the TLS key share and the REALITY auth key) and HMAC.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -101,6 +104,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # (unbihex-client) must carry the same patch.
 # ipstack 1.0.1 with TCP window scaling and a non-blocking stream drop
 # (vendor/ipstack/UNBIHEX-PATCH.md); same rule.
+# h2 0.4.20 with an opt-in refill of the empty DATA frame allowance, for TrustTunnel
+# (vendor/h2/UNBIHEX-PATCH.md); same rule.
 [patch.crates-io]
 rustls = { path = "vendor/rustls" }
 ipstack = { path = "vendor/ipstack" }
+h2 = { path = "vendor/h2" }

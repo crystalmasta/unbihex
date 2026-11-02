@@ -353,11 +353,15 @@ pub enum OutboundConfig {
     // By dubr1k (github.com/dubr1k), PR #33.
     /// Hysteria 2 over QUIC (TCP streams and UDP datagrams).
     Hysteria2(Hysteria2Config),
+    /// VMess (AEAD header) over TCP, TLS, WebSocket or HTTPUpgrade.
+    Vmess(VmessConfig),
+    /// TrustTunnel: CONNECT over HTTP/2 and TLS.
+    Trusttunnel(TrustTunnelConfig),
     /// Shadowsocks AEAD.
     Shadowsocks(ShadowsocksConfig),
     /// Upstream SOCKS5 proxy.
     Socks(SocksOutboundConfig),
-    /// A `vless://` or `ss://` share link.
+    /// A share link (`vless://`, `vmess://`, `ss://`, `hy2://`, `tt://`).
     Link(LinkConfig),
     /// Connect directly.
     Direct(TagOnly),
@@ -371,6 +375,8 @@ impl OutboundConfig {
         match self {
             OutboundConfig::Vless(c) => &c.tag,
             OutboundConfig::Hysteria2(c) => &c.tag,
+            OutboundConfig::Vmess(c) => &c.tag,
+            OutboundConfig::Trusttunnel(c) => &c.tag,
             OutboundConfig::Shadowsocks(c) => &c.tag,
             OutboundConfig::Socks(c) => &c.tag,
             OutboundConfig::Link(c) => &c.tag,
@@ -383,11 +389,151 @@ impl OutboundConfig {
         match self {
             OutboundConfig::Vless(c) => Some((&c.server, c.port)),
             OutboundConfig::Hysteria2(c) => Some((&c.server, c.port)),
+            OutboundConfig::Vmess(c) => Some((&c.server, c.port)),
+            OutboundConfig::Trusttunnel(c) => c.addresses.first().and_then(|a| split_host_port(a)),
             OutboundConfig::Shadowsocks(c) => Some((&c.server, c.port)),
             OutboundConfig::Socks(c) => Some((&c.server, c.port)),
             _ => None,
         }
     }
+}
+
+/// VMess outbound settings (SPEC §11.9): the AEAD header only (alterId 0).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmessConfig {
+    /// Outbound tag.
+    pub tag: String,
+    /// Server host name or IP.
+    pub server: String,
+    /// Server port.
+    pub port: u16,
+    /// User UUID.
+    pub uuid: Secret,
+    /// Body cipher: `auto` (AES-128-GCM on x86-64 and ARM64, otherwise
+    /// ChaCha20-Poly1305, as Xray picks), `aes-128-gcm` or `chacha20-poly1305`.
+    #[serde(default)]
+    pub security: String,
+    /// TLS settings; `None` sends VMess over plain TCP (its body is still encrypted).
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    /// Split the TLS ClientHello into small records (DPI evasion).
+    #[serde(default)]
+    pub fragment: Option<crate::outbound::fragment::FragmentConfig>,
+    /// WebSocket or HTTPUpgrade transport.
+    #[serde(default)]
+    pub ws: Option<crate::outbound::ws::WsConfig>,
+}
+
+impl VmessConfig {
+    /// Checks the UUID, cipher and transport.
+    pub fn validate(&self) -> Result<()> {
+        uuid::Uuid::parse_str(self.uuid.expose())
+            .map_err(|_| Error::config(format!("outbound {}: invalid uuid", self.tag)))?;
+        crate::outbound::vmess::Security::parse(&self.security)?;
+        if let Some(ws) = &self.ws {
+            ws.validate()?;
+        }
+        if let Some(f) = &self.fragment {
+            if !self.tls.as_ref().is_some_and(|t| t.enabled) {
+                return Err(Error::config("vmess: fragment needs tls"));
+            }
+            f.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// TrustTunnel outbound settings (SPEC §11.11): HTTP/2 over TLS.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustTunnelConfig {
+    /// Outbound tag.
+    pub tag: String,
+    /// Endpoint addresses as `host:port`, tried in order.
+    pub addresses: Vec<String>,
+    /// The name the endpoint's certificate is checked against; also the SNI
+    /// unless `sni` is set.
+    pub hostname: String,
+    /// SNI to send instead of `hostname` (the certificate is still checked
+    /// against `hostname`).
+    #[serde(default)]
+    pub sni: Option<String>,
+    /// User name.
+    pub username: Secret,
+    /// Password.
+    pub password: Secret,
+    /// Trust exactly these certificates (base64 DER) instead of the public roots,
+    /// e.g. an endpoint's self-signed one.
+    #[serde(default)]
+    pub certificates: Vec<String>,
+    /// The endpoint can reach IPv6. When false, IPv6 destinations are refused
+    /// here so that apps fall back to IPv4.
+    #[serde(default = "default_true")]
+    pub has_ipv6: bool,
+    /// Split the TLS ClientHello into small records (the official client's anti-DPI).
+    #[serde(default)]
+    pub fragment: Option<crate::outbound::fragment::FragmentConfig>,
+}
+
+impl TrustTunnelConfig {
+    /// Checks addresses, names, credentials and certificates.
+    pub fn validate(&self) -> Result<()> {
+        if self.addresses.is_empty() || self.addresses.iter().any(|a| split_host_port(a).is_none()) {
+            return Err(Error::config("trusttunnel: addresses must be host:port"));
+        }
+        for name in std::iter::once(&self.hostname).chain(&self.sni) {
+            rustls::pki_types::ServerName::try_from(name.as_str())
+                .map_err(|_| Error::config(format!("trusttunnel: invalid TLS name {name:?}")))?;
+        }
+        // Basic authentication: the user name cannot hold the separator.
+        if self.username.expose().is_empty() || self.username.expose().contains(':') {
+            return Err(Error::config("trusttunnel: invalid user name"));
+        }
+        self.trust_roots()?;
+        if let Some(f) = &self.fragment {
+            f.validate()?;
+        }
+        Ok(())
+    }
+
+    /// The decoded `certificates`.
+    pub fn trust_roots(&self) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        use base64::Engine as _;
+        let mut store = rustls::RootCertStore::empty();
+        self.certificates
+            .iter()
+            .map(|c| {
+                let der = base64::engine::general_purpose::STANDARD
+                    .decode(c.trim())
+                    .map_err(|_| Error::config("trusttunnel: certificate is not base64"))?;
+                let cert = rustls::pki_types::CertificateDer::from(der);
+                store
+                    .add(cert.clone())
+                    .map_err(|e| Error::config(format!("trusttunnel: bad certificate: {e}")))?;
+                Ok(cert)
+            })
+            .collect()
+    }
+}
+
+/// `host:port` or `[v6]:port` → (host, port), borrowing.
+pub(crate) fn split_host_port(s: &str) -> Option<(&str, u16)> {
+    let (host, port) = match s.strip_prefix('[') {
+        Some(rest) => {
+            let (h, p) = rest.split_once(']')?;
+            (h, p.strip_prefix(':')?)
+        }
+        None => {
+            let (h, p) = s.rsplit_once(':')?;
+            if h.contains(':') {
+                return None;
+            }
+            (h, p)
+        }
+    };
+    let port = port.parse().ok().filter(|p| *p != 0)?;
+    (!host.is_empty()).then_some((host, port))
 }
 
 // By dubr1k (github.com/dubr1k), PR #33.
@@ -660,7 +806,8 @@ pub struct LinkConfig {
     /// Allow a `vless://` link without TLS (see [`VlessConfig::allow_plaintext`]).
     #[serde(default)]
     pub allow_plaintext: bool,
-    /// ClientHello fragmentation for a `vless://` link (see [`VlessConfig::fragment`]).
+    /// ClientHello fragmentation for a `vless://` link, and a `vmess://` link with TLS or
+    /// a `tt://` one without its own anti-DPI (see [`VlessConfig::fragment`]).
     #[serde(default)]
     pub fragment: Option<crate::outbound::fragment::FragmentConfig>,
 }
@@ -1058,6 +1205,12 @@ impl Config {
             }
             if let OutboundConfig::Hysteria2(h) = o {
                 h.validate()?;
+            }
+            if let OutboundConfig::Vmess(v) = o {
+                v.validate()?;
+            }
+            if let OutboundConfig::Trusttunnel(t) = o {
+                t.validate()?;
             }
             if let Some((server, port)) = o.server()
                 && (server.trim().is_empty() || port == 0)

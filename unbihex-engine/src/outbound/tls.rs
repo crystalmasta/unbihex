@@ -45,12 +45,32 @@ impl TlsClient {
         let mut cfg = cfg.clone();
         cfg.fingerprint = Some("none".into());
         cfg.alpn = vec!["h3".into()];
-        Ok(Self::build(&cfg, default_sni, extra_roots)?.config)
+        Ok(Self::build(&cfg, default_sni, extra_roots, &Trust::default())?.config)
     }
 
     /// Builds a client trusting the bundled WebPKI roots.
     pub fn new(cfg: &TlsConfig, default_sni: &str) -> Result<TlsClient> {
-        Self::build(cfg, default_sni, Vec::new())
+        Self::build(cfg, default_sni, Vec::new(), &Trust::default())
+    }
+
+    /// Trusts only `roots` when there are any (an endpoint's own certificate), and
+    /// checks the certificate against `verify_name` while sending `cfg.sni`.
+    pub(crate) fn with_trust(
+        cfg: &TlsConfig,
+        default_sni: &str,
+        roots: Vec<CertificateDer<'static>>,
+        verify_name: Option<&str>,
+    ) -> Result<TlsClient> {
+        let trust = Trust {
+            only_given_roots: !roots.is_empty(),
+            verify_name: verify_name
+                .map(|n| {
+                    ServerName::try_from(n.to_string())
+                        .map_err(|_| Error::config(format!("invalid TLS server name {n:?}")))
+                })
+                .transpose()?,
+        };
+        Self::build(cfg, default_sni, roots, &trust)
     }
 
     /// Test-only: trust additional roots (e.g. a self-signed test CA).
@@ -60,13 +80,14 @@ impl TlsClient {
         default_sni: &str,
         roots: Vec<CertificateDer<'static>>,
     ) -> Result<TlsClient> {
-        Self::build(cfg, default_sni, roots)
+        Self::build(cfg, default_sni, roots, &Trust::default())
     }
 
     fn build(
         cfg: &TlsConfig,
         default_sni: &str,
         extra_roots: Vec<CertificateDer<'static>>,
+        trust: &Trust,
     ) -> Result<TlsClient> {
         let fingerprint = Fingerprint::from_name(cfg.fingerprint.as_deref());
         let provider = Arc::new(match fingerprint {
@@ -74,7 +95,9 @@ impl TlsClient {
             None => rustls::crypto::ring::default_provider(),
         });
         let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        if !trust.only_given_roots {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
         for r in extra_roots {
             roots.add(r).map_err(|e| Error::Tls(e.to_string()))?;
         }
@@ -83,7 +106,18 @@ impl TlsClient {
         let builder = ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
             .map_err(|e| Error::Tls(e.to_string()))?;
-        let mut config = if cfg.pinned_sha256.is_empty() {
+        let mut config = if let Some(name) = &trust.verify_name {
+            let inner = WebPkiServerVerifier::builder_with_provider(roots, provider)
+                .build()
+                .map_err(|e| Error::Tls(e.to_string()))?;
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NameVerifier {
+                    inner,
+                    name: name.clone(),
+                }))
+                .with_no_client_auth()
+        } else if cfg.pinned_sha256.is_empty() {
             builder.with_root_certificates(roots).with_no_client_auth()
         } else {
             let pins = cfg
@@ -146,6 +180,58 @@ impl TlsClient {
             .connect(self.server_name.clone(), stream)
             .await
             .map_err(|e| Error::Tls(e.to_string()))
+    }
+}
+
+/// Who is trusted and for which name, beyond the defaults (WebPKI roots, the SNI).
+#[derive(Default)]
+struct Trust {
+    /// Trust only the roots passed in, not the bundled WebPKI ones.
+    only_given_roots: bool,
+    /// Check the certificate against this name instead of the SNI.
+    verify_name: Option<ServerName<'static>>,
+}
+
+/// Standard WebPKI validation, for a name other than the SNI sent.
+#[derive(Debug)]
+struct NameVerifier {
+    inner: Arc<WebPkiServerVerifier>,
+    name: ServerName<'static>,
+}
+
+impl ServerCertVerifier for NameVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        self.inner
+            .verify_server_cert(end_entity, intermediates, &self.name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
     }
 }
 

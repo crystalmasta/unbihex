@@ -12,8 +12,11 @@ pub mod shadowsocks;
 pub mod socks;
 pub mod tls;
 pub mod tls_stream;
+pub mod trusttunnel;
 pub mod vision;
 pub mod vless;
+pub mod vmess;
+pub mod ws;
 pub mod xhttp;
 pub mod xudp;
 
@@ -162,6 +165,15 @@ pub async fn build_outbound(
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
             Arc::new(hysteria2::Hysteria2Outbound::new(c, server, ctx.sockets.clone())?)
         }
+        OutboundConfig::Vmess(c) => {
+            let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
+            Arc::new(vmess::VmessOutbound::new(c, server, ctx.sockets.clone())?)
+        }
+        OutboundConfig::Trusttunnel(c) => {
+            c.validate()?;
+            let server = trusttunnel::resolve(c, &ctx.server_resolver).await?;
+            Arc::new(trusttunnel::TrustTunnelOutbound::new(c, server, ctx.sockets.clone())?)
+        }
         OutboundConfig::Shadowsocks(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
             Arc::new(shadowsocks::ShadowsocksOutbound::new(
@@ -176,9 +188,16 @@ pub async fn build_outbound(
         }
         OutboundConfig::Link(c) => {
             let mut parsed = crate::link::parse_link(c.url.expose(), &c.tag)?;
-            if let OutboundConfig::Vless(v) = &mut parsed {
-                v.allow_plaintext = c.allow_plaintext;
-                v.fragment = c.fragment.clone();
+            match &mut parsed {
+                OutboundConfig::Vless(v) => {
+                    v.allow_plaintext = c.allow_plaintext;
+                    v.fragment = c.fragment.clone();
+                }
+                OutboundConfig::Vmess(v) if v.tls.is_some() => v.fragment = c.fragment.clone(),
+                OutboundConfig::Trusttunnel(t) if t.fragment.is_none() => {
+                    t.fragment = c.fragment.clone()
+                }
+                _ => {}
             }
             return Box::pin(build_outbound(&parsed, ctx)).await;
         }

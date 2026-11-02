@@ -887,8 +887,6 @@ dependencies = [
 [[package]]
 name = "h2"
 version = "0.4.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2615,6 +2613,7 @@ dependencies = [
  "blake2",
  "bytes",
  "chacha20poly1305",
+ "crc32fast",
  "etherparse",
  "flate2",
  "h2",
@@ -2644,6 +2643,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "shake",
  "socket2",
  "thiserror 2.0.21",
  "tokio",

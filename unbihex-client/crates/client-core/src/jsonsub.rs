@@ -336,10 +336,30 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
         "trojan" => Some(simple_link("trojan", str_of(&server, "password"), host, port, name)),
         "vmess" => {
             let net = str_of(&stream, "network");
+            let net = if net.is_empty() { "tcp" } else { net };
+            // WebSocket keeps the host in headers.Host on older configs.
+            let t = match net {
+                "ws" | "websocket" => stream.get("wsSettings").cloned().unwrap_or(Value::Null),
+                "httpupgrade" => stream.get("httpupgradeSettings").cloned().unwrap_or(Value::Null),
+                _ => Value::Null,
+            };
+            let ws_host = match str_of(&t, "host") {
+                "" => t.pointer("/headers/Host").and_then(Value::as_str).unwrap_or(""),
+                h => h,
+            };
+            let header = stream
+                .pointer("/tcpSettings/header/type")
+                .or_else(|| stream.pointer("/rawSettings/header/type"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let tls = stream.get("tlsSettings").cloned().unwrap_or(Value::Null);
             let j = json!({
                 "v": "2", "ps": name, "add": host, "port": port.to_string(),
-                "id": str_of(&user, "id"), "net": if net.is_empty() { "tcp" } else { net },
-                "tls": str_of(&stream, "security"),
+                "id": str_of(&user, "id"), "scy": str_of(&user, "security"),
+                "net": net, "type": header, "host": ws_host, "path": str_of(&t, "path"),
+                "tls": str_of(&stream, "security"), "sni": str_of(&tls, "serverName"),
+                "alpn": join_alpn(tls.get("alpn")), "fp": str_of(&tls, "fingerprint"),
+                "allowInsecure": json_bool_flag(tls.get("allowInsecure")),
             });
             Some(format!(
                 "vmess://{}",
@@ -516,9 +536,22 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
         }
         "tuic" => Some(simple_link("tuic", str_of(ob, "uuid"), host, port, name)),
         "vmess" => {
+            let t = ob.get("transport").cloned().unwrap_or(Value::Null);
+            let ws_host = match str_of(&t, "host") {
+                "" => t.pointer("/headers/Host").and_then(Value::as_str).unwrap_or(""),
+                h => h,
+            };
+            let fp = tls
+                .get("utls")
+                .map(|u| str_of(u, "fingerprint").to_string())
+                .unwrap_or_default();
             let j = json!({ "v": "2", "ps": name, "add": host, "port": port.to_string(),
-                "id": str_of(ob, "uuid"), "net": if network.is_empty() { "tcp" } else { &network },
-                "tls": if tls_on { "tls" } else { "" } });
+                "id": str_of(ob, "uuid"), "scy": str_of(ob, "security"),
+                "net": if network.is_empty() { "tcp" } else { &network },
+                "host": ws_host, "path": str_of(&t, "path"),
+                "tls": if tls_on { "tls" } else { "" }, "sni": str_of(&tls, "server_name"),
+                "alpn": join_alpn(tls.get("alpn")), "fp": fp,
+                "allowInsecure": json_bool_flag(tls.get("insecure")) });
             Some(format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(j.to_string())))
         }
         _ => None,
@@ -528,6 +561,10 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
 /// Share links from a JSON subscription; `None` when the JSON is not a known format.
 pub fn links_from_json(body: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(body).ok()?;
+    // A TrustTunnel endpoint's subscription: one server, not an Xray/sing-box config.
+    if v.get("hostname").is_some() && v.get("username").is_some() && v.get("outbounds").is_none() {
+        return unbihex_engine::link::tt_link_from_json(&v).ok().map(|l| vec![l]);
+    }
     let mut out = Vec::new();
     match &v {
         Value::Array(configs) => {
@@ -552,6 +589,7 @@ pub fn links_from_json(body: &str) -> Option<Vec<String>> {
 mod tests {
     use super::*;
     use crate::links::parse_server;
+    use unbihex_engine::config::OutboundConfig;
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 
@@ -806,5 +844,43 @@ mod tests {
         assert!(a.is_supported(), "{:?}", a.unsupported);
         assert!(parse_server(&links[1]).unwrap().is_supported());
         assert!(links_from_json("{\"log\":{}}").is_none());
+    }
+
+    #[test]
+    fn vmess_from_xray_and_sing_box() {
+        let xray = format!(
+            r#"{{"outbounds":[{{"tag":"proxy","protocol":"vmess","settings":{{"vnext":[{{"address":"vm.example","port":443,
+                "users":[{{"id":"{UUID}","security":"aes-128-gcm","alterId":0}}]}}]}},
+                "streamSettings":{{"network":"ws","security":"tls","wsSettings":{{"path":"/ws","headers":{{"Host":"cdn.example"}}}},
+                "tlsSettings":{{"serverName":"cdn.example","fingerprint":"chrome"}}}}}}]}}"#
+        );
+        let sing_box = format!(
+            r#"{{"outbounds":[{{"type":"vmess","tag":"v","server":"1.2.3.4","server_port":8080,"uuid":"{UUID}",
+                "security":"auto","transport":{{"type":"httpupgrade","path":"/up","host":"h.example"}}}}]}}"#
+        );
+        for (body, transport) in [(xray, "ws+tls"), (sing_box, "httpupgrade")] {
+            let links = links_from_json(&body).unwrap();
+            let s = parse_server(&links[0]).unwrap();
+            assert_eq!(s.transport, transport);
+            assert!(s.is_supported(), "{:?}", s.unsupported);
+            let OutboundConfig::Vmess(v) = unbihex_engine::link::parse_link(&links[0], "proxy").unwrap() else {
+                panic!("not vmess");
+            };
+            let ws = v.ws.unwrap();
+            assert!(ws.path == "/ws" || ws.path == "/up");
+            assert!(ws.host.as_deref() == Some("cdn.example") || ws.host.as_deref() == Some("h.example"));
+        }
+    }
+
+    #[test]
+    fn trusttunnel_subscription_json() {
+        let body = r#"{"version":1,"hostname":"vpn.example","address":"203.0.113.1:443","username":"u",
+            "password":"p","has_ipv6":true,"upstream_protocol":"http2","anti_dpi":false,
+            "skip_verification":false,"name":"Acme VPN"}"#;
+        let links = links_from_json(body).unwrap();
+        assert_eq!(links.len(), 1);
+        let s = parse_server(&links[0]).unwrap();
+        assert_eq!((s.protocol.as_str(), s.name.as_str()), ("trusttunnel", "Acme VPN"));
+        assert!(s.is_supported(), "{:?}", s.unsupported);
     }
 }

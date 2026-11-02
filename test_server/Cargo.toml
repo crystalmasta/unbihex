@@ -47,3 +47,4 @@ expect_used = "warn"
 [patch.crates-io]
 rustls = { path = "../unbihex-engine/vendor/rustls" }
 ipstack = { path = "../unbihex-engine/vendor/ipstack" }
+h2 = { path = "../unbihex-engine/vendor/h2" }

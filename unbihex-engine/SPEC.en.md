@@ -70,9 +70,10 @@ same `[patch.crates-io]` for `vendor/rustls` and `vendor/ipstack`.
 - DNS: `hickory-proto`.
 - TLS: `rustls` 0.23 (patched) / `tokio-rustls` **with the `ring` provider**, without `aws-lc-rs` (it needs cmake and
   nasm); `webpki-roots`; `ml-kem` + `x25519-dalek` (X25519MLKEM768), `hmac`, `sha2`.
-- HTTP: `h2`, `http` (XHTTP).
+- HTTP: `h2` (patched, TrustTunnel), `http` (XHTTP, TrustTunnel); our own WebSocket (§11.10), `sha1` for its key.
 - QUIC (Hysteria 2): `quinn` (runtime-tokio, rustls-ring), `h3`, `h3-quinn`; Salamander: `blake2`.
-- Shadowsocks cryptography: `aes-gcm`, `chacha20poly1305`, `hkdf`, `sha1`, `md-5`.
+- Shadowsocks and VMess cryptography: `aes-gcm` (and its `aes`), `chacha20poly1305`, `hkdf`, `sha1`, `md-5`; VMess
+  also `shake` (SHAKE128) and `crc32fast`.
 - Platform: `libc` (unix), `windows-sys` (Windows, `IP_UNICAST_IF`).
 
 ### 2.2 Code rules
@@ -243,7 +244,8 @@ the ipv4 subnet** (`10.199.233.2` for a `/30`).
 ### 5.4 Share links (`type: "link"`)
 
 The `{"type": "link", "tag", "url", "allow_plaintext"?, "fragment"?}` outbound parses the link when the outbound is
-built; `allow_plaintext` and `fragment` are carried into VLESS. Parsing (`link.rs`): all parameters are
+built; `allow_plaintext` and `fragment` are carried into VLESS, `fragment` also into VMess with TLS and TrustTunnel
+without `anti_dpi`. Parsing (`link.rs`): all parameters are
 percent-decoded, the host may be IPv6 in brackets.
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:
@@ -251,7 +253,8 @@ percent-decoded, the host may be IPv6 in brackets.
     REALITY takes `pbk` / `publicKey`, `sid` / `shortId`;
   - `type=tcp|raw` (or none), or `type=xhttp|splithttp` with `path`, `host`, `mode`, `extra` (Xray settings JSON, §11.5);
   - `flow=xtls-rprx-vision` (`-udp443` too);
-  - other `type` values (`ws`, `grpc`, …), `flow`, `encryption`, `headerType` and `security` values give a clear
+  - other `type` values (`ws`, `grpc`, …; only VMess has WebSocket so far), `flow`, `encryption`, `headerType` and
+    `security` values give a clear
     `Unsupported("...")` error.
 - `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002) and the legacy
   `ss://<base64(method:password@host:port)>#name`; base64 with or without padding. Plugins (`?plugin=`) are an error.
@@ -262,6 +265,17 @@ percent-decoded, the host may be IPv6 in brackets.
   (`mport`, `ports`, `hopInterval`), `ech`, `ca`, other obfs. Skipped: `fp` (a TCP/uTLS hint; there is no browser QUIC
   fingerprint), bandwidth (`up`, `down`, `upmbps`, `downmbps` ask for Brutal, which is absent) and other unknown
   parameters.
+- `vmess://` (§11.9): v2rayN base64 JSON (`add`, `port`, `id`, `scy`, `net`, `type`, `host`, `path`, `tls`, `sni`,
+  `alpn`, `fp`) or the URL form `vmess://<uuid>@<host>:<port>?type=…&security=…&encryption=…#<name>`. `net`/`type`:
+  `tcp`/`raw` without header camouflage, `ws`, `httpupgrade` (§11.10); `host` is the first of a comma list; without
+  `sni` the TLS name comes from `host`, then the server (as in v2rayN). Refused: other transports (`grpc`, `h2`,
+  `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, `allowInsecure=1`, the `none`/`zero`
+  ciphers.
+- `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, versions 0–2, §11.11): `hostname`, `addresses` (port 443 by
+  default), `custom_sni`, `has_ipv6`, user and password, `certificate` (a DER chain), `anti_dpi` → `fragment`, `name`.
+  Refused: a version above 2, `skip_verification`, HTTP/3, `client_random_prefix` / `client_random_auth_key`, a
+  subscription-only link. `dns_upstreams` and `subscription_url` are ignored. The client turns an endpoint's
+  subscription JSON (`hostname`, `address`, …, the certificate in PEM) into such a link (`link::tt_link_from_json`).
 
 ---
 
@@ -368,7 +382,7 @@ impl Dispatcher {
      internet"), `local`, `lan`, `localdomain`, `home.arpa`, `internal`, `localhost`. An empty list disables the
      exclusions.
   3. A → a fake IP, TTL = `dns.ttl`, NOERROR, also for names leading to `direct`: direct resolves the real address
-     itself (§11.10).
+     itself (§11.13).
   4. AAAA, HTTPS, SVCB (28/65/64) → NOERROR with no answers: no IPv6 and no ECH/IP hints that bypass the fake IPs.
   5. Other types (MX, TXT, PTR …) and single-label names are forwarded to the upstream as a UDP session through the
      Dispatcher (the inbound is the TUN tag): with a proxy as `final` the query goes through the proxy, not in the
@@ -666,18 +680,91 @@ Public specification: https://shadowsocks.org/doc/aead.html
 - A password shorter than 16 characters gives a warning: a key from EVP_BytesToKey(MD5) can be brute-forced offline
   from recorded traffic.
 
-### 11.9 SOCKS5 client
+### 11.9 VMess
+
+What Xray's client sends, byte for byte (Xray sources `proxy/vmess/{aead,encoding}`, `common/crypto/auth.go`):
+
+```json
+{ "type": "vmess", "tag": "vm", "server": "vm.example", "port": 443, "uuid": "…", "security": "auto",
+  "tls": { "sni": "cdn.example" }, "ws": { "path": "/ws", "host": "cdn.example" } }
+```
+
+- The AEAD header only (alterId 0; `aid` in links is ignored, as Xray does). `security`: `auto` (AES-128-GCM on
+  x86-64 and ARM64, otherwise ChaCha20-Poly1305, as Xray picks), `aes-128-gcm`, `chacha20-poly1305`; `none` and
+  `zero` (unauthenticated bodies) are `Unsupported`, today's Xray client cannot send them either.
+- **Request:** `auth_id(16) | sealed len(2+16) | nonce(8) | sealed header(+16)`. The user key is
+  `MD5(uuid ‖ "c48619fe-8f02-49e0-b9e9-edf763e17e21")`; `auth_id` = AES-128(KDF(key, "AES Auth ID Encryption"),
+  time(8) ‖ random(4) ‖ CRC32); the length and the header use AES-128-GCM with keys and nonces from the KDF (salts
+  `VMess Header AEAD Key[_Length]` / `Nonce[_Length]`, path `auth_id`, `nonce`), AAD = `auth_id`. The KDF is nested
+  HMACs: an outer layer per path element over HMAC-SHA256 keyed with `VMess AEAD KDF`.
+- **Header:** `1 | iv(16) | key(16) | v | options | pad<<4|security | 0 | cmd | port | atyp | addr | random(pad) |
+  FNV-1a32`; options = `ChunkStream | ChunkMasking | GlobalPadding` (0x0D), atyp 1/2/3 = IPv4/domain/IPv6, cmd 1 = TCP,
+  2 = UDP.
+- **Body:** chunks `len(2) ^ mask | sealed data | random padding`; SHAKE128(iv) gives each chunk first its padding
+  length (`% 64`), then its length mask. The nonce is a 16-bit chunk counter over the iv; past 65,536 chunks it wraps,
+  as in Xray (closing instead would cut every flow longer than ~500 MB). Up to 8110 data bytes per chunk; a chunk
+  without data ends the stream and goes out on `shutdown`. The ChaCha key is `MD5(key) ‖ MD5(MD5(key))`.
+- **Response:** `sealed len(2+16) | sealed (v | options | cmd | cmd_len | cmd)(+16)` under keys from
+  `SHA-256(key)[..16]` / `SHA-256(iv)[..16]` (salts `AEAD Resp Header [Len] Key/IV`), then chunks the same way. A wrong
+  `v` is an error; a command (Xray's dynamic port) is ignored.
+- The header goes out with the first data, or alone after 5 ms when the client waits for the server (as VLESS). UDP:
+  one datagram per chunk (1–8110 bytes), no Mux/XUDP.
+- Transports: TCP, TLS (§11.2, fragmentation §11.6), WebSocket and HTTPUpgrade (§11.10), also over TLS.
+
+### 11.10 WebSocket and HTTPUpgrade
+
+`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false}` (on VMess). The client side of RFC 6455 over TCP or
+TLS: `GET <path>` with `Host` (from `host`, else the TLS SNI, else the server, as Xray does), today's Chrome
+User-Agent, `Upgrade: websocket`, a random `Sec-WebSocket-Key`; only a `101` with `Upgrade: websocket` and the right
+`Sec-WebSocket-Accept` is accepted. Data travels in masked binary frames (up to 16 KiB); frames up to 1 MiB are
+accepted; a ping gets a pong, a close gets a close back and ends the stream; text frames and extensions are errors.
+`?ed=` (Xray's early data in the handshake) is dropped from the path; early data is not used. With
+`httpupgrade: true` the stream carries data as is after the `101`, without frames (Xray's HTTPUpgrade transport).
+With TLS the ALPN is always `http/1.1`.
+
+### 11.11 TrustTunnel
+
+Public specification: https://github.com/TrustTunnel/TrustTunnel/blob/master/PROTOCOL.md (HTTP/2).
+
+```json
+{ "type": "trusttunnel", "tag": "tt", "addresses": ["203.0.113.1:443"], "hostname": "vpn.example",
+  "sni": null, "username": "u", "password": "p", "certificates": [], "has_ipv6": true, "fragment": null }
+```
+
+- One TLS connection (ALPN `h2`, otherwise an error) carries all flows of the outbound. `hostname` is the name the
+  certificate is checked against, and the SNI; `sni` sends another name while the check stays on `hostname`.
+  `certificates` (base64 DER): trust only these instead of the public roots (an endpoint's self-signed certificate).
+  Verification cannot be turned off. `addresses` are tried in order; `fragment` splits the ClientHello (§11.6, the
+  official client's "anti-DPI").
+- **TCP:** HTTP/2 `CONNECT host:port` (`[v6]:port`) with `proxy-authorization: Basic base64(user:password)` and
+  `user-agent: <OS> unbihex`; `200` makes the stream a byte stream, `END_STREAM` ends it; `407` means wrong
+  credentials: the connection is dropped and nothing is retried; another status is a refusal. No answer in 30 s marks
+  the connection dead.
+- **UDP:** one `CONNECT _udp2` stream for all UDP flows. Client → endpoint: `len(4) | src(16) | sport(2) | dst(16) |
+  dport(2) | 0 | data` (IPv4 padded with 12 zero bytes, no app name); back without the name byte. Each flow gets its
+  own made-up source address; a reply is delivered only if it came from the flow's destination. Frames carry IPs only:
+  UDP to a domain is `Unsupported` (resolving the name outside the tunnel would leak it). Each flow queues 32 datagrams.
+- `has_ipv6: false`: IPv6 destinations are refused, so apps fall back to IPv4.
+- Connection: 2 MiB stream and 16 MiB connection windows. A connection idle for 30 s is checked with an HTTP/2 PING
+  (5 s) before it gets a new flow; without an answer a new one is opened. A connection that fails while opening a
+  flow gets one retry on a new connection.
+- The official endpoint sends an empty DATA frame each time its window to us runs dry; h2 drops the connection after
+  100 such frames over its whole life. In `vendor/h2` (our patch, `UNBIHEX-PATCH.md`) every 16 KiB of received data
+  gives back one unit of that limit (no more than 100 in a row still); only TrustTunnel turns it on.
+- Not implemented: HTTP/3, `client_random_prefix` / `client_random_auth_key`, ICMP (`_icmp`), the `_check` probe.
+
+### 11.12 SOCKS5 client
 
 RFC 1928/1929: CONNECT, optional username and password. Domains are sent as ATYP 3, without a local lookup.
 `connect_udp` → `Error::Unsupported` (DNS through such an outbound goes over TCP, §8.2).
 
-### 11.10 Direct
+### 11.13 Direct
 
 - TCP: the domain is resolved (§8.3) and checked by the Dispatcher (§6.1); addresses are tried in turn with a 5 s
   timeout each. UDP: `udp_bind` and `connect` to the destination. Sockets come only from the SocketFactory.
 - A fake-IP destination without a mapping is an error (loop protection).
 
-### 11.11 Block
+### 11.14 Block
 
 `connect_tcp` and `connect_udp` return `Error::Blocked` at once; the incoming connection is closed (TCP RST when the
 stack allows it). Names a domain rule blocks are not resolved by the TUN DNS server (§8.2).
@@ -749,7 +836,8 @@ routes `0.0.0.0/0` and `::/0`, DNS `10.199.233.2`, the MTU and an exclusion of t
 ## 14. Security and robustness
 
 - Every length from the network is checked before allocating: domain ≤ 255, SS chunk ≤ 0x3FFF, VLESS UDP ≤ 65,535,
-  HTTP headers ≤ 16 KB, Hysteria 2 address ≤ 2048, Hysteria 2 message and padding ≤ 2048 / 4096.
+  HTTP headers ≤ 16 KB, Hysteria 2 address ≤ 2048, Hysteria 2 message and padding ≤ 2048 / 4096, WebSocket frame
+  ≤ 1 MiB, VMess response header ≤ 259, TrustTunnel UDP frame ≤ 65,571.
 - Every handshake read runs under the `handshake_timeout_secs` timeout.
 - No `unwrap()` on network data; panics only for program invariants. `unsafe` only as in §2.2.
 - Secrets (uuid, passwords, keys, links) never reach the logs: `Secret` and config `Debug` show `***`.
@@ -769,7 +857,11 @@ Running: `cargo test`, `cargo test --features server`, `cargo clippy --all-targe
   HTTPS, FORMERR, NXDOMAIN for blocked names, forwarding through the Dispatcher), the DNS client (server race,
   resends), VLESS and SOCKS5 headers, Shadowsocks (KDF and encryption), Vision, XUDP, REALITY, the Chrome fingerprint,
   X25519MLKEM768, fragmentation, XHTTP (request builder, padding, metadata), Hysteria 2 (varints, frames, UDP
-  reassembly, Salamander), the TUN (sniffing, windows, the stack), the SocketFactory.
+  reassembly, Salamander), VMess (the user key against v2ray's vector, the KDF, the header layout, masked and padded
+  chunks, counter wrap, stream and UDP against our own server), WebSocket / HTTPUpgrade, TrustTunnel (UDP frames, the
+  multiplexer, a stream through real TLS + HTTP/2 with the endpoint's own certificate and another SNI, 407, a
+  certificate for another name, empty DATA frames with and without the h2 patch), `vmess://` and `tt://` links, the
+  TUN (sniffing, windows, the stack), the SocketFactory.
 - **Integration** (`tests/integration.rs`, all on `127.0.0.1` without internet access): SOCKS → direct → echo; HTTP
   CONNECT and a plain request; keep-alive cannot reach another host; SOCKS → VLESS without TLS (TCP and UDP) and with
   TLS; Shadowsocks with all methods (TCP and UDP); a block rule; the `link` outbound and SOCKS authentication; IP rules
@@ -777,7 +869,8 @@ Running: `cargo test`, `cargo test --features server`, `cargo clippy --all-targe
   the mixed inbound; a missing `default_interface`.
 - **Against real servers** when `XRAY_BIN` / `HYSTERIA_BIN` are set (otherwise the tests return at once):
   `xray_interop.rs` — Vision and REALITY, XHTTP in all modes, the XHTTP CDN format (GET packet-up, tokenish, custom
-  session IDs) over HTTP/2+TLS, HTTP/1.1+TLS and HTTP/1.1 without TLS; `hysteria2_interop.rs` — Hysteria 2 (the
+  session IDs) over HTTP/2+TLS, HTTP/1.1+TLS and HTTP/1.1 without TLS, VMess with both ciphers over TCP, WebSocket and HTTPUpgrade with and without
+  TLS (TCP and UDP); `hysteria2_interop.rs` — Hysteria 2 (the
   official server and Xray) with and without Salamander: parallel TCP and UDP, fragments, refusals for a wrong auth /
   root / SNI / pin and for a failed protect.
 - The test server: §16.3.
