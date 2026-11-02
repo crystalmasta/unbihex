@@ -603,6 +603,15 @@ impl XhttpConfig {
     /// link). Fields the engine does not implement are refused unless they hold
     /// their default value: they change how the traffic looks on the wire.
     pub fn from_xray(v: &Value) -> Result<XhttpConfig> {
+        let cfg = XhttpConfig::from_xray_fields(v)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Parses the camelCase fields without validating them: `extra` replaces
+    /// the outer settings, and mode-dependent checks have to see the merged
+    /// result rather than the inner object's default mode.
+    fn from_xray_fields(v: &Value) -> Result<XhttpConfig> {
         let obj = v
             .as_object()
             .ok_or_else(|| Error::config("xhttp settings must be an object"))?;
@@ -610,7 +619,7 @@ impl XhttpConfig {
         let has_extra = obj.get("extra").is_some_and(|e| !e.is_null());
         if let Some(extra) = obj.get("extra").filter(|e| !e.is_null()) {
             // Like Xray: `extra` replaces everything but host, path and mode.
-            cfg = XhttpConfig::from_xray(extra)?;
+            cfg = XhttpConfig::from_xray_fields(extra)?;
         }
         let s = |k: &str| -> Result<Option<String>> {
             match obj.get(k) {
@@ -695,7 +704,6 @@ impl XhttpConfig {
                 }
             }
         }
-        cfg.validate()?;
         Ok(cfg)
     }
 }
@@ -800,6 +808,27 @@ mod tests {
         assert_eq!(c.normalized_path(), "/media/segment.ts/");
         assert_eq!(c.query(), "quality=hd");
         assert_eq!(c.padding(), Range { from: 4, to: 10 });
+    }
+
+    #[test]
+    fn extra_inherits_the_outer_mode() {
+        // Panels put the placement inside `extra` and the mode outside it; the
+        // mode-dependent check has to see the merged result, not the default
+        // mode of the inner object.
+        let c = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up",
+            "extra": { "uplinkDataPlacement": "header", "uplinkDataKey": "X-Uplink" }
+        }))
+        .unwrap();
+        assert_eq!(c.mode, XhttpMode::PacketUp);
+        assert_eq!(c.uplink_data_placement, "header");
+        assert!(
+            XhttpConfig::from_xray(&serde_json::json!({
+                "mode": "stream-up",
+                "extra": { "uplinkDataPlacement": "header" }
+            }))
+            .is_err()
+        );
     }
 
     #[test]

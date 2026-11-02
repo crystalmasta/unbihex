@@ -548,6 +548,79 @@ async fn xhttp_cdn_obfuscation_against_xray() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Uplink packets in request headers and in cookies, the way a CDN profile
+/// sends them. The placement lives in `extra` while the mode sits outside it,
+/// which is the shape panels export.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn xhttp_uplink_placement_against_xray() {
+    let Some(bin) = xray_bin() else {
+        eprintln!("XRAY_BIN is not set: skipping the Xray interop test");
+        return;
+    };
+    init_tracing();
+    let outer = cert("uplink.test");
+    let echo = tcp_echo().await;
+    let uecho = udp_echo().await;
+    let dir = std::env::temp_dir().join(format!("unbihex-uplink-pem-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("cert.pem"), &outer.cert_pem).unwrap();
+    std::fs::write(dir.join("key.pem"), &outer.key_pem).unwrap();
+    let id = *uuid::Uuid::parse_str(UUID).unwrap().as_bytes();
+    let sockets = Arc::new(SocketFactory::default());
+
+    for placement in ["header", "cookie"] {
+        let port = free_port();
+        let xs = serde_json::json!({
+            "path": "/up", "mode": "packet-up",
+            "uplinkDataPlacement": placement,
+            "scMaxEachPostBytes": "2000-4000"
+        });
+        let config = serde_json::json!({
+            "log": { "loglevel": "warning" },
+            "inbounds": [{
+                "listen": "127.0.0.1", "port": port, "protocol": "vless",
+                "settings": { "clients": [{ "id": UUID }], "decryption": "none" },
+                "streamSettings": {
+                    "network": "xhttp", "xhttpSettings": xs, "security": "tls",
+                    "tlsSettings": { "alpn": ["h2"], "certificates": [{
+                        "certificateFile": dir.join("cert.pem"),
+                        "keyFile": dir.join("key.pem")
+                    }]}
+                }
+            }],
+            "outbounds": [loopback_freedom()]
+        });
+        let _xray = start_xray(&bin, config).await;
+        let tc = unbihex_engine::config::TlsConfig {
+            enabled: true,
+            sni: Some("uplink.test".into()),
+            alpn: vec!["h2".into()],
+            pinned_sha256: Vec::new(),
+            fingerprint: Some("none".into()),
+        };
+        let tls =
+            TlsClient::with_extra_roots(&tc, "uplink.test", vec![outer.cert_der.clone()]).unwrap();
+        let cfg = XhttpConfig::from_xray(&xs).unwrap();
+        let x = XhttpClient::new(
+            &cfg,
+            endpoint(port),
+            sockets.clone(),
+            Some(tls),
+            &["h2".to_string()],
+            Some("uplink.test"),
+            None,
+            None,
+        )
+        .unwrap();
+        let ob = VlessOutbound::from_parts("uplink", id, endpoint(port), None, sockets.clone())
+            .with_xhttp(Some(Arc::new(x)));
+        eprintln!("xhttp uplink placement: {placement}");
+        plain_roundtrip(&ob, echo).await;
+        udp_roundtrip(&ob, uecho).await;
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn xhttp_against_xray() {
     let Some(bin) = xray_bin() else {
