@@ -138,3 +138,13 @@ Cancellation-fix verification:
   2.48 s, including shared multi-flow UDP and 65000-byte datagrams. IPv6 still
   explicitly unverified because the test host lacks IPv6 loopback.
 - `git diff --check`: passed.
+
+## Independent review and parent replay
+
+Independent full-diff review of `961518c` found the UDP cancellation defect above;
+targeted review of `f832eb5` closed it with no remaining Critical/Important finding.
+The reviewer independently ran the actual UdpMux/UdpFlow cancellation regression.
+The h2 opt-in source diff, connection-wide accounting and retained MIT license were
+also checked. Parent repeated the cancellation regression, official 3 x 64 MiB TCP
++ UDP/auth/TLS suite (passed in 2.27 s), and public tt/JSON import/reopen/connect
+flow after the correction. No physical-device, real IPv6 or production claim added.
