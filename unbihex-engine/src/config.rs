@@ -577,6 +577,15 @@ impl VlessConfig {
             r.public_key_bytes()?;
             r.short_id_bytes()?;
         }
+        for fp in [
+            self.tls.as_ref().and_then(|t| t.fingerprint.as_deref()),
+            self.reality.as_ref().and_then(|r| r.fingerprint.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            crate::outbound::fingerprint::Fingerprint::from_name(Some(fp))?;
+        }
         Ok(())
     }
 

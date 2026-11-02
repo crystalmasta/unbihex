@@ -278,13 +278,22 @@ fn provider(fingerprint: Option<Fingerprint>) -> CryptoProvider {
     let mut p = match fingerprint {
         Some(fp) => {
             let mut p = fp.provider();
-            // Chrome's groups, with the key shares tied to our REALITY secret.
-            p.kx_groups = vec![
-                &HOOKED_HYBRID,
-                &HOOKED_X25519,
-                rustls::crypto::ring::kx_group::SECP256R1,
-                rustls::crypto::ring::kx_group::SECP384R1,
-            ];
+            // The browser's groups, with the key shares tied to our REALITY secret.
+            // Firefox sends X25519 alone on the first flight; Chrome starts with the
+            // hybrid (whose X25519 half is also sent separately).
+            p.kx_groups = match fp {
+                Fingerprint::Chrome => vec![
+                    &HOOKED_HYBRID,
+                    &HOOKED_X25519,
+                    rustls::crypto::ring::kx_group::SECP256R1,
+                    rustls::crypto::ring::kx_group::SECP384R1,
+                ],
+                Fingerprint::Firefox => vec![
+                    &HOOKED_X25519,
+                    rustls::crypto::ring::kx_group::SECP256R1,
+                    rustls::crypto::ring::kx_group::SECP384R1,
+                ],
+            };
             p
         }
         None => {
@@ -359,7 +368,7 @@ impl RealityClient {
             short_id: cfg.short_id_bytes()?,
             server_name,
             alpn,
-            fingerprint: Fingerprint::from_name(cfg.fingerprint.as_deref()),
+            fingerprint: Fingerprint::from_name(cfg.fingerprint.as_deref())?,
         })
     }
 

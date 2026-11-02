@@ -3,8 +3,9 @@
 //! rustls's ClientHello is easy to tell from a browser's (JA3/JA4: no GREASE, its own
 //! cipher, group and extension sets), and DPI can block by it. The patched rustls
 //! (`vendor/rustls`) hands us its encoded ClientHello before hashing and sending it; we
-//! rebuild it as Chrome's and keep everything rustls's state depends on: the random, the
-//! session id (REALITY's token), SNI, ALPN, key shares, a HelloRetryRequest cookie.
+//! rebuild it as Chrome's or Firefox's and keep everything rustls's state depends on: the
+//! random, the session id (REALITY's token), SNI, ALPN, key shares, a HelloRetryRequest
+//! cookie.
 //!
 //! Chrome 13x (BoringSSL): GREASE cipher, group, version and extension values; its cipher
 //! suites, including TLS 1.2 CBC ones (servers we talk to never pick them; one that did
@@ -14,8 +15,14 @@
 //! the classical eight (rustls verifies only those, and servers with ML-DSA certificates
 //! are not ones we talk to). JA4: `t13d1516h2_8daaf6152771_806a8c22fdea`, as Chromium 152.
 //!
-//! The per-connection randomness is derived from the ClientHello random, so a retried
-//! hello and REALITY's second pass rebuild the same bytes.
+//! Firefox 120+ (NSS): no GREASE; its cipher suites, groups and extensions in NSS's order;
+//! an X25519-only key share; delegated_credentials and record_size_limit. The lists below
+//! follow the maintained Firefox 120 preset in refraction-networking/utls (`u_parrots.go`,
+//! `HelloFirefox_120`), which mirrors NSS's `security/manager/ssl` preferences.
+//!
+//! The Chrome per-connection randomness is derived from the ClientHello random, so a
+//! retried hello and REALITY's second pass rebuild the same bytes. Firefox's shape is
+//! fixed and therefore deterministic already.
 
 use std::sync::Arc;
 
@@ -24,50 +31,62 @@ use rustls::crypto::{CryptoProvider, SupportedKxGroup};
 use sha2::{Digest, Sha256};
 
 use super::pq::X25519_MLKEM768;
+use crate::error::{Error, Result};
 
 /// A browser whose ClientHello we send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fingerprint {
     /// Chrome (also Edge and other Chromium browsers).
     Chrome,
+    /// Desktop Firefox 120+.
+    Firefox,
 }
 
 impl Fingerprint {
-    /// From the `fp` value of a link or config. Every browser name maps to Chrome until
-    /// more templates exist; `none` keeps rustls's own ClientHello.
-    pub fn from_name(name: Option<&str>) -> Option<Fingerprint> {
+    /// From the `fp` value of a link or config. An absent value keeps the historical
+    /// default (Chrome); `none` and `rustls` keep rustls's own ClientHello; any other
+    /// unknown name is an error rather than a silent Chrome substitution.
+    pub fn from_name(name: Option<&str>) -> Result<Option<Fingerprint>> {
         match name.map(|n| n.trim().to_ascii_lowercase()).as_deref() {
-            Some("none") | Some("rustls") => None,
-            _ => Some(Fingerprint::Chrome),
+            None | Some("chrome") | Some("chromium") | Some("edge") => {
+                Ok(Some(Fingerprint::Chrome))
+            }
+            Some("firefox") | Some("ff") | Some("firefox_120") => Ok(Some(Fingerprint::Firefox)),
+            Some("") | Some("none") | Some("rustls") => Ok(None),
+            Some(other) => Err(Error::Unsupported(format!("tls fingerprint {other:?}"))),
         }
     }
 
-    /// Key exchange groups in Chrome's order, for a provider whose ClientHello will be
-    /// rewritten: X25519MLKEM768 first (its X25519 half is also sent on its own), then the
-    /// classic curves a HelloRetryRequest may ask for.
+    /// Key exchange groups in the browser's order, for a provider whose ClientHello will
+    /// be rewritten. Chrome starts with X25519MLKEM768 (its X25519 half is also sent on its
+    /// own); Firefox starts with X25519 and shares only that one on the first flight.
     pub fn kx_groups(self) -> Vec<&'static dyn SupportedKxGroup> {
-        vec![
-            &X25519_MLKEM768,
-            rustls::crypto::ring::kx_group::X25519,
-            rustls::crypto::ring::kx_group::SECP256R1,
-            rustls::crypto::ring::kx_group::SECP384R1,
-        ]
+        use rustls::crypto::ring::kx_group::{SECP256R1, SECP384R1, X25519};
+        match self {
+            Fingerprint::Chrome => vec![&X25519_MLKEM768, X25519, SECP256R1, SECP384R1],
+            Fingerprint::Firefox => vec![X25519, SECP256R1, SECP384R1],
+        }
     }
 
-    /// The ring provider with Chrome's groups and cipher suite order.
+    /// The ring provider with the browser's groups and cipher suite order.
     pub fn provider(self) -> CryptoProvider {
         let mut p = rustls::crypto::ring::default_provider();
         p.kx_groups = self.kx_groups();
-        p.cipher_suites.sort_by_key(|s| {
-            let id = u16::from(s.suite());
-            CHROME_SUITES.iter().position(|&c| c == id).unwrap_or(usize::MAX)
-        });
+        let suites: &[u16] = match self {
+            Fingerprint::Chrome => &CHROME_SUITES,
+            Fingerprint::Firefox => &FIREFOX_SUITES,
+        };
+        p.cipher_suites
+            .sort_by_key(|s| suites.iter().position(|&c| c == u16::from(s.suite())).unwrap_or(usize::MAX));
         p
     }
 
     /// The rewriter to install as `ClientConfig::client_hello_rewriter`.
     pub fn rewriter(self) -> Arc<dyn ClientHelloRewriter> {
-        Arc::new(ChromeHello)
+        match self {
+            Fingerprint::Chrome => Arc::new(ChromeHello),
+            Fingerprint::Firefox => Arc::new(FirefoxHello),
+        }
     }
 }
 
@@ -81,6 +100,20 @@ const CHROME_SIGALGS: [u16; 11] = [
     0x0904, 0x0905, 0x0906, 0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
 ];
 
+/// Firefox 120 cipher suites, from `HelloFirefox_120` in utls (same as NSS).
+const FIREFOX_SUITES: [u16; 15] = [
+    0x1301, 0x1303, 0x1302, 0xc02b, 0xc02f, 0xcca9, 0xcca8, 0xc02c, 0xc030, 0xc013, 0xc014, 0x009c,
+    0x009d, 0x002f, 0x0035,
+];
+const FIREFOX_GROUPS: [u16; 6] = [0x001d, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101];
+/// Firefox 120 signature schemes: the ECDSA curves, then RSA-PSS, then the PKCS#1 and
+/// SHA-1 legacy tail.
+const FIREFOX_SIGALGS: [u16; 11] = [
+    0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601, 0x0203, 0x0201,
+];
+/// The schemes Firefox lists in delegated_credentials.
+const FIREFOX_DELEGATED_SIGALGS: [u16; 4] = [0x0403, 0x0503, 0x0603, 0x0203];
+
 const SERVER_NAME: u16 = 0;
 const STATUS_REQUEST: u16 = 5;
 const SUPPORTED_GROUPS: u16 = 10;
@@ -91,6 +124,8 @@ const SCT: u16 = 18;
 const PADDING: u16 = 21;
 const EXTENDED_MASTER_SECRET: u16 = 23;
 const COMPRESS_CERTIFICATE: u16 = 27;
+const RECORD_SIZE_LIMIT: u16 = 28;
+const DELEGATED_CREDENTIALS: u16 = 34;
 const SESSION_TICKET: u16 = 35;
 const PRE_SHARED_KEY: u16 = 41;
 const EARLY_DATA: u16 = 42;
@@ -109,6 +144,27 @@ impl ClientHelloRewriter for ChromeHello {
     fn rewrite(&self, hello: &[u8]) -> Option<RewrittenHello> {
         let parsed = ParsedHello::parse(hello)?;
         let message = chrome(&parsed)?;
+        let added_extensions = ParsedHello::parse(&message)?
+            .extensions
+            .iter()
+            .map(|(t, _)| *t)
+            .filter(|t| parsed.ext(*t).is_none())
+            .collect();
+        Some(RewrittenHello {
+            message,
+            added_extensions,
+        })
+    }
+}
+
+/// Rebuilds rustls's ClientHello as Firefox's.
+#[derive(Debug)]
+struct FirefoxHello;
+
+impl ClientHelloRewriter for FirefoxHello {
+    fn rewrite(&self, hello: &[u8]) -> Option<RewrittenHello> {
+        let parsed = ParsedHello::parse(hello)?;
+        let message = firefox(&parsed)?;
         let added_extensions = ParsedHello::parse(&message)?
             .extensions
             .iter()
@@ -410,6 +466,110 @@ fn chrome(h: &ParsedHello<'_>) -> Option<Vec<u8>> {
     Some(msg)
 }
 
+/// Firefox's ALPN extension data: h2, then http/1.1.
+fn firefox_alpn() -> Vec<u8> {
+    let mut protocols = Vec::new();
+    for p in [&b"h2"[..], &b"http/1.1"[..]] {
+        protocols.push(p.len() as u8);
+        protocols.extend_from_slice(p);
+    }
+    let mut ext = Vec::new();
+    put_vec16(&mut ext, &protocols);
+    ext
+}
+
+/// Firefox's key_share: the X25519 share alone on the first flight. A HelloRetryRequest
+/// can still select another advertised curve, so keep rustls's entries if X25519 is absent.
+fn firefox_key_share(rustls_ks: &[u8]) -> Option<Vec<u8>> {
+    let entries = Reader(rustls_ks).vec16()?;
+    let mut r = Reader(entries);
+    let mut list = Vec::new();
+    while !r.0.is_empty() {
+        let group = r.u16()?;
+        let data = r.vec16()?;
+        if group == 0x001d {
+            put_u16(&mut list, group);
+            put_vec16(&mut list, data);
+        }
+    }
+    if list.is_empty() {
+        return Some(rustls_ks.to_vec());
+    }
+    let mut out = Vec::new();
+    put_vec16(&mut out, &list);
+    Some(out)
+}
+
+fn firefox(h: &ParsedHello<'_>) -> Option<Vec<u8>> {
+    // PSK binders and early data are computed over rustls's own bytes.
+    if h.ext(PRE_SHARED_KEY).is_some() || h.ext(EARLY_DATA).is_some() {
+        return None;
+    }
+    let rustls_key_share = h.ext(KEY_SHARE)?;
+
+    // NSS extension order (HelloFirefox_120 in utls).
+    let mut exts: Vec<(u16, Vec<u8>)> = Vec::new();
+    if let Some(sni) = h.ext(SERVER_NAME) {
+        exts.push((SERVER_NAME, sni.to_vec()));
+    }
+    exts.push((EXTENDED_MASTER_SECRET, Vec::new()));
+    exts.push((RENEGOTIATION_INFO, vec![0]));
+    let mut groups = Vec::new();
+    put_vec16(&mut groups, &u16_list(&FIREFOX_GROUPS));
+    exts.push((SUPPORTED_GROUPS, groups));
+    exts.push((EC_POINT_FORMATS, vec![1, 0]));
+    exts.push((SESSION_TICKET, h.ext(SESSION_TICKET).unwrap_or(&[]).to_vec()));
+    exts.push((ALPN, h.ext(ALPN).map(<[u8]>::to_vec).unwrap_or_else(firefox_alpn)));
+    exts.push((STATUS_REQUEST, vec![1, 0, 0, 0, 0]));
+    let mut delegated = Vec::new();
+    put_vec16(
+        &mut delegated,
+        &u16_list(&FIREFOX_DELEGATED_SIGALGS),
+    );
+    exts.push((DELEGATED_CREDENTIALS, delegated));
+    let mut sigalgs = Vec::new();
+    put_vec16(&mut sigalgs, &u16_list(&FIREFOX_SIGALGS));
+    exts.push((SIGNATURE_ALGORITHMS, sigalgs));
+    exts.push((KEY_SHARE, firefox_key_share(rustls_key_share)?));
+    // Keep rustls's versions so a TLS 1.3-only caller does not advertise TLS 1.2.
+    exts.push((
+        SUPPORTED_VERSIONS,
+        h.ext(SUPPORTED_VERSIONS).unwrap_or(&[]).to_vec(),
+    ));
+    exts.push((PSK_KEY_EXCHANGE_MODES, vec![1, 1]));
+    exts.push((RECORD_SIZE_LIMIT, vec![0x40, 0x01]));
+    // rustls extensions Firefox has no slot for (a HelloRetryRequest cookie…) stay.
+    for (t, d) in &h.extensions {
+        if !exts.iter().any(|(m, _)| m == t) {
+            exts.push((*t, d.to_vec()));
+        }
+    }
+
+    let mut ext_bytes = Vec::new();
+    for (t, d) in &exts {
+        put_u16(&mut ext_bytes, *t);
+        put_vec16(&mut ext_bytes, d);
+    }
+    let mut body = vec![0x03, 0x03];
+    body.extend_from_slice(h.random);
+    body.push(h.session_id.len() as u8);
+    body.extend_from_slice(h.session_id);
+    put_vec16(&mut body, &u16_list(&FIREFOX_SUITES));
+    body.extend_from_slice(&[1, 0]);
+    put_vec16(&mut body, &ext_bytes);
+    let mut msg = vec![1];
+    msg.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    msg.extend_from_slice(&body);
+    // Every suite rustls offered is still offered, so the server cannot pick one rustls
+    // expects and we hid (the renegotiation SCSV is replaced by renegotiation_info).
+    debug_assert!(
+        h.cipher_suites
+            .iter()
+            .all(|c| FIREFOX_SUITES.contains(c) || *c == 0x00ff)
+    );
+    Some(msg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,15 +674,39 @@ mod tests {
     }
 
     #[test]
-    fn none_keeps_rustls_hello() {
-        assert_eq!(Fingerprint::from_name(Some("none")), None);
-        assert_eq!(Fingerprint::from_name(Some("firefox")), Some(Fingerprint::Chrome));
-        assert_eq!(Fingerprint::from_name(None), Some(Fingerprint::Chrome));
+    fn from_name_maps_names_and_rejects_unknown_ones() {
+        for name in ["none", "rustls"] {
+            assert_eq!(Fingerprint::from_name(Some(name)).unwrap(), None, "{name}");
+        }
+        for name in ["firefox", "ff", "firefox_120", "Firefox"] {
+            assert_eq!(
+                Fingerprint::from_name(Some(name)).unwrap(),
+                Some(Fingerprint::Firefox),
+                "{name}"
+            );
+        }
+        for name in ["chrome", "chromium", "edge", "CHROME"] {
+            assert_eq!(
+                Fingerprint::from_name(Some(name)).unwrap(),
+                Some(Fingerprint::Chrome),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            Fingerprint::from_name(None).unwrap(),
+            Some(Fingerprint::Chrome)
+        );
+        for name in ["safari", "firefox_999", "tor"] {
+            assert!(
+                matches!(Fingerprint::from_name(Some(name)), Err(Error::Unsupported(_))),
+                "{name}"
+            );
+        }
     }
 
-    /// A Chrome-fingerprinted client that accepts the in-memory test server's certificate
+    /// A browser-fingerprinted client that accepts the in-memory test server's certificate
     /// (signatures are still checked).
-    fn test_client() -> ClientConfig {
+    fn test_client(fp: Fingerprint) -> ClientConfig {
         #[derive(Debug)]
         struct AnyCert(rustls::crypto::WebPkiSupportedAlgorithms);
         impl rustls::client::danger::ServerCertVerifier for AnyCert {
@@ -556,7 +740,6 @@ mod tests {
                 self.0.supported_schemes()
             }
         }
-        let fp = Fingerprint::Chrome;
         let provider = fp.provider();
         let algs = provider.signature_verification_algorithms;
         let mut cfg = ClientConfig::builder_with_provider(Arc::new(provider))
@@ -571,9 +754,12 @@ mod tests {
         cfg
     }
 
-    /// Runs a Chrome-fingerprinted handshake against an in-memory rustls server with
+    /// Runs a browser-fingerprinted handshake against an in-memory rustls server with
     /// `server_groups`, sends data through it, and returns the group the server chose.
-    fn handshake(server_groups: Vec<&'static dyn SupportedKxGroup>) -> rustls::NamedGroup {
+    fn handshake(
+        fp: Fingerprint,
+        server_groups: Vec<&'static dyn SupportedKxGroup>,
+    ) -> rustls::NamedGroup {
         use std::io::{Read, Write};
         let cert = rcgen::generate_simple_self_signed(vec!["example.com".into()]).unwrap();
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
@@ -587,7 +773,7 @@ mod tests {
             .unwrap();
         server_cfg.alpn_protocols = vec![b"h2".to_vec()];
         let name = ServerName::try_from("example.com").unwrap();
-        let mut c = ClientConnection::new(Arc::new(test_client()), name).unwrap();
+        let mut c = ClientConnection::new(Arc::new(test_client(fp)), name).unwrap();
         let mut s = ServerConnection::new(Arc::new(server_cfg)).unwrap();
         for _ in 0..10 {
             let mut buf = Vec::new();
@@ -621,13 +807,105 @@ mod tests {
 
     #[test]
     fn handshake_with_the_chrome_hello() {
-        let group = handshake(vec![&X25519_MLKEM768, rustls::crypto::ring::kx_group::X25519]);
+        let group = handshake(
+            Fingerprint::Chrome,
+            vec![&X25519_MLKEM768, rustls::crypto::ring::kx_group::X25519],
+        );
         assert_eq!(group, rustls::NamedGroup::X25519MLKEM768);
         // A server without ML-KEM completes on the separate X25519 share, no retry.
-        let group = handshake(vec![rustls::crypto::ring::kx_group::X25519]);
+        let group = handshake(
+            Fingerprint::Chrome,
+            vec![rustls::crypto::ring::kx_group::X25519],
+        );
         assert_eq!(group, rustls::NamedGroup::X25519);
         // A server with P-256 only asks for it with a HelloRetryRequest.
-        let group = handshake(vec![rustls::crypto::ring::kx_group::SECP256R1]);
+        let group = handshake(
+            Fingerprint::Chrome,
+            vec![rustls::crypto::ring::kx_group::SECP256R1],
+        );
         assert_eq!(group, rustls::NamedGroup::secp256r1);
+    }
+
+    #[test]
+    fn firefox_hello_has_firefox_shape() {
+        let hello = first_hello(client_config(Fingerprint::Firefox, RootCertStore::empty()));
+        let h = ParsedHello::parse(&hello).unwrap();
+        assert_eq!(h.cipher_suites, FIREFOX_SUITES);
+        let order: Vec<u16> = h.extensions.iter().map(|(t, _)| *t).collect();
+        let expected = [
+            SERVER_NAME,
+            EXTENDED_MASTER_SECRET,
+            RENEGOTIATION_INFO,
+            SUPPORTED_GROUPS,
+            EC_POINT_FORMATS,
+            SESSION_TICKET,
+            ALPN,
+            STATUS_REQUEST,
+            DELEGATED_CREDENTIALS,
+            SIGNATURE_ALGORITHMS,
+            KEY_SHARE,
+            SUPPORTED_VERSIONS,
+            PSK_KEY_EXCHANGE_MODES,
+            RECORD_SIZE_LIMIT,
+        ];
+        assert_eq!(&order[..expected.len()], &expected);
+        // No GREASE value anywhere, in any list.
+        assert!(h.cipher_suites.iter().all(|v| !is_grease(*v)));
+        assert!(order.iter().all(|v| !is_grease(*v)));
+        let groups: Vec<u16> = Reader(Reader(h.ext(SUPPORTED_GROUPS).unwrap()).vec16().unwrap())
+            .0
+            .chunks(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(groups, FIREFOX_GROUPS);
+        let sigalgs: Vec<u16> =
+            Reader(Reader(h.ext(SIGNATURE_ALGORITHMS).unwrap()).vec16().unwrap())
+                .0
+                .chunks(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+        assert_eq!(sigalgs, FIREFOX_SIGALGS);
+        assert!(groups.iter().chain(&sigalgs).all(|v| !is_grease(*v)));
+        // An X25519-only key share, like Firefox's first flight.
+        let mut ks = Reader(Reader(h.ext(KEY_SHARE).unwrap()).vec16().unwrap());
+        assert_eq!(ks.u16().unwrap(), 0x001d);
+        assert_eq!(ks.vec16().unwrap().len(), 32);
+        assert!(ks.0.is_empty());
+        assert_eq!(h.ext(ALPN).unwrap().to_vec(), firefox_alpn());
+        assert_eq!(h.ext(RECORD_SIZE_LIMIT).unwrap().to_vec(), [0x40, 0x01]);
+
+        // The same rustls hello always becomes the same Firefox bytes.
+        let mut plain = client_config(Fingerprint::Firefox, RootCertStore::empty());
+        plain.client_hello_rewriter = None;
+        let rustls_hello = first_hello(plain);
+        let parsed = ParsedHello::parse(&rustls_hello).unwrap();
+        assert_eq!(firefox(&parsed), firefox(&parsed));
+        assert!(hello.len() > rustls_hello.len());
+    }
+
+    #[test]
+    fn handshake_with_the_firefox_hello() {
+        let group = handshake(
+            Fingerprint::Firefox,
+            vec![rustls::crypto::ring::kx_group::X25519],
+        );
+        assert_eq!(group, rustls::NamedGroup::X25519);
+        // The test server accepted our ALPN; handshake() asserts h2.
+    }
+
+    #[test]
+    fn firefox_and_chrome_hellos_differ_and_both_are_accepted() {
+        let chrome = first_hello(client_config(Fingerprint::Chrome, RootCertStore::empty()));
+        let firefox = first_hello(client_config(Fingerprint::Firefox, RootCertStore::empty()));
+        assert_ne!(chrome, firefox);
+        let x25519 = || vec![rustls::crypto::ring::kx_group::X25519];
+        assert_eq!(
+            handshake(Fingerprint::Chrome, x25519()),
+            rustls::NamedGroup::X25519
+        );
+        assert_eq!(
+            handshake(Fingerprint::Firefox, x25519()),
+            rustls::NamedGroup::X25519
+        );
     }
 }

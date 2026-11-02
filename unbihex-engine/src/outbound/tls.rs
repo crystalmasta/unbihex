@@ -68,7 +68,7 @@ impl TlsClient {
         default_sni: &str,
         extra_roots: Vec<CertificateDer<'static>>,
     ) -> Result<TlsClient> {
-        let fingerprint = Fingerprint::from_name(cfg.fingerprint.as_deref());
+        let fingerprint = Fingerprint::from_name(cfg.fingerprint.as_deref())?;
         let provider = Arc::new(match fingerprint {
             Some(fp) => fp.provider(),
             None => rustls::crypto::ring::default_provider(),
