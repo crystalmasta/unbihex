@@ -16,6 +16,12 @@ use parking_lot::Mutex;
 use super::config::{Range, XmuxConfig};
 use crate::error::Result;
 
+/// A pooled connection with no session for this long is closed, unless it is
+/// one of the `IDLE_KEEP` freshest: those keep the next session from paying a
+/// handshake.
+const IDLE_RETIRE: Duration = Duration::from_secs(120);
+const IDLE_KEEP: usize = 2;
+
 /// One HTTP/2 connection.
 pub struct PooledConn {
     send: SendRequest<Bytes>,
@@ -25,9 +31,29 @@ pub struct PooledConn {
     left_usage: AtomicI64,
     left_requests: AtomicI64,
     until: Option<Instant>,
+    /// When the last session on this connection ended.
+    idle_at: Mutex<Option<Instant>>,
+    /// Stops this connection's keep-alive task.
+    ping_stop: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for PooledConn {
+    fn drop(&mut self) {
+        if let Some(stop) = &self.ping_stop {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl PooledConn {
+    /// How long the connection has been without a session.
+    fn idle_for(&self, now: Instant) -> Option<Duration> {
+        if self.open.load(Ordering::Relaxed) > 0 {
+            return None;
+        }
+        self.idle_at.lock().map(|t| now.saturating_duration_since(t))
+    }
+
     fn usable(&self) -> bool {
         !self.closed.load(Ordering::Relaxed)
             && self.left_usage.load(Ordering::Relaxed) != 0
@@ -49,7 +75,9 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.0.open.fetch_sub(1, Ordering::Relaxed);
+        if self.0.open.fetch_sub(1, Ordering::Relaxed) == 1 {
+            *self.0.idle_at.lock() = Some(Instant::now());
+        }
     }
 }
 
@@ -76,9 +104,28 @@ impl H2Pool {
         }
     }
 
+    /// Closes the longest-idle connection once it has been quiet for a while,
+    /// never going below `IDLE_KEEP`.
+    fn retire_one(&self, conns: &mut Vec<Arc<PooledConn>>) {
+        if conns.len() <= IDLE_KEEP {
+            return;
+        }
+        let now = Instant::now();
+        let victim = conns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| c.idle_for(now).filter(|d| *d > IDLE_RETIRE).map(|d| (i, d)))
+            .max_by_key(|(_, d)| *d)
+            .map(|(i, _)| i);
+        if let Some(i) = victim {
+            conns.remove(i);
+        }
+    }
+
     fn take(&self) -> Option<Lease> {
         let mut conns = self.conns.lock();
         conns.retain(|c| c.usable());
+        self.retire_one(&mut conns);
         if conns.is_empty() {
             return None;
         }
@@ -104,6 +151,7 @@ impl H2Pool {
             .iter()
             .min_by_key(|c| c.open.load(Ordering::Relaxed))
             .map(|c| (*c).clone())?;
+        *c.idle_at.lock() = None;
         if c.left_usage.load(Ordering::Relaxed) > 0 {
             c.left_usage.fetch_sub(1, Ordering::Relaxed);
         }
@@ -115,12 +163,12 @@ impl H2Pool {
     pub async fn get<F, Fut>(&self, dial: F) -> Result<Lease>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(SendRequest<Bytes>, Arc<AtomicBool>)>>,
+        Fut: Future<Output = Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)>>,
     {
         if let Some(l) = self.take() {
             return Ok(l);
         }
-        let (send, closed) = dial().await?;
+        let (send, closed, ping_stop) = dial().await?;
         let reuse = pick(self.xmux.c_max_reuse_times);
         let requests = pick(self.xmux.h_max_request_times);
         let secs = pick(self.xmux.h_max_reusable_secs);
@@ -131,6 +179,8 @@ impl H2Pool {
             left_usage: AtomicI64::new(if reuse > 0 { i64::from(reuse) - 1 } else { -1 }),
             left_requests: AtomicI64::new(if requests > 0 { i64::from(requests) } else { i64::MAX }),
             until: (secs > 0).then(|| Instant::now() + Duration::from_secs(u64::from(secs))),
+            idle_at: Mutex::new(None),
+            ping_stop,
         });
         self.conns.lock().push(conn.clone());
         Ok(Lease(conn))
@@ -178,6 +228,8 @@ mod tests {
             left_usage: AtomicI64::new(-1),
             left_requests: AtomicI64::new(i64::MAX),
             until: None,
+            idle_at: Mutex::new(None),
+            ping_stop: None,
         })
     }
 
@@ -199,6 +251,33 @@ mod tests {
         let c = conn(1).await;
         pool.conns.lock().push(c);
         assert!(pool.take().is_none(), "a busy pool with room must dial");
+    }
+
+    /// A connection quiet for minutes is closed: it holds a socket and its
+    /// TCP state has decayed, so the next session is better off dialing.
+    #[tokio::test]
+    async fn retires_a_long_idle_connection() {
+        let pool = pool_at(8);
+        for age in [180u64, 170, 160, 0] {
+            let c = conn(0).await;
+            *c.idle_at.lock() = Instant::now().checked_sub(Duration::from_secs(age));
+            pool.conns.lock().push(c);
+        }
+        let _ = pool.take();
+        assert_eq!(pool.len(), 3, "the longest-idle connection is closed");
+    }
+
+    /// Two are always kept: the next session must not pay a handshake.
+    #[tokio::test]
+    async fn keeps_two_warm() {
+        let pool = pool_at(8);
+        for age in [180u64, 170] {
+            let c = conn(0).await;
+            *c.idle_at.lock() = Instant::now().checked_sub(Duration::from_secs(age));
+            pool.conns.lock().push(c);
+        }
+        let _ = pool.take();
+        assert_eq!(pool.len(), 2, "two idle connections stay warm");
     }
 
     /// At the cap a busy connection is shared rather than dialing past it.
