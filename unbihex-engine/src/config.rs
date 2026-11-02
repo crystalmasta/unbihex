@@ -618,8 +618,9 @@ pub struct TlsConfig {
     /// Hex SHA-256 of the leaf certificate (DER). Checked in addition to normal validation.
     #[serde(default)]
     pub pinned_sha256: Vec<String>,
-    /// Browser whose ClientHello is sent (`fp` of a link): Chrome by default and for every
-    /// browser name until more templates exist; `none` sends rustls's own ClientHello.
+    /// Browser whose ClientHello is sent (`fp` of a link): `chrome`, `firefox`, `safari`,
+    /// `ios`, `android`, `edge`, `360`, `qq`, `random` or `randomized`; `none` sends
+    /// rustls's own ClientHello.
     #[serde(default)]
     pub fingerprint: Option<String>,
 }

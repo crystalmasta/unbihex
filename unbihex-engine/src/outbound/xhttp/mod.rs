@@ -1174,4 +1174,60 @@ mod tests {
             "keep=1"
         );
     }
+
+    /// What a real server sees on h2: `ja4` and the Akamai fingerprint, which
+    /// carries the SETTINGS we send. Run with
+    /// `FP_PROBE=firefox FP_HOST=tls.browserleaks.com cargo test -- --ignored external_h2_probe --nocapture`.
+    #[tokio::test]
+    #[ignore = "needs network"]
+    async fn external_h2_probe() {
+        let name = std::env::var("FP_PROBE").unwrap_or_else(|_| "chrome".into());
+        let host = std::env::var("FP_HOST").unwrap_or_else(|_| "tls.browserleaks.com".into());
+        let cfg: crate::config::TlsConfig = serde_json::from_value(serde_json::json!({
+            "alpn": ["h2"],
+            "fingerprint": name,
+        }))
+        .unwrap();
+        let tls = TlsClient::new(&cfg, &host).unwrap();
+        let tcp = tokio::net::TcpStream::connect((host.as_str(), 443)).await.unwrap();
+        let io = tls.connect(tcp).await.unwrap();
+        // Same settings `dial_h2` sends for this profile.
+        let fp = crate::outbound::fingerprint::Fingerprint::from_name(Some(&name))
+            .unwrap()
+            .unwrap();
+        let mut builder = h2::client::Builder::new();
+        H2Settings::for_fingerprint(Some(fp)).apply(&mut builder);
+        let (send, conn) = builder.handshake::<_, Bytes>(io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(format!("https://{host}/json"))
+            .body(())
+            .unwrap();
+        let (resp, _) = send
+            .ready()
+            .await
+            .unwrap()
+            .send_request(req, true)
+            .unwrap();
+        let resp = resp.await.unwrap();
+        let mut body = resp.into_body();
+        let mut raw = Vec::new();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk.unwrap();
+            let _ = body.flow_control().release_capacity(chunk.len());
+            raw.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8_lossy(&raw);
+        for key in ["\"ja4\"", "\"akamai_text\""] {
+            if let Some(i) = text.find(key) {
+                let tail = &text[i..];
+                let end = tail.find(',').unwrap_or(tail.len().min(200));
+                println!("{name}: {}", &tail[..end.min(200)]);
+            }
+        }
+    }
+
 }
