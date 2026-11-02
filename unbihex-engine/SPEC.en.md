@@ -857,8 +857,11 @@ as VLESS), optional `websocket: {"path":"/vmess", "host":"cdn.example"}`.
 `auto` selects ChaCha20-Poly1305; explicit AES selects AES-128-GCM. This is a native
 outbound, not an external Xray process. TCP and fixed-target UDP use modern VMess
 AEAD request/response headers with alterId=0, authenticated body chunks, and bounded
-framing. Nonce exhaustion at 65536 chunks fails closed: reconnect is required.
+framing. Nonce exhaustion at 65536 chunks fails closed: reconnect is required
+(at most about 511 MiB per direction, less with small writes). Transparent midstream
+reconnection is not possible; applications must retry that connection.
 TLS SNI and HTTP WebSocket Host are independent. All sockets use SocketFactory.
+WSS offers only HTTP/1.1 ALPN; an explicitly incompatible ALPN list is rejected.
 
 Standard base64 JSON `vmess://` links and Xray/sing-box JSON subscription entries are
 supported. Client capability, saved-profile refresh, outbound construction and real
@@ -875,7 +878,8 @@ Malformed headers, authentication failures, reordered/tampered chunks, response
 commands, truncated wire streams and nonce reuse are rejected.
 
 Verification: `tests/vmess_interop.rs` explicitly runs against official Xray26.10.31:
-12 transport/cipher combinations (TCP, TLS, WS, WSS × auto/AES/ChaCha), TCP40KB and
+12 transport/cipher combinations (TCP, TLS, WS, WSS × auto/AES/ChaCha), concurrent
+1 MiB TCP upload/download with default TLS fingerprint/ALPN, independent Host:port and SNI, and
 UDP boundaries, wrong UUID and untrusted TLS. The opt-in test is ignored in normal
 runs and requires XRAY_BIN; ignored is not a passed interoperability check. See
 `../audit/VMESS_IMPLEMENTATION.md`. Android build and device testing are not claimed.

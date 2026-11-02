@@ -346,11 +346,11 @@ impl VmessOutbound {
     ) -> Result<Self> {
         cfg.validate()?;
         let mut cfg = cfg.clone();
-        if cfg.websocket.is_some() {
-            if let Some(tls) = &mut cfg.tls {
-                // This transport uses HTTP/1.1 Upgrade, not RFC 8441 over h2.
-                tls.alpn = vec!["http/1.1".into()];
-            }
+        if cfg.websocket.is_some()
+            && let Some(tls) = &mut cfg.tls
+        {
+            // This transport uses HTTP/1.1 Upgrade, not RFC 8441 over h2.
+            tls.alpn = vec!["http/1.1".into()];
         }
         let tls = cfg
             .tls
