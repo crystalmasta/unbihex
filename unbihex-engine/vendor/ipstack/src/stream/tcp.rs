@@ -984,7 +984,7 @@ fn extract_data_n_write_upstream(
         return Ok(());
     }
 
-    if let Some(data) = tcb.consume_unordered_packets(8192) {
+    if let Some(data) = tcb.consume_unordered_packets(65536) {
         tcb.add_unread(data.len()); // Unbihex patch: see `Tcb::get_available_read_buffer_size`.
         let hint = if state == TcpState::Established { "normally" } else { "still" };
         log::trace!("{network_tuple} {state:?}: {l_info} {hint} receiving data, len = {}", data.len());

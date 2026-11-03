@@ -51,6 +51,13 @@ Changes (search for "Unbihex patch"):
    Windows bench this took one download through the TUN from 136 to 155 MB/s and the
    client's peak with 64 parallel downloads from 152 to 85 MB.
 
+6. **No artificial 8 KiB split.** `extract_data_n_write_upstream`
+   (`src/stream/tcp.rs`) took at most 8192 bytes per call, so any segment larger
+   than that — an MSS above 8 KiB, i.e. a TUN MTU above ~8250 — was split: the
+   tail became an out-of-order hole and the sender waited for an RTO on every
+   segment (1 MiB took 40 s at MTU 9000). The budget is now 64 KiB, above any MSS
+   the stack can advertise.
+
 To move to a new ipstack version: check which of these upstream has fixed, copy the new
 crate source here, reapply what is still needed, keep the version in
 `unbihex-engine/Cargo.toml` in step, and run the engine tests

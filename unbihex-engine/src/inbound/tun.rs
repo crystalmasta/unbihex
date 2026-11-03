@@ -822,6 +822,55 @@ mod tests {
         h.cancel.cancel();
     }
 
+    /// A segment larger than the old 8 KiB extraction budget must arrive whole.
+    /// `consume_unordered_packets(8192)` used to split it, park the tail behind
+    /// a hole and let the sender wait for an RTO on every segment: an upload at
+    /// MTU 9000 collapsed from ~160 to 0.2 Mbit/s.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_segment_larger_than_8k_is_delivered_whole() {
+        let mut h = harness_with(
+            r#"{"inbounds":[{"type":"tun","tag":"tun-in","mtu":16384}],
+                "outbounds":[{"type":"direct","tag":"direct"}]}"#,
+        )
+        .await;
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let (mut r, mut w) = s.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                });
+            }
+        });
+        let app: SocketAddr = "10.199.233.1:40003".parse().unwrap();
+        h.inject
+            .send(tcp_packet(app, echo_addr, 2000, None, true, b""))
+            .await
+            .unwrap();
+        let (server_seq, syn, ack, _) = next_tcp(&mut h).await;
+        assert!(syn && ack, "expected SYN-ACK");
+        let payload: Vec<u8> = (0..16_000u32).map(|i| (i % 251) as u8).collect();
+        h.inject
+            .send(tcp_packet(
+                app,
+                echo_addr,
+                2001,
+                Some(server_seq.wrapping_add(1)),
+                false,
+                &payload,
+            ))
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while got.len() < payload.len() {
+            let (_, _, _, data) = next_tcp(&mut h).await;
+            got.extend_from_slice(&data);
+        }
+        assert_eq!(got, payload);
+        h.cancel.cancel();
+    }
+
     /// The patched ipstack (vendor/ipstack) scales windows when the app's SYN offers
     /// it, and drops a TCP stream without blocking: on a current-thread runtime the
     /// old `block_in_place` in its Drop panicked.
