@@ -216,6 +216,9 @@ pub struct Settings {
     pub hwid: String,
     /// Connect to the last server when the app starts.
     pub auto_connect: bool,
+    /// Windows: start the app at login. The registry is what counts (the user
+    /// may switch it off in the Task Manager): see `platform::is_autostart_enabled`.
+    pub auto_start: bool,
     /// Android: show a "VPN is on" notification. It keeps the VPN running in the
     /// foreground, so swiping the app away does not drop it.
     pub android_notification: bool,
@@ -271,6 +274,7 @@ impl Default for Settings {
             send_hwid: true,
             hwid: Uuid::new_v4().simple().to_string(),
             auto_connect: false,
+            auto_start: false,
             android_notification: true,
             log_level: "info".into(),
             geosite_url: crate::geo::DEFAULT_GEOSITE_URL.into(),

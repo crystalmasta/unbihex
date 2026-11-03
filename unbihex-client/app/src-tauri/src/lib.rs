@@ -21,6 +21,9 @@ struct AppState {
     level: Option<logs::LevelHandle>,
     /// Serializes connect/disconnect so double clicks cannot race.
     op: tokio::sync::Mutex<()>,
+    /// A message for the UI to show once, such as a failed auto-connect at
+    /// login: the window may not have existed when it happened.
+    notice: parking_lot::Mutex<Option<String>>,
 }
 
 /// Everything the UI needs in one call.
@@ -34,6 +37,7 @@ struct StateView {
     app_version: &'static str,
     engine_version: &'static str,
     data_dir: String,
+    notice: Option<String>,
 }
 
 fn platform_name() -> &'static str {
@@ -56,6 +60,8 @@ fn err(e: impl std::fmt::Display) -> String {
 
 fn notify(app: &AppHandle) {
     let _ = app.emit("state-changed", ());
+    #[cfg(desktop)]
+    update_tray(app);
 }
 
 // ---------------------------------------------------------------- connect
@@ -68,7 +74,7 @@ async fn do_connect(_app: &AppHandle, client: &Client) -> Result<ConnectionInfo,
 #[cfg(mobile)]
 async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, ClientError> {
     use tauri_plugin_unbihex_vpn::{StartArgs, UnbihexVpnExt};
-    use unbihex_client_core::plan::{TUN_ADDRESS, TUN_DNS, TUN_PREFIX, Target, build_config_json};
+    use unbihex_client_core::plan::{TUN_ADDRESS, TUN_DNS, TUN_PREFIX, Target, build_config_json, tun_mtu};
 
     if client.controller.is_connected().await {
         return Err(ClientError::State("уже подключено".into()));
@@ -79,7 +85,8 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
     let geo = client.geo();
     let config_json = build_config_json(&server, &settings, &geo, Target::Mobile)?;
     let args = StartArgs {
-        mtu: settings.mtu,
+        // The same MTU as in the engine config, so the stack matches the interface.
+        mtu: tun_mtu(&settings, Target::Mobile),
         address: TUN_ADDRESS.into(),
         prefix: TUN_PREFIX,
         dns: TUN_DNS.into(),
@@ -204,6 +211,8 @@ async fn do_disconnect(_app: &AppHandle, client: &Client) {
 #[tauri::command]
 async fn connect(app: AppHandle, state: State<'_, AppState>) -> Result<ConnectionInfo, String> {
     let _op = state.op.lock().await;
+    #[cfg(desktop)]
+    set_tray_transition(&app, true);
     let r = do_connect(&app, &state.client).await;
     notify(&app);
     r.map_err(err)
@@ -212,6 +221,8 @@ async fn connect(app: AppHandle, state: State<'_, AppState>) -> Result<Connectio
 #[tauri::command]
 async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let _op = state.op.lock().await;
+    #[cfg(desktop)]
+    set_tray_transition(&app, false);
     do_disconnect(&app, &state.client).await;
     notify(&app);
     Ok(())
@@ -285,8 +296,15 @@ async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
     let is_admin = unbihex_client_core::platform::is_elevated();
     #[cfg(mobile)]
     let is_admin = true;
+    #[cfg_attr(mobile, allow(unused_mut))]
+    let mut data = state.client.snapshot();
+    // The registry, not state.json: the user may switch it off in the Task Manager.
+    #[cfg(desktop)]
+    {
+        data.settings.auto_start = unbihex_client_core::platform::is_autostart_enabled();
+    }
     Ok(StateView {
-        data: state.client.snapshot(),
+        data,
         status: state.client.status().await,
         platform: platform_name(),
         mobile: cfg!(mobile),
@@ -294,6 +312,7 @@ async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
         app_version: env!("CARGO_PKG_VERSION"),
         engine_version: unbihex_client_core::ENGINE_VERSION,
         data_dir: state.client.dir().display().to_string(),
+        notice: state.notice.lock().take(),
     })
 }
 
@@ -383,8 +402,21 @@ async fn save_settings(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Option<ConnectionInfo>, String> {
+    // Windows: the registry is written only when the switch changes, so saving
+    // other settings neither rewrites the entry nor undoes a switch-off made in
+    // the Task Manager.
+    #[cfg(windows)]
+    let autostart = (settings.auto_start != unbihex_client_core::platform::is_autostart_enabled())
+        .then_some(settings.auto_start);
     logs::set_level(&state.level, &settings.log_level);
     state.client.set_settings(settings).map_err(err)?;
+    #[cfg(windows)]
+    if let Some(on) = autostart
+        && let Err(e) = unbihex_client_core::platform::set_autostart(on)
+    {
+        tracing::warn!("autostart: {e}");
+        let _ = app.emit("toast", e.to_string());
+    }
     notify(&app);
     // Ad blocking just turned on or other lists picked: download them meanwhile.
     let handle = app.clone();
@@ -525,11 +557,103 @@ fn show_window(app: &AppHandle) {
     }
 }
 
+// Tray state at a glance: the colour icon with a green dot when connected, a
+// grey one when not. Decoded at compile time, so no PNG decoder at run time.
+// By Finorion (github.com/Finorion), PR #43.
+#[cfg(desktop)]
+const TRAY_CONNECTED: tauri::image::Image<'static> = tauri::include_image!("icons/tray-connected.png");
+#[cfg(desktop)]
+const TRAY_DISCONNECTED: tauri::image::Image<'static> = tauri::include_image!("icons/tray-disconnected.png");
+
+#[cfg(desktop)]
+struct TrayState {
+    status_item: tauri::menu::MenuItem<tauri::Wry>,
+    toggle_item: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+#[cfg(desktop)]
+fn tray_icon(connected: bool) -> tauri::image::Image<'static> {
+    if connected { TRAY_CONNECTED } else { TRAY_DISCONNECTED }
+}
+
+#[cfg(desktop)]
+fn set_tray_transition(app: &AppHandle, connecting: bool) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let tip = if connecting {
+            "Unbihex · Подключение…"
+        } else {
+            "Unbihex · Отключение…"
+        };
+        let _ = tray.set_tooltip(Some(tip));
+    }
+    if let Some(tray_state) = app.try_state::<TrayState>() {
+        let (status, toggle) = if connecting {
+            ("⏳ Подключение…", "Подключение…")
+        } else {
+            ("⏳ Отключение…", "Отключение…")
+        };
+        let _ = tray_state.status_item.set_text(status);
+        let _ = tray_state.toggle_item.set_text(toggle);
+    }
+}
+
+#[cfg(desktop)]
+fn update_tray(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let status = state.client.status().await;
+        let selected_name = state.client.snapshot().selected_server().map(|s| s.name.clone());
+
+        if let Some(tray) = app.tray_by_id("main") {
+            let (status_text, toggle_text, tooltip, icon) = if status.connected {
+                let name = status
+                    .info
+                    .as_ref()
+                    .map(|i| i.server_name.as_str())
+                    .or(selected_name.as_deref())
+                    .unwrap_or("сервер");
+                (
+                    format!("● Подключено: {name}"),
+                    "Отключить".to_string(),
+                    format!("Unbihex · Подключено: {name}"),
+                    tray_icon(true),
+                )
+            } else {
+                let toggle = match &selected_name {
+                    Some(name) => format!("Подключить ({name})"),
+                    None => "Подключить".to_string(),
+                };
+                let tip = match &selected_name {
+                    Some(name) => format!("Unbihex · Не подключено ({name})"),
+                    None => "Unbihex · Не подключено".to_string(),
+                };
+                (
+                    "○ Не подключено".to_string(),
+                    toggle,
+                    tip,
+                    tray_icon(false),
+                )
+            };
+
+            let _ = tray.set_tooltip(Some(tooltip));
+            let _ = tray.set_icon(Some(icon));
+
+            if let Some(tray_state) = app.try_state::<TrayState>() {
+                let _ = tray_state.status_item.set_text(status_text);
+                let _ = tray_state.toggle_item.set_text(toggle_text);
+            }
+        }
+    });
+}
+
 #[cfg(desktop)]
 async fn toggle_connection(app: AppHandle) {
     let state = app.state::<AppState>();
     let _op = state.op.lock().await;
-    if state.client.controller.is_connected().await {
+    let was_connected = state.client.controller.is_connected().await;
+    set_tray_transition(&app, !was_connected);
+    if was_connected {
         do_disconnect(&app, &state.client).await;
     } else if let Err(e) = do_connect(&app, &state.client).await {
         tracing::error!("connect: {e}");
@@ -544,13 +668,15 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
+    let status_item = MenuItem::with_id(app, "status", "○ Не подключено", false, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
     let show = MenuItem::with_id(app, "show", "Открыть Unbihex", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle", "Подключить / отключить", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
+    let toggle = MenuItem::with_id(app, "toggle", "Подключить", true, None::<&str>)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &toggle, &sep, &quit])?;
-    let mut tray = TrayIconBuilder::with_id("main")
-        .tooltip("Unbihex")
+    let menu = Menu::with_items(app, &[&status_item, &sep1, &show, &toggle, &sep2, &quit])?;
+    let tray = TrayIconBuilder::with_id("main")
+        .tooltip("Unbihex · Не подключено")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -571,10 +697,15 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 show_window(tray.app_handle());
             }
         });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
-    tray.build(app)?;
+    tray.icon(tray_icon(false)).build(app)?;
+
+    app.manage(TrayState {
+        status_item,
+        toggle_item: toggle,
+    });
+
+    update_tray(app.handle());
+
     Ok(())
 }
 
@@ -589,8 +720,16 @@ fn start_background(app: AppHandle) {
         let auto = state.client.settings().auto_connect;
         if auto && state.client.selected_server().is_ok() {
             let _op = state.op.lock().await;
+            #[cfg(desktop)]
+            set_tray_transition(&app, true);
             if let Err(e) = do_connect(&app, &state.client).await {
                 tracing::warn!("auto-connect: {e}");
+                // Not silently: started at login the app sits in the tray, and in
+                // TUN mode without administrator rights the VPN never comes up.
+                // The window shows why (and offers a restart as administrator).
+                *state.notice.lock() = Some(format!("Автоподключение не удалось: {e}"));
+                #[cfg(desktop)]
+                show_window(&app);
             }
             notify(&app);
         }
@@ -654,10 +793,19 @@ pub fn run() {
                 logs: log_buffer.clone(),
                 level: level.clone(),
                 op: tokio::sync::Mutex::new(()),
+                notice: parking_lot::Mutex::new(None),
             });
             #[cfg(desktop)]
             if let Err(e) = setup_tray(app) {
                 tracing::warn!("tray: {e}");
+            }
+            // Desktop windows are created here, not from the config: started at
+            // login (`--autostart`, the Windows `Run` entry) the app stays in the
+            // tray without flashing a window or loading WebView2 for nothing.
+            // Without a tray there would be no way in, so the window opens anyway.
+            #[cfg(desktop)]
+            if !(std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some()) {
+                show_window(app.handle());
             }
             start_background(app.handle().clone());
             Ok(())
@@ -686,7 +834,14 @@ pub fn run() {
             store_apps_loopback,
         ]);
 
-    let app = match builder.build(tauri::generate_context!()) {
+    #[cfg_attr(mobile, allow(unused_mut))]
+    let mut context = tauri::generate_context!();
+    // Desktop: `setup` creates the window, unless the app was started at login.
+    #[cfg(desktop)]
+    for w in &mut context.config_mut().app.windows {
+        w.create = false;
+    }
+    let app = match builder.build(context) {
         Ok(app) => app,
         Err(e) => {
             eprintln!("failed to start: {e}");

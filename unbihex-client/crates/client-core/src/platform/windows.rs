@@ -417,3 +417,46 @@ pub(super) fn store_apps_loopback(dir: &Path, allow: bool) -> Result<usize> {
     std::fs::write(&journal, serde_json::to_vec(&ours)?)?;
     Ok(changed)
 }
+
+/// Programs started at login for this user.
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// Where the Task Manager keeps entries of [`RUN_KEY`] the user switched off.
+const RUN_APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+/// Our value name under both keys.
+const RUN_VALUE: &str = "Unbihex";
+
+// By Finorion (github.com/Finorion), PR #43.
+pub(super) fn set_autostart(enable: bool) -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let reg = |e: std::io::Error| ClientError::platform(format!("автозапуск (реестр Run): {e}"));
+    if enable {
+        let exe = std::env::current_exe()?;
+        let (key, _) = hkcu.create_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE).map_err(reg)?;
+        key.set_value(RUN_VALUE, &format!("\"{}\" --autostart", exe.display())).map_err(reg)?;
+    } else if let Ok(key) = hkcu.open_subkey_with_flags(RUN_KEY, KEY_WRITE) {
+        match key.delete_value(RUN_VALUE) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(reg(e)),
+            _ => {}
+        }
+    }
+    // A switch-off from the Task Manager would outlive our entry: turning
+    // autostart on in the app has to mean on.
+    if let Ok(key) = hkcu.open_subkey_with_flags(RUN_APPROVED, KEY_WRITE) {
+        let _ = key.delete_value(RUN_VALUE);
+    }
+    Ok(())
+}
+
+pub(super) fn is_autostart_enabled() -> bool {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let present = hkcu
+        .open_subkey_with_flags(RUN_KEY, KEY_READ)
+        .is_ok_and(|k| k.get_value::<String, _>(RUN_VALUE).is_ok());
+    // The first byte of the Task Manager's flag is odd when the entry is off.
+    let switched_off = hkcu
+        .open_subkey_with_flags(RUN_APPROVED, KEY_READ)
+        .ok()
+        .and_then(|k| k.get_raw_value(RUN_VALUE).ok())
+        .is_some_and(|v| v.bytes.first().is_some_and(|b| b & 1 == 1));
+    present && !switched_off
+}

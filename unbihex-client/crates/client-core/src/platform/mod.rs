@@ -197,6 +197,34 @@ pub fn store_apps_loopback(dir: &Path, allow: bool) -> Result<usize> {
     }
 }
 
+/// Windows: starts the program at login (`HKCU\…\Run`, issue #39) or stops
+/// doing that. Other systems: not supported.
+// By Finorion (github.com/Finorion), PR #43.
+pub fn set_autostart(enable: bool) -> Result<()> {
+    #[cfg(windows)]
+    {
+        os::set_autostart(enable)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enable;
+        Err(ClientError::platform("автозапуск есть только в Windows"))
+    }
+}
+
+/// Whether the program starts at login: our `Run` entry exists and is not
+/// switched off in the Task Manager. Always false outside Windows.
+pub fn is_autostart_enabled() -> bool {
+    #[cfg(windows)]
+    {
+        os::is_autostart_enabled()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// System tools the client may run.
 const SYSTEM_PROGRAMS: &[&str] = &[
     "route",

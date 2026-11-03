@@ -156,6 +156,29 @@ Section "Uninstall"
 
   DeleteRegKey HKLM "${UNINSTKEY}"
   DeleteRegKey HKLM "Software\${APPNAME}"
+  ; Автозапуск (HKCU\...\Run, issue #39) включает пользователь, а удаление идёт с правами
+  ; администратора — возможно, под другой учётной записью. Поэтому запись убирается у всех
+  ; вошедших пользователей (их ветки загружены в HKU), если она ведёт в $INSTDIR.
+  ; By Finorion (github.com/Finorion), PR #43.
+  StrLen $R2 "$INSTDIR"
+  IntOp $R5 $R2 + 1
+  StrCpy $R0 0
+  ${Do}
+    EnumRegKey $R1 HKU "" $R0
+    ${If} $R1 == ""
+      ${ExitDo}
+    ${EndIf}
+    IntOp $R0 $R0 + 1
+    ReadRegStr $R3 HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Run" "${APPNAME}"
+    ; Значение: "<папка>\Unbihex.exe" --autostart
+    StrCpy $R4 $R3 $R2 1
+    StrCpy $R6 $R3 1 $R5
+    ${If} $R4 == "$INSTDIR"
+    ${AndIf} $R6 == "\"
+      DeleteRegValue HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Run" "${APPNAME}"
+      DeleteRegValue HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "${APPNAME}"
+    ${EndIf}
+  ${Loop}
 
   ; Подписки и настройки пользователя удаляются только по согласию.
   SetShellVarContext current
