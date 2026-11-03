@@ -303,8 +303,22 @@ impl TunInboundConfig {
     }
 }
 
-fn default_mtu() -> u16 {
-    1500
+/// The default TUN MTU.
+///
+/// A TUN is not a physical link: its "packets" are consumed locally and
+/// forwarded as a byte stream, so the MTU only sets how many packets the
+/// userspace stack has to walk through. At 1500 each MiB is ~700 packets, each
+/// costing a read, a write, two wakeups and two copies; 16 KiB cuts that 11x
+/// and measured ~4.5x the throughput of 1500 (23% over 9000).
+///
+/// Linux only: Windows (wintun) and macOS (utun) are untested at jumbo sizes,
+/// so they keep the conservative 1500 until someone measures them.
+pub fn default_mtu() -> u16 {
+    if cfg!(target_os = "linux") {
+        16_384
+    } else {
+        1500
+    }
 }
 
 fn default_tun_ipv4() -> Ipv4Net {
@@ -1369,6 +1383,20 @@ mod tests {
     fn a_byte_order_mark_is_skipped() {
         let json = "\u{feff}{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"d\"}]}";
         assert!(Config::from_json(json).is_ok());
+    }
+
+    /// Windows and macOS are untested at jumbo MTUs, so a tun inbound without
+    /// an explicit `mtu` keeps the conservative 1500 there and uses the measured
+    /// 16 KiB only on Linux.
+    #[test]
+    fn default_tun_mtu_is_platform_aware() {
+        let cfg = Config::from_json(
+            r#"{"inbounds":[{"type":"tun","tag":"t"}],
+                "outbounds":[{"type":"direct","tag":"d"}]}"#,
+        )
+        .unwrap();
+        let expected = if cfg!(target_os = "linux") { 16_384 } else { 1500 };
+        assert_eq!(cfg.tun().unwrap().mtu, expected);
     }
 
     const FULL: &str = r#"{

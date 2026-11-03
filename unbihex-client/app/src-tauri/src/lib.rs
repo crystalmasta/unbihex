@@ -79,7 +79,9 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
     let geo = client.geo();
     let config_json = build_config_json(&server, &settings, &geo, Target::Mobile)?;
     let args = StartArgs {
-        mtu: settings.mtu,
+        // The engine config says 1500 for mobile (see `build_config`): the OS
+        // owns the interface, and iOS hardcodes a 1500 utun.
+        mtu: 1500,
         address: TUN_ADDRESS.into(),
         prefix: TUN_PREFIX,
         dns: TUN_DNS.into(),

@@ -482,7 +482,7 @@ function readSettings() {
     lan_username: f.lan_username.value,
     lan_password: f.lan_password.value,
     dns_upstream: f.dns_upstream.value.split(/[\s,;]+/).filter(Boolean),
-    mtu: Math.min(9000, Math.max(1280, parseInt(f.mtu.value, 10) || 1500)),
+    mtu: Math.min(65535, Math.max(1280, parseInt(f.mtu.value, 10) || 1500)),
     user_agent: f.user_agent.value.trim(),
     send_hwid: f.send_hwid.checked,
     auto_connect: f.auto_connect.checked,

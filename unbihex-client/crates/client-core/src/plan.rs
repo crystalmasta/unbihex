@@ -291,7 +291,10 @@ pub fn build_config_json(
         let mut tun = json!({
             "type": "tun",
             "tag": "tun-in",
-            "mtu": settings.mtu.clamp(1280, 9000),
+            // Mobile: the OS owns the interface. iOS hardcodes a 1500 utun and
+            // Android's VpnService has always been given 1500, so the stack must
+            // match them or it would send segments larger than the interface.
+            "mtu": if target == Target::Mobile { 1500 } else { settings.mtu.clamp(1280, 65_535) },
             "ipv4": format!("{TUN_ADDRESS}/{TUN_PREFIX}"),
             "ipv6": format!("{TUN_ADDRESS6}/{TUN_PREFIX6}"),
             "auto_route": target == Target::DesktopTun && settings.tun_routes,
@@ -406,6 +409,27 @@ mod tests {
         assert_eq!(cfg.inbounds[0].tag(), "socks-in");
         assert!(matches!(&cfg.inbounds[1], InboundConfig::Http(h) if h.listen.port() == 10809));
         assert_eq!(cfg.dns.upstream[0].to_string(), "1.1.1.1:53");
+    }
+
+    #[test]
+    fn desktop_default_mtu_matches_the_platform() {
+        // Jumbo is measured on Linux only; elsewhere the default stays 1500.
+        let expected = if cfg!(target_os = "linux") { 16_384 } else { 1500 };
+        assert_eq!(Settings::default().mtu, expected);
+    }
+
+    #[test]
+    fn mobile_keeps_a_1500_mtu() {
+        // The OS owns the mobile interface (iOS hardcodes a 1500 utun), so the
+        // stack must not inherit the desktop default.
+        let s = Settings {
+            mtu: 16_384,
+            ..Settings::default()
+        };
+        let cfg = build_config(&server(), &s, &Geo::default(), Target::Mobile).unwrap();
+        assert_eq!(cfg.tun().unwrap().mtu, 1500);
+        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopTun).unwrap();
+        assert_eq!(cfg.tun().unwrap().mtu, 16_384);
     }
 
     #[test]
