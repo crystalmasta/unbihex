@@ -16,7 +16,8 @@
 //!
 //! For our clients the server also asks `dest` how it answers the same hello and
 //! copies its key exchange group, cipher suite and handshake record sizes
-//! (`reality_shape.rs`), so the handshake looks like `dest`'s on the wire.
+//! (`reality_shape.rs`), so the handshake looks like `dest`'s on the wire. It asks on
+//! every handshake, so our clients wait for `dest` just as a spliced prober does.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -56,7 +57,8 @@ const DEFAULT_TIME_DIFF: Duration = Duration::from_secs(120);
 /// At most this many remembered randoms; only authenticated hellos are remembered.
 const REPLAY_CAP: usize = 1 << 20;
 // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
-/// How long a `dest` answer stays usable for hellos with the same stable shape.
+/// How long a `dest` answer stays usable, when `dest` cannot be probed, for hellos with
+/// the same stable shape.
 const SHAPE_TTL: Duration = Duration::from_secs(600);
 /// How long the resolved `dest` addresses are reused.
 const DEST_TTL: Duration = Duration::from_secs(300);
@@ -284,30 +286,31 @@ impl RealityServer {
     }
 
     // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
-    /// The answer of `dest` to this hello shape, from the cache or from a fresh probe.
+    /// The answer of `dest` to this hello, from a fresh probe; the cached answer to the
+    /// same hello shape only when the probe fails.
+    ///
+    /// Every handshake waits for `dest`, as Xray's does: answering from the cache at
+    /// once would make our clients' ServerHello come a `dest` round trip sooner than
+    /// anyone else's (a prober's hello is spliced to `dest` and always waits for it).
     async fn shape_for(&self, key: [u8; 32], hello: &[u8]) -> Option<Arc<DestShape>> {
-        // Fast path and cached address under a short lock.
-        let cached_addr = {
-            let cache = self.shapes.lock().await;
-            if let Some(shape) = cache.get(&key) {
-                return Some(shape);
-            }
-            cache.fresh_dest_addr()
-        };
+        let cached_addr = self.shapes.lock().await.fresh_dest_addr();
         let addr = match cached_addr {
-            Some(addr) => addr,
-            None => self.resolve_dest().await?,
+            Some(addr) => Some(addr),
+            None => self.resolve_dest().await,
         };
-        // The probe runs without the lock: on a dead dest concurrent misses may probe
-        // in parallel, which is cheaper than serializing every handshake behind one.
-        let probed = reality_shape::probe(addr, hello).await;
+        // The probe runs without the lock, so concurrent handshakes probe in parallel.
+        let probed = match addr {
+            Some(addr) => reality_shape::probe(addr, hello).await,
+            None => None,
+        };
         let shape = match probed {
             Some(shape) => Arc::new(shape),
             None => {
-                // A failed probe is not cached; a stale address is the likely reason,
-                // so make the next handshake resolve `dest` again.
-                self.shapes.lock().await.clear_dest_addrs();
-                return None;
+                // A stale address is the likely reason, so make the next handshake
+                // resolve `dest` again; meanwhile a recent answer is better than ours.
+                let mut cache = self.shapes.lock().await;
+                cache.clear_dest_addrs();
+                return cache.get(&key);
             }
         };
         // Last writer wins; entries for the same key are equivalent.

@@ -81,6 +81,9 @@ const MAX_HEAD: usize = 8 * 1024;
 const MAX_FRAME: u64 = 1 << 20;
 /// Largest payload put into one frame we send.
 const MAX_SEND: usize = 16 * 1024;
+/// Pings are left unanswered while this much is still unsent (RFC 6455 lets a pong
+/// answer only the latest ping): a peer that pings and never reads cannot grow `out`.
+const PONG_BACKLOG: usize = MAX_SEND + 4 * 1024;
 const ACCEPT_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 const OP_CONTINUATION: u8 = 0x0;
@@ -297,7 +300,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                     self.rbuf.advance(h.len);
                     let body = self.rbuf.split_to(payload);
                     match h.opcode {
-                        OP_PING if !self.close_sent => {
+                        OP_PING if !self.close_sent && self.out.len() <= PONG_BACKLOG => {
                             put_frame(self.out.buf_mut(), OP_PONG, &body)
                         }
                         OP_CLOSE => {
@@ -528,6 +531,24 @@ mod tests {
         s.read_to_end(&mut rest).await.unwrap();
         assert_eq!(rest, vec![7u8; 300]);
         srv.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pings_from_a_peer_that_never_reads_do_not_pile_up() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let srv = tokio::spawn(async move {
+            for _ in 0..5000 {
+                server.write_all(&server_frame(OP_PING, &[1u8; 125])).await.unwrap();
+            }
+            server.write_all(&server_frame(OP_BINARY, b"x")).await.unwrap();
+            server
+        });
+        let mut s = WsStream::new(client, BytesMut::new());
+        let mut x = [0u8; 1];
+        s.read_exact(&mut x).await.unwrap();
+        assert_eq!(&x, b"x");
+        assert!(s.out.len() <= PONG_BACKLOG + 131, "{} bytes of pongs queued", s.out.len());
+        drop(srv.await.unwrap());
     }
 
     #[tokio::test]

@@ -477,6 +477,10 @@ pub struct TrustTunnelConfig {
     /// Split the TLS ClientHello into small records (the official client's anti-DPI).
     #[serde(default)]
     pub fragment: Option<crate::outbound::fragment::FragmentConfig>,
+    /// Browser whose ClientHello is sent, as [`TlsConfig::fingerprint`]: Chrome when
+    /// absent, `none` for rustls's own (easy to tell apart and block).
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 impl TrustTunnelConfig {
@@ -497,6 +501,7 @@ impl TrustTunnelConfig {
         if let Some(f) = &self.fragment {
             f.validate()?;
         }
+        crate::outbound::fingerprint::Fingerprint::from_name(self.fingerprint.as_deref())?;
         Ok(())
     }
 

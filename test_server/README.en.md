@@ -35,12 +35,12 @@ The config is the engine's JSON ([`../unbihex-engine/SPEC.en.md`](../unbihex-eng
 ```sh
 cargo build --release
 ./target/release/test_server x25519          # Private key goes into the config, Public key to the client
-./target/release/test_server uuid            # the user id
+./target/release/test_server uuid            # the user id goes into the config (the examples hold placeholders the server refuses)
 ./target/release/test_server run -c config.reality.example.json
 ```
 A link for the client (Unbihex or any Xray client):
 ```text
-vless://<uuid>@<server address>:443?security=reality&sni=www.microsoft.com&fp=chrome&pbk=<Public key>&sid=0123abcd&flow=xtls-rprx-vision&type=tcp#test
+vless://<uuid>@<server address>:443?security=reality&sni=www.microsoft.com&fp=chrome&pbk=<Public key>&sid=<short ID>&flow=xtls-rprx-vision&type=tcp#test
 ```
 
 ## Tests

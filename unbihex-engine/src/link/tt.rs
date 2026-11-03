@@ -218,6 +218,7 @@ pub(super) fn parse(url: &str, tag: &str) -> Result<OutboundConfig> {
         certificates,
         has_ipv6: f.flag(4, true)?,
         fragment: f.flag(10, false)?.then(FragmentConfig::default),
+        fingerprint: None,
     };
     cfg.validate()?;
     Ok(OutboundConfig::Trusttunnel(cfg))

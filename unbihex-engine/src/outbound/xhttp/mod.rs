@@ -126,9 +126,9 @@ impl H2Settings {
     };
 
     /// Picks the set for a profile. There is no reference row for 360 Browser or QQ
-    /// Browser; both are Chromium forks, so they keep the Chromium set, as do
-    /// `random`/`randomized` (whose TLS profile is built from modern Chromium lists).
-    /// `none`/`rustls` keep the historical Chrome values.
+    /// Browser; both are Chromium forks, so they keep the Chromium set, as does
+    /// `randomized` (whose TLS profile is built from modern Chromium lists). `random`
+    /// arrives as the preset it drew. `none`/`rustls` keep the historical Chrome values.
     fn for_fingerprint(fingerprint: Option<Fingerprint>) -> Self {
         match fingerprint {
             Some(Fingerprint::Firefox) => Self::FIREFOX,
@@ -138,10 +138,7 @@ impl H2Settings {
             Some(Fingerprint::Android) => Self::ANDROID,
             Some(Fingerprint::Edge) => Self::EDGE,
             Some(Fingerprint::Browser360) | Some(Fingerprint::Qq) => Self::CHROME,
-            Some(Fingerprint::Chrome)
-            | Some(Fingerprint::Random)
-            | Some(Fingerprint::Randomized)
-            | None => Self::CHROME,
+            Some(Fingerprint::Chrome) | Some(Fingerprint::Randomized) | None => Self::CHROME,
         }
     }
 
@@ -960,7 +957,6 @@ mod tests {
             (Fingerprint::Edge, H2Settings::EDGE),
             (Fingerprint::Browser360, H2Settings::CHROME),
             (Fingerprint::Qq, H2Settings::CHROME),
-            (Fingerprint::Random, H2Settings::CHROME),
             (Fingerprint::Randomized, H2Settings::CHROME),
         ];
         for (fingerprint, expected) in cases {

@@ -75,6 +75,11 @@ impl PendingOut {
         self.pos >= self.buf.len()
     }
 
+    /// Bytes still to write.
+    pub fn len(&self) -> usize {
+        self.buf.len().saturating_sub(self.pos)
+    }
+
     pub fn extend(&mut self, data: &[u8]) {
         if self.is_empty() {
             self.buf.clear();

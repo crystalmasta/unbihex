@@ -9,12 +9,12 @@
       "listen": "0.0.0.0:443",
       "users": [
         {
-          "id": "6f1d7e2a-3b4c-4d5e-8f60-718293a4b5c6",
+          "id": "<UUID from test_server uuid>",
           "email": "vision",
           "flow": "xtls-rprx-vision"
         },
         {
-          "id": "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9",
+          "id": "<another UUID from test_server uuid>",
           "email": "plain"
         }
       ],

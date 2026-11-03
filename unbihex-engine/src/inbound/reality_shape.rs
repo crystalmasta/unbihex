@@ -32,8 +32,10 @@ const ANSWER: Duration = Duration::from_secs(3);
 /// boundary for a quarter of the TCP connect time (about the RTT to `dest`), within
 /// these bounds. A record still arriving is always waited for. A flight is sent at
 /// once and fits the initial congestion window, so its segments arrive back to back;
-/// a long pause would show as an extra delay before our ServerHello.
-const MIN_GAP: Duration = Duration::from_millis(2);
+/// a long pause would show as an extra delay before our ServerHello. The floor covers
+/// `dest` signing CertificateVerify between its records (an RSA signature takes a few
+/// milliseconds): a shorter one cut a nearby `dest`'s flight before its last records.
+const MIN_GAP: Duration = Duration::from_millis(10);
 const MAX_GAP: Duration = Duration::from_millis(15);
 const MAX_RECORDS: usize = 16;
 const MAX_READ: usize = 64 * 1024;

@@ -384,7 +384,8 @@ impl Dispatcher {
   3. A → a fake IP, TTL = `dns.ttl`, NOERROR, also for names leading to `direct`: direct resolves the real address
      itself (§11.13).
   4. AAAA, HTTPS, SVCB (28/65/64) → NOERROR with no answers: no IPv6 and no ECH/IP hints that bypass the fake IPs.
-  5. Other types (MX, TXT, PTR …) and single-label names are forwarded to the upstream as a UDP session through the
+     PTR of a fake address (`…in-addr.arpa` inside the pool) → the name it maps to, or NXDOMAIN; it never goes upstream.
+  5. Other types (MX, TXT, other PTR …) and single-label names are forwarded to the upstream as a UDP session through the
      Dispatcher (the inbound is the TUN tag): with a proxy as `final` the query goes through the proxy, not in the
      clear. For an outbound without UDP (SOCKS5) the query goes over TCP. The ID is replaced with a random one and
      restored in the answer; only an answer with the same ID, the QR flag and the same question is accepted.
@@ -547,7 +548,9 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
   (JA3/JA4), and DPI blocks by it. The `vendor/rustls` patch hands the encoded ClientHello over before it is hashed and
   sent; the engine rebuilds it from a browser profile (`outbound/fingerprint.rs`, a `Profile` table after the uTLS
   presets Xray runs on): `chrome` (the default), `firefox`, `safari`, `ios`, `android`, `edge`, `360`, `qq`, `random`,
-  `randomized`; another name is `Unsupported`, `none` (or `rustls`) sends rustls's own ClientHello. Chrome: GREASE in
+  `randomized`; another name is `Unsupported`, `none` (or `rustls`) sends rustls's own ClientHello. `random` is, as in
+  Xray, one real preset drawn at random when the process starts (from `chrome`, `firefox`, `safari`, which carry the
+  X25519MLKEM768 share REALITY requires); `randomized` reshuffles its lists for every connection. Chrome: GREASE in
   ciphers, groups, versions and extensions; BoringSSL's cipher suites; extensions shuffled per connection between a
   leading and a trailing GREASE extension; X25519MLKEM768 and X25519 key shares; ALPS. No GREASE ECH (uTLS sends none
   either): rustls cannot take a server's ECH answer and drops the connection (Cloudflare), so JA4 is
@@ -721,7 +724,8 @@ What Xray's client sends, byte for byte (Xray sources `proxy/vmess/{aead,encodin
 TLS: `GET <path>` with `Host` (from `host`, else the TLS SNI, else the server, as Xray does), today's Chrome
 User-Agent, `Upgrade: websocket`, a random `Sec-WebSocket-Key`; only a `101` with `Upgrade: websocket` and the right
 `Sec-WebSocket-Accept` is accepted. Data travels in masked binary frames (up to 16 KiB); frames up to 1 MiB are
-accepted; a ping gets a pong, a close gets a close back and ends the stream; text frames and extensions are errors.
+accepted; a ping gets a pong (while under 20 KiB is unsent; past that the ping goes unanswered, so a server that pings
+and never reads cannot grow the queue), a close gets a close back and ends the stream; text frames and extensions are errors.
 `?ed=` (Xray's early data in the handshake) is dropped from the path; early data is not used. With
 `httpupgrade: true` the stream carries data as is after the `101`, without frames (Xray's HTTPUpgrade transport).
 With TLS the ALPN is always `http/1.1`.
@@ -732,10 +736,12 @@ Public specification: https://github.com/TrustTunnel/TrustTunnel/blob/master/PRO
 
 ```json
 { "type": "trusttunnel", "tag": "tt", "addresses": ["203.0.113.1:443"], "hostname": "vpn.example",
-  "sni": null, "username": "u", "password": "p", "certificates": [], "has_ipv6": true, "fragment": null }
+  "sni": null, "username": "u", "password": "p", "certificates": [], "has_ipv6": true, "fragment": null,
+  "fingerprint": null }
 ```
 
-- One TLS connection (ALPN `h2`, otherwise an error) carries all flows of the outbound. `hostname` is the name the
+- One TLS connection (ALPN `h2`, otherwise an error) carries all flows of the outbound; its ClientHello is the
+  `fingerprint` profile (§11.2, `chrome` by default; `none` sends rustls's own). `hostname` is the name the
   certificate is checked against, and the SNI; `sni` sends another name while the check stays on `hostname`.
   `certificates` (base64 DER): trust only these instead of the public roots (an endpoint's self-signed certificate).
   Verification cannot be turned off. `addresses` are tried in order; `fragment` splits the ClientHello (§11.6, the
@@ -922,10 +928,12 @@ without the `server` feature and contain none of this code.
   reads the answer, replies with the same key exchange group and cipher suite (a ServerHello of the same length), and
   re-frames its EncryptedExtensions…Finished into records of `dest`'s lengths with TLS 1.3 record padding (RFC 8446 §5.4)
   (`inbound/reality_shape.rs`). The end of `dest`'s answer is a pause at a record boundary of a quarter of its TCP
-  connect time (2–15 ms); an unfinished record is always awaited. If `dest` does not answer within 3 s, the records keep
-  rustls's sizes. `dest`'s answer is cached for 10 minutes by the stable ClientHello fields (SNI, ciphers, groups, ALPN,
-  key share groups; GREASE ignored), `dest`'s addresses for 5 minutes; a failed probe is not cached. Clock differences
-  and replays are logged at info.
+  connect time (10–15 ms: less can cut the answer while `dest` signs its CertificateVerify); an unfinished record is
+  always awaited. `dest` is probed on every handshake, as in Xray: our client waits for `dest` just as a stranger
+  spliced to it does, so the response time does not tell them apart. `dest`'s answer is remembered for 10 minutes by
+  the stable ClientHello fields (SNI, ciphers, groups, ALPN, key share groups; GREASE ignored) and used only when a probe
+  fails; otherwise (or if `dest` does not answer within 3 s) the records keep rustls's sizes. `dest`'s addresses are
+  cached for 5 minutes. Clock differences and replays are logged at info.
 - Users come from the config only. Vision follows Xray's rules: a user whose `flow` is Vision must use it for TCP;
   Vision does not wrap the UDP command, and a Mux.Cool stream of a Vision user may carry UDP only.
 - UDP: the VLESS UDP command and Mux.Cool / XUDP. The VLESS response header goes out with the first downlink data.

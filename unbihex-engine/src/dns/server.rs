@@ -1,21 +1,22 @@
 //! DNS server answering queries captured from the TUN (SPEC §8.2).
 //!
 //! A → fake IP; AAAA, SVCB, HTTPS → empty NOERROR (keeps traffic on fake IPv4
-//! addresses); single-label names, `dns.fakeip_exclude` suffixes and other types →
-//! forwarded upstream. A name every session to which a rule blocks by the name
+//! addresses); PTR of a fake address → the pool's name or NXDOMAIN; single-label
+//! names, `dns.fakeip_exclude` suffixes and other types → forwarded upstream. A name every session to which a rule blocks by the name
 //! alone (ad-blocking lists) gets NXDOMAIN.
 //!
 //! Forwarded queries are routed like any other UDP flow to the upstream server, so
 //! with a proxy as `final` they leave through the proxy instead of in the clear.
 
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_proto::rr::rdata::A;
-use hickory_proto::rr::{RData, Record, RecordType};
+use hickory_proto::rr::rdata::{A, PTR};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 
 use super::client::{DnsClient, exchange_tcp, is_answer, is_truncated, race, with_id};
 use super::fakeip::FakeIpPool;
@@ -110,6 +111,22 @@ impl DnsServer {
         let domain = q.name().to_ascii().trim_end_matches('.').to_string();
         let local = !domain.contains('.');
         let qtype = q.query_type();
+        // A reverse lookup of a fake address is answered from the pool: upstream knows
+        // nothing of it, and a stream of PTR queries for 198.18.x.x tells it (and the
+        // network on the way) that the device runs a fake-IP proxy.
+        if qtype == RecordType::PTR
+            && let Some(ip) = reverse_v4(&domain).map(IpAddr::V4)
+            && self.fakeip.is_fake(ip)
+        {
+            let mut resp = response(&msg);
+            match self.fakeip.lookup(ip).and_then(|d| Name::from_ascii(format!("{d}.")).ok()) {
+                Some(name) => {
+                    resp.add_answer(Record::from_rdata(q.name().clone(), self.ttl, RData::PTR(PTR(name))));
+                }
+                None => resp.metadata.response_code = ResponseCode::NXDomain,
+            }
+            return resp.to_vec().ok();
+        }
         // Names a rule blocks outright (ad-blocking lists) do not exist: apps give
         // up at once instead of retrying connections that are refused.
         if !local
@@ -255,6 +272,17 @@ fn response(query: &Message) -> Message {
     resp
 }
 
+/// The IPv4 address of an `in-addr.arpa` name (`4.3.2.1.in-addr.arpa` is 1.2.3.4).
+fn reverse_v4(name: &str) -> Option<Ipv4Addr> {
+    let name = name.to_ascii_lowercase();
+    let mut labels = name.strip_suffix(".in-addr.arpa")?.split('.');
+    let mut ip = [0u8; 4];
+    for octet in ip.iter_mut().rev() {
+        *octet = labels.next()?.parse().ok()?;
+    }
+    labels.next().is_none().then_some(Ipv4Addr::from(ip))
+}
+
 fn error(query: &Message, code: ResponseCode) -> Option<Vec<u8>> {
     let mut resp = response(query);
     resp.metadata.response_code = code;
@@ -349,6 +377,38 @@ mod tests {
             assert_eq!(r.metadata.response_code, ResponseCode::NoError);
             assert!(r.answers.is_empty());
             assert_eq!(r.queries.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn ptr_of_a_fake_address_stays_local() {
+        let s = server();
+        let ip = s.fakeip.alloc("example.com").unwrap();
+        let [a, b, c, d] = ip.octets();
+        let r = Message::from_vec(
+            &s.handle(&query(&format!("{d}.{c}.{b}.{a}.IN-ADDR.ARPA."), RecordType::PTR))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(r.metadata.response_code, ResponseCode::NoError);
+        let RData::PTR(name) = &r.answers[0].data else {
+            panic!("not PTR")
+        };
+        assert_eq!(name.0.to_ascii(), "example.com.");
+        // An unmapped fake address does not exist; a real one is still forwarded
+        // (the test upstream is unreachable: SERVFAIL).
+        assert_eq!(
+            code(&s, "200.200.19.198.in-addr.arpa.", RecordType::PTR).await,
+            (ResponseCode::NXDomain, 0)
+        );
+        assert_eq!(
+            code(&s, "1.1.168.192.in-addr.arpa.", RecordType::PTR).await.0,
+            ResponseCode::ServFail
+        );
+        assert_eq!(reverse_v4("4.3.2.1.in-addr.arpa"), Some(Ipv4Addr::new(1, 2, 3, 4)));
+        for bad in ["3.2.1.in-addr.arpa", "5.4.3.2.1.in-addr.arpa", "x.3.2.1.in-addr.arpa", "1.2.3.4"] {
+            assert_eq!(reverse_v4(bad), None, "{bad}");
         }
     }
 

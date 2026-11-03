@@ -120,7 +120,8 @@ impl TrustTunnelOutbound {
             sni: Some(sni.clone().unwrap_or_else(|| cfg.hostname.clone())),
             alpn: vec!["h2".into()],
             pinned_sha256: Vec::new(),
-            fingerprint: None,
+            // A browser's ClientHello (Chrome unless set), not rustls's own.
+            fingerprint: cfg.fingerprint.clone(),
         };
         let verify_name = sni.is_some().then_some(cfg.hostname.as_str());
         let tls = TlsClient::with_trust(&tls_cfg, &cfg.hostname, cfg.trust_roots()?, verify_name)?;
@@ -936,6 +937,7 @@ mod tests {
             certificates: vec![cert],
             has_ipv6: false,
             fragment: None,
+            fingerprint: None,
         };
         let server = ServerEndpoint {
             host: addr.ip().to_string(),

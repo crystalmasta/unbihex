@@ -27,12 +27,11 @@
 //! (`HelloEdge_Auto`), `Hello360_11_0`, `HelloQQ_11_1`. Where a preset advertises
 //! something rustls has no provider for (P-521, FFDHE, CBC suites) only the
 //! advertisement is mirrored; the key shares stay on groups rustls (and REALITY) really
-//! supports. `random`/`randomized` build a randomized spec on the same lists, as utls's
-//! randomized parrot does: `randomized` mixes per connection from the hello random,
-//! `random` uses one fixed seed so it is stable within a process (Xray picks one modern
-//! preset per process for `random`).
+//! supports. `randomized` builds a randomized spec on the same lists, as utls's
+//! randomized parrot does, mixed per connection from the hello random. `random` is, as
+//! in Xray, one real preset drawn when the process starts (see [`random_preset`]).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustls::client::{ClientHelloRewriter, RewrittenHello};
 use rustls::crypto::{CryptoProvider, SupportedKxGroup};
@@ -61,8 +60,6 @@ pub enum Fingerprint {
     Browser360,
     /// QQ Browser 11.1 (`HelloQQ_Auto` in utls).
     Qq,
-    /// A fixed randomized spec (Xray picks one modern preset per process for `random`).
-    Random,
     /// utls's randomized parrot with ALPN: a fresh permutation per connection.
     Randomized,
 }
@@ -81,7 +78,7 @@ impl Fingerprint {
             Some("edge") => Ok(Some(Fingerprint::Edge)),
             Some("360") => Ok(Some(Fingerprint::Browser360)),
             Some("qq") => Ok(Some(Fingerprint::Qq)),
-            Some("random") => Ok(Some(Fingerprint::Random)),
+            Some("random") => Ok(Some(random_preset())),
             Some("randomized") => Ok(Some(Fingerprint::Randomized)),
             Some("") | Some("none") | Some("rustls") => Ok(None),
             Some(other) => Err(Error::Unsupported(format!("tls fingerprint {other:?}"))),
@@ -98,7 +95,7 @@ impl Fingerprint {
             Fingerprint::Edge => &EDGE_PROFILE,
             Fingerprint::Browser360 => &THREE60_PROFILE,
             Fingerprint::Qq => &QQ_PROFILE,
-            Fingerprint::Random | Fingerprint::Randomized => &RANDOM_PROFILE,
+            Fingerprint::Randomized => &RANDOM_PROFILE,
         }
     }
 
@@ -130,11 +127,22 @@ impl Fingerprint {
     /// The rewriter to install as `ClientConfig::client_hello_rewriter`.
     pub fn rewriter(self) -> Arc<dyn ClientHelloRewriter> {
         match self {
-            Fingerprint::Randomized => Arc::new(RandomizedHello { fixed_seed: false }),
-            Fingerprint::Random => Arc::new(RandomizedHello { fixed_seed: true }),
+            Fingerprint::Randomized => Arc::new(RandomizedHello),
             _ => Arc::new(TableHello(self.profile())),
         }
     }
+}
+
+/// The presets `random` draws from: real browsers with an X25519MLKEM768 share, since
+/// REALITY servers (since 2026-09) refuse a hello without one.
+const RANDOM_PRESETS: [Fingerprint; 3] =
+    [Fingerprint::Chrome, Fingerprint::Firefox, Fingerprint::Safari];
+
+/// `random`: like Xray, one real browser preset drawn when the process starts, so
+/// installations differ while one process keeps a single, ordinary fingerprint.
+fn random_preset() -> Fingerprint {
+    static CHOICE: OnceLock<Fingerprint> = OnceLock::new();
+    *CHOICE.get_or_init(|| RANDOM_PRESETS[rand::random::<u32>() as usize % RANDOM_PRESETS.len()])
 }
 
 /// A key exchange group the provider can actually produce.
@@ -611,7 +619,7 @@ static QQ_PROFILE: Profile = Profile {
     kx: &[Kx::X25519, Kx::P256, Kx::P384],
 };
 
-/// Shared table for `random`/`randomized`; the randomized rewriter builds its own lists.
+/// Table row for `randomized`; the randomized rewriter builds its own lists.
 static RANDOM_PROFILE: Profile = Profile {
     label: "randomized",
     suites: &RANDOM_SUITES,
@@ -637,16 +645,14 @@ impl ClientHelloRewriter for TableHello {
     }
 }
 
-/// Rebuilds rustls's ClientHello as `randomized`'s (or `random`'s fixed-seed variant).
+/// Rebuilds rustls's ClientHello as `randomized`'s.
 #[derive(Debug)]
-struct RandomizedHello {
-    fixed_seed: bool,
-}
+struct RandomizedHello;
 
 impl ClientHelloRewriter for RandomizedHello {
     fn rewrite(&self, hello: &[u8]) -> Option<RewrittenHello> {
         let parsed = ParsedHello::parse(hello)?;
-        rewrite_parsed(&parsed, |h| randomized(h, self.fixed_seed))
+        rewrite_parsed(&parsed, randomized)
     }
 }
 
@@ -1078,24 +1084,16 @@ fn rewrite_profile(p: &Profile, h: &ParsedHello<'_>) -> Option<Vec<u8>> {
     Some(encode_message(h, &suites, &exts, p.pad_to_512))
 }
 
-/// `random`'s fixed seed: stable across hellos and processes, still a spec no real
-/// browser sends.
-const RANDOM_SEED: u64 = 0x756e_6269_6865_7801;
-
 /// utls's randomized parrot: shuffle the suites, signature algorithms and extension
 /// order, optionally drop extensions by weighted coin, and keep TLS 1.3's key share and
-/// supported_versions from rustls so the hello stays valid. `fixed_seed` is `random`;
-/// otherwise the seed is the hello random, so each connection differs.
-fn randomized(h: &ParsedHello<'_>, fixed_seed: bool) -> Option<Vec<u8>> {
+/// supported_versions from rustls so the hello stays valid. The seed is the hello
+/// random, so each connection differs.
+fn randomized(h: &ParsedHello<'_>) -> Option<Vec<u8>> {
     if h.ext(PRE_SHARED_KEY).is_some() || h.ext(EARLY_DATA).is_some() {
         return None;
     }
     let rustls_key_share = h.ext(KEY_SHARE)?;
-    let mut rng = if fixed_seed {
-        HelloRng::new("random", &RANDOM_SEED.to_be_bytes())
-    } else {
-        HelloRng::new("randomized", h.random)
-    };
+    let mut rng = HelloRng::new("randomized", h.random);
 
     let mut suites = RANDOM_SUITES.to_vec();
     shuffle_tail(&mut suites, 0, &mut rng);
@@ -1171,8 +1169,7 @@ fn firefox(h: &ParsedHello<'_>) -> Option<Vec<u8>> {
 #[cfg(test)]
 fn rewrite(fp: Fingerprint, h: &ParsedHello<'_>) -> Option<Vec<u8>> {
     match fp {
-        Fingerprint::Randomized => randomized(h, false),
-        Fingerprint::Random => randomized(h, true),
+        Fingerprint::Randomized => randomized(h),
         _ => rewrite_profile(fp.profile(), h),
     }
 }
@@ -1300,12 +1297,15 @@ mod tests {
             ("edge", Fingerprint::Edge),
             ("360", Fingerprint::Browser360),
             ("qq", Fingerprint::Qq),
-            ("random", Fingerprint::Random),
             ("randomized", Fingerprint::Randomized),
         ];
         for (name, fp) in names {
             assert_eq!(Fingerprint::from_name(Some(name)).unwrap(), Some(fp), "{name}");
         }
+        // `random` is one real ML-KEM preset, the same for the whole process.
+        let random = Fingerprint::from_name(Some("random")).unwrap().unwrap();
+        assert!(RANDOM_PRESETS.contains(&random) && random.uses_hybrid(), "{random:?}");
+        assert_eq!(Fingerprint::from_name(Some("RANDOM")).unwrap(), Some(random));
         assert_eq!(
             Fingerprint::from_name(None).unwrap(),
             Some(Fingerprint::Chrome)
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     /// Every profile with a fixed table row (all but the per-connection randomized one).
-    const TABLE_PROFILES: [Fingerprint; 9] = [
+    const TABLE_PROFILES: [Fingerprint; 8] = [
         Fingerprint::Chrome,
         Fingerprint::Firefox,
         Fingerprint::Safari,
@@ -1328,7 +1328,6 @@ mod tests {
         Fingerprint::Edge,
         Fingerprint::Browser360,
         Fingerprint::Qq,
-        Fingerprint::Random,
     ];
 
     /// A rustls hello with the profile's provider but no rewriter.
@@ -1387,16 +1386,7 @@ mod tests {
                 .copied()
                 .filter(|c| !is_grease(*c))
                 .collect();
-            if fp == Fingerprint::Random {
-                // The fixed-seed parrot permutes the same set.
-                let mut got = suites.clone();
-                let mut want = profile.suites.to_vec();
-                got.sort_unstable();
-                want.sort_unstable();
-                assert_eq!(got, want, "{fp:?} cipher suites");
-            } else {
-                assert_eq!(suites, profile.suites, "{fp:?} cipher suites");
-            }
+            assert_eq!(suites, profile.suites, "{fp:?} cipher suites");
 
             // The client config asks for h2 and http/1.1, so every profile carries them.
             assert_eq!(
@@ -1421,28 +1411,8 @@ mod tests {
         let ha = ParsedHello::parse(&a).expect("valid randomized hello");
         let hb = ParsedHello::parse(&b).expect("valid randomized hello");
         assert!(all_grease_free(&ha) && all_grease_free(&hb));
-        // The same hello always becomes the same bytes for a given kind of seed.
-        assert_eq!(randomized(&ha, false), randomized(&ha, false));
-        assert_eq!(randomized(&ha, true), randomized(&ha, true));
-        // `random` is the fixed-seed parrot: stable, still not a table profile.
-        let random_a = first_hello(client_config(Fingerprint::Random, RootCertStore::empty()));
-        let random_b = first_hello(client_config(Fingerprint::Random, RootCertStore::empty()));
-        let ra = ParsedHello::parse(&random_a).unwrap();
-        let rb = ParsedHello::parse(&random_b).unwrap();
-        assert_eq!(randomized(&ra, true), randomized(&ra, true));
-        let ext_order = |h: &ParsedHello<'_>| {
-            randomized(h, true)
-                .map(|m| {
-                    ParsedHello::parse(&m)
-                        .unwrap()
-                        .extensions
-                        .iter()
-                        .map(|(t, _)| *t)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap()
-        };
-        assert_eq!(ext_order(&ra), ext_order(&rb));
+        // The same hello always becomes the same bytes.
+        assert_eq!(randomized(&ha), randomized(&ha));
         assert_eq!(alpn_list(ha.ext(ALPN).unwrap()), vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
     }
 
@@ -1458,7 +1428,6 @@ mod tests {
             Fingerprint::Edge,
             Fingerprint::Browser360,
             Fingerprint::Qq,
-            Fingerprint::Random,
             Fingerprint::Randomized,
         ] {
             // handshake() asserts the negotiated ALPN is h2.

@@ -34,12 +34,12 @@ test_server version
 ```sh
 cargo build --release
 ./target/release/test_server x25519          # Private key — в конфиг, Public key — клиенту
-./target/release/test_server uuid            # id пользователя
+./target/release/test_server uuid            # id пользователя — в конфиг (в примерах заглушки, сервер с ними не запустится)
 ./target/release/test_server run -c config.reality.example.json
 ```
 Ссылка для клиента (Unbihex или любого клиента Xray):
 ```text
-vless://<uuid>@<адрес сервера>:443?security=reality&sni=www.microsoft.com&fp=chrome&pbk=<Public key>&sid=0123abcd&flow=xtls-rprx-vision&type=tcp#test
+vless://<uuid>@<адрес сервера>:443?security=reality&sni=www.microsoft.com&fp=chrome&pbk=<Public key>&sid=<short ID>&flow=xtls-rprx-vision&type=tcp#test
 ```
 
 ## Тесты

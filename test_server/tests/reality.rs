@@ -208,14 +208,13 @@ async fn reality_with_vision_and_chrome_hello() {
         .unwrap()
         .unwrap();
     assert_eq!(&buf[..n], b"over xudp");
-    // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
-    // The server asks the site once per ClientHello *shape* (to copy its record
-    // sizes) and reuses the answer for later handshakes with the same shape. Three
-    // connections from one client therefore cost one probe, not three.
+    // The server asks the site on every handshake (to copy its record sizes), as
+    // Xray does: a cached answer would make our clients' ServerHello come sooner
+    // than a stranger's, who is spliced to the site. Three connections, three probes.
     assert_eq!(
         s.site.visits.load(Ordering::SeqCst),
-        1,
-        "the site must be probed once per hello shape, not once per handshake"
+        3,
+        "the site must be probed on every handshake"
     );
     s.instance.shutdown().await;
 }
