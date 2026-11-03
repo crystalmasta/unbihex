@@ -197,6 +197,31 @@ pub fn store_apps_loopback(dir: &Path, allow: bool) -> Result<usize> {
     }
 }
 
+/// Configures or removes launch at system boot / login.
+pub fn set_autostart(enable: bool) -> Result<()> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        os::set_autostart(enable)
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = enable;
+        Ok(())
+    }
+}
+
+/// Checks whether autostart at system boot / login is currently configured.
+pub fn is_autostart_enabled() -> bool {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        os::is_autostart_enabled()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        false
+    }
+}
+
 /// System tools the client may run.
 const SYSTEM_PROGRAMS: &[&str] = &[
     "route",

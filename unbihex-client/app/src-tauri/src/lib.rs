@@ -291,8 +291,13 @@ async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
     let is_admin = unbihex_client_core::platform::is_elevated();
     #[cfg(mobile)]
     let is_admin = true;
+    let mut data = state.client.snapshot();
+    #[cfg(desktop)]
+    {
+        data.settings.auto_start = unbihex_client_core::platform::is_autostart_enabled();
+    }
     Ok(StateView {
-        data: state.client.snapshot(),
+        data,
         status: state.client.status().await,
         platform: platform_name(),
         mobile: cfg!(mobile),
@@ -389,6 +394,10 @@ async fn save_settings(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Option<ConnectionInfo>, String> {
+    #[cfg(desktop)]
+    if let Err(e) = unbihex_client_core::platform::set_autostart(settings.auto_start) {
+        tracing::warn!("set_autostart: {e}");
+    }
     logs::set_level(&state.level, &settings.log_level);
     state.client.set_settings(settings).map_err(err)?;
     notify(&app);
@@ -785,6 +794,12 @@ pub fn run() {
             #[cfg(desktop)]
             if let Err(e) = setup_tray(app) {
                 tracing::warn!("tray: {e}");
+            }
+            #[cfg(desktop)]
+            if std::env::args().any(|a| a == "--autostart" || a == "--minimized") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.close();
+                }
             }
             start_background(app.handle().clone());
             Ok(())

@@ -417,3 +417,30 @@ pub(super) fn store_apps_loopback(dir: &Path, allow: bool) -> Result<usize> {
     std::fs::write(&journal, serde_json::to_vec(&ours)?)?;
     Ok(changed)
 }
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const APP_NAME: &str = "Unbihex";
+
+pub(super) fn set_autostart(enable: bool) -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if enable {
+        let exe = std::env::current_exe()?;
+        let val = format!("\"{}\" --autostart", exe.display());
+        let (key, _) = hkcu
+            .create_subkey_with_flags(RUN_KEY, KEY_READ | KEY_WRITE)
+            .map_err(|e| ClientError::platform(format!("реестр Run: {e}")))?;
+        key.set_value(APP_NAME, &val)
+            .map_err(|e| ClientError::platform(format!("реестр Run: {e}")))?;
+    } else if let Ok(key) = hkcu.open_subkey_with_flags(RUN_KEY, KEY_WRITE) {
+        let _ = key.delete_value(APP_NAME);
+    }
+    Ok(())
+}
+
+pub(super) fn is_autostart_enabled() -> bool {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(key) = hkcu.open_subkey_with_flags(RUN_KEY, KEY_READ) {
+        key.get_value::<String, _>(APP_NAME).is_ok()
+    } else {
+        false
+    }
+}

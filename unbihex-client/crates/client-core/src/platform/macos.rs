@@ -132,3 +132,30 @@ pub(super) fn set_proxy(j: &mut JournalFile, http_port: u16, socks_port: u16) ->
 }
 
 pub(super) fn restore_proxy(_b: &ProxyBackup) {}
+pub(super) fn set_autostart(enable: bool) -> Result<()> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let Some(home) = home else {
+        return Ok(());
+    };
+    let dir = home.join("Library").join("LaunchAgents");
+    let file = dir.join("com.unbihex.client.plist");
+    if enable {
+        let exe = std::env::current_exe()?;
+        let _ = std::fs::create_dir_all(&dir);
+        let content = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>com.unbihex.client</string>\n    <key>ProgramArguments</key>\n    <array>\n        <string>{}</string>\n        <string>--autostart</string>\n    </array>\n    <key>RunAtLoad</key>\n    <true/>\n</dict>\n</plist>\n",
+            exe.display()
+        );
+        std::fs::write(&file, content)?;
+    } else if file.exists() {
+        let _ = std::fs::remove_file(&file);
+    }
+    Ok(())
+}
+
+pub(super) fn is_autostart_enabled() -> bool {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join("Library").join("LaunchAgents").join("com.unbihex.client.plist"))
+        .is_some_and(|p| p.exists())
+}

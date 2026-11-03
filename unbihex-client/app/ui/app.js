@@ -403,6 +403,8 @@ function fillSettings() {
   f.mtu.value = s.mtu;
   f.user_agent.value = s.user_agent;
   f.send_hwid.checked = s.send_hwid;
+  f.auto_start.checked = s.auto_start;
+  $("#desktop-autostart").hidden = S.mobile;
   f.auto_connect.checked = s.auto_connect;
   f.android_notification.checked = s.android_notification;
   $("#android-notification").hidden = S.platform !== "android";
@@ -485,6 +487,7 @@ function readSettings() {
     mtu: Math.min(9000, Math.max(1280, parseInt(f.mtu.value, 10) || 1500)),
     user_agent: f.user_agent.value.trim(),
     send_hwid: f.send_hwid.checked,
+    auto_start: f.auto_start.checked,
     auto_connect: f.auto_connect.checked,
     android_notification: f.android_notification.checked,
     log_level: f.log_level.value,

@@ -153,3 +153,30 @@ pub(super) fn set_proxy(j: &mut JournalFile, http_port: u16, socks_port: u16) ->
 }
 
 pub(super) fn restore_proxy(_b: &ProxyBackup) {}
+pub(super) fn set_autostart(enable: bool) -> Result<()> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let Some(home) = home else {
+        return Ok(());
+    };
+    let dir = home.join(".config").join("autostart");
+    let file = dir.join("unbihex.desktop");
+    if enable {
+        let exe = std::env::current_exe()?;
+        let _ = std::fs::create_dir_all(&dir);
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=Unbihex\nComment=Unbihex VPN Client\nExec=\"{}\" --autostart\nTerminal=false\nCategories=Network;VPN;\n",
+            exe.display()
+        );
+        std::fs::write(&file, content)?;
+    } else if file.exists() {
+        let _ = std::fs::remove_file(&file);
+    }
+    Ok(())
+}
+
+pub(super) fn is_autostart_enabled() -> bool {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".config").join("autostart").join("unbihex.desktop"))
+        .is_some_and(|p| p.exists())
+}

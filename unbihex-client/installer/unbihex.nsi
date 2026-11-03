@@ -156,6 +156,7 @@ Section "Uninstall"
 
   DeleteRegKey HKLM "${UNINSTKEY}"
   DeleteRegKey HKLM "Software\${APPNAME}"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APPNAME}"
 
   ; Подписки и настройки пользователя удаляются только по согласию.
   SetShellVarContext current
