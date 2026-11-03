@@ -135,17 +135,36 @@ pub struct XmuxConfig {
     /// How long a connection is reused, seconds.
     #[serde(default)]
     pub h_max_reusable_secs: Option<Range>,
+    /// HTTP/2 PING period in seconds: `0` is Chrome's 45 s, negative disables.
+    #[serde(default)]
+    pub h_keep_alive_period: Option<i32>,
 }
 
 impl XmuxConfig {
-    /// Xray's defaults when `xmux` is absent.
+    /// Defaults when `xmux` is absent.
+    ///
+    /// Concurrency is unlimited, as in Xray: sessions share the pooled
+    /// connections instead of dialing their own. With a per-session connection
+    /// every proxied connection paid a fresh TLS + REALITY handshake, so the
+    /// XHTTP path had the connection rate of plain TCP (about 500 conn/s
+    /// against Xray's 1400-1800) and a TTFB three times higher.
+    ///
+    /// The pool grows on demand up to eight connections: a new one is dialed
+    /// only while every connection already carries a session. One download
+    /// stream then uses one tunnel, while eight parallel streams spread over
+    /// eight, which is what their CPU pipelines need. A fixed size is worse at
+    /// both ends: four connections halve the throughput of eight streams at
+    /// RTT 0, and eight dial tunnels that a single stream never uses. Xray
+    /// itself defaults to `maxConnections` 3 here; eight is our choice.
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #42.
     pub fn xray_default() -> XmuxConfig {
         XmuxConfig {
-            max_concurrency: Some(Range::fixed(1)),
-            max_connections: None,
+            max_concurrency: None,
+            max_connections: Some(Range::fixed(8)),
             c_max_reuse_times: None,
             h_max_request_times: Some(Range { from: 600, to: 900 }),
             h_max_reusable_secs: Some(Range { from: 1800, to: 3000 }),
+            h_keep_alive_period: None,
         }
     }
 }
@@ -215,6 +234,16 @@ pub struct XhttpConfig {
     /// Minimum pause between upload POSTs in packet-up mode, ms, default 30.
     #[serde(default)]
     pub sc_min_posts_interval_ms: Option<Range>,
+    /// Packet-up upload placement: `body` (default), `auto`, `header`, `cookie`.
+    #[serde(default)]
+    pub uplink_data_placement: String,
+    /// Header/cookie key; defaults to `X-Data` for headers, `x_data` for cookies.
+    #[serde(default)]
+    pub uplink_data_key: String,
+    /// Bytes of base64url data per header/cookie; Xray defaults to 3-4 KB
+    /// (headers) or 2-3 KB (cookies).
+    #[serde(default)]
+    pub uplink_chunk_size: Option<Range>,
     /// Connection reuse; Xray's defaults when absent.
     #[serde(default)]
     pub xmux: Option<XmuxConfig>,
@@ -268,6 +297,51 @@ impl XhttpConfig {
             }
             validate_key(self.padding_key())?;
             validate_key(self.padding_header())?;
+        }
+        if !matches!(
+            self.uplink_data_placement.as_str(),
+            "" | "auto" | "body" | "header" | "cookie"
+        ) {
+            return Err(Error::config("xhttp: unsupported uplink data placement"));
+        }
+        if !self.uplink_data_key.is_empty() {
+            if self.uplink_placement() == "cookie" {
+                validate_cookie_key(self.uplink_data_key())?;
+            } else {
+                validate_key(self.uplink_data_key())?;
+            }
+        }
+        // The upload headers/cookies share the request namespace with padding.
+        if self.x_padding_obfs_mode {
+            let placement = match self.padding_placement() {
+                "header" | "queryInHeader" => "header",
+                "cookie" => "cookie",
+                _ => "",
+            };
+            let data_placement = self.uplink_placement();
+            if placement == data_placement && matches!(data_placement, "header" | "cookie") {
+                let sep = if placement == "header" { '-' } else { '_' };
+                let pad = if placement == "header" {
+                    self.padding_header().to_ascii_lowercase()
+                } else {
+                    self.padding_key().to_string()
+                };
+                let base = if placement == "header" {
+                    self.uplink_data_key().to_ascii_lowercase()
+                } else {
+                    self.uplink_data_key().to_string()
+                };
+                let prefix = format!("{base}{sep}");
+                let same = pad == base
+                    || pad
+                        .strip_prefix(&prefix)
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                if same {
+                    return Err(Error::config(
+                        "xhttp: padding and uplink data use the same key",
+                    ));
+                }
+            }
         }
         let mut keys = vec![
             (self.session_placement(), self.session_key()),
@@ -428,6 +502,32 @@ impl XhttpConfig {
     pub fn uplink_method(&self) -> &str {
         default_str(&self.uplink_http_method, "POST")
     }
+    /// Effective packet-up upload placement (`body`, `auto`, `header`, `cookie`).
+    pub fn uplink_placement(&self) -> &str {
+        default_str(&self.uplink_data_placement, "body")
+    }
+    /// Effective upload header/cookie key.
+    pub fn uplink_data_key(&self) -> &str {
+        default_str(
+            &self.uplink_data_key,
+            if self.uplink_placement() == "cookie" {
+                "x_data"
+            } else {
+                "X-Data"
+            },
+        )
+    }
+    /// Bytes of base64url data per upload header/cookie, mirroring Xray.
+    pub fn uplink_chunk_size(&self) -> Range {
+        match self.uplink_chunk_size {
+            Some(r) if r.to > 0 => Range { from: r.from.max(64), to: r.to.max(64) },
+            _ => match self.uplink_data_placement.as_str() {
+                "cookie" => Range { from: 2 * 1024, to: 3 * 1024 },
+                "header" => Range { from: 3_000, to: 4_000 },
+                _ => self.max_post(),
+            },
+        }
+    }
 
     /// GET uploads exist only in packet-up.
     pub fn check_uplink(&self, mode: XhttpMode) -> Result<()> {
@@ -435,6 +535,13 @@ impl XhttpConfig {
             && matches!(mode, XhttpMode::StreamUp | XhttpMode::StreamOne)
         {
             return Err(Error::config("xhttp: GET uplink requires packet-up mode"));
+        }
+        if matches!(self.uplink_placement(), "header" | "cookie")
+            && mode != XhttpMode::PacketUp
+        {
+            return Err(Error::config(
+                "xhttp: header/cookie uplink data requires packet-up mode",
+            ));
         }
         Ok(())
     }
@@ -498,13 +605,27 @@ impl XhttpConfig {
     /// link). Fields the engine does not implement are refused unless they hold
     /// their default value: they change how the traffic looks on the wire.
     pub fn from_xray(v: &Value) -> Result<XhttpConfig> {
+        let cfg = XhttpConfig::from_xray_fields(v)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Parses the camelCase fields without validating them: `extra` replaces
+    /// the outer settings, and mode-dependent checks have to see the merged
+    /// result rather than the inner object's default mode.
+    fn from_xray_fields(v: &Value) -> Result<XhttpConfig> {
         let obj = v
             .as_object()
             .ok_or_else(|| Error::config("xhttp settings must be an object"))?;
         let mut cfg = XhttpConfig::default();
+        let has_extra = obj.get("extra").is_some_and(|e| !e.is_null());
         if let Some(extra) = obj.get("extra").filter(|e| !e.is_null()) {
-            // Like Xray: `extra` replaces everything but host, path and mode.
-            cfg = XhttpConfig::from_xray(extra)?;
+            // Like Xray: `extra` replaces everything but host, path and mode,
+            // and those three come from outside even when they are absent there.
+            cfg = XhttpConfig::from_xray_fields(extra)?;
+            cfg.host = None;
+            cfg.path = String::new();
+            cfg.mode = XhttpMode::default();
         }
         let s = |k: &str| -> Result<Option<String>> {
             match obj.get(k) {
@@ -527,6 +648,10 @@ impl XhttpConfig {
             }
         };
         for (k, val) in obj {
+            // Xray ignores every outer field but these three once `extra` is set.
+            if has_extra && !matches!(k.as_str(), "host" | "path" | "mode" | "extra") {
+                continue;
+            }
             match k.as_str() {
                 "host" => cfg.host = s(k)?.filter(|h| !h.is_empty()),
                 "path" => cfg.path = s(k)?.unwrap_or_default(),
@@ -552,7 +677,7 @@ impl XhttpConfig {
                 "xmux" => cfg.xmux = Some(xmux_from_xray(val)?),
                 // Server-side or ignored by clients.
                 "noSSEHeader" | "scMaxBufferedPosts" | "scStreamUpServerSecs"
-                | "serverMaxHeaderBytes" => {}
+                | "serverMaxHeaderBytes" | "h2Params" => {}
                 // Wire format options: accepted only with their defaults.
                 "xPaddingObfsMode" => cfg.x_padding_obfs_mode = b(k)?,
                 "xPaddingKey" => cfg.x_padding_key = s(k)?.unwrap_or_default(),
@@ -571,13 +696,10 @@ impl XhttpConfig {
                 "seqPlacement" => cfg.seq_placement = s(k)?.unwrap_or_default(),
                 "seqKey" => cfg.seq_key = s(k)?.unwrap_or_default(),
                 "uplinkDataPlacement" => {
-                    if !matches!(s(k)?.as_deref(), None | Some("") | Some("auto") | Some("body")) {
-                        return Err(unsupported(k));
-                    }
+                    cfg.uplink_data_placement = s(k)?.unwrap_or_default()
                 }
-                "uplinkDataKey" | "uplinkChunkSize" => {
-                    // Only meaningful with xPaddingObfsMode or non-default placements.
-                }
+                "uplinkDataKey" => cfg.uplink_data_key = s(k)?.unwrap_or_default(),
+                "uplinkChunkSize" => cfg.uplink_chunk_size = r(k)?,
                 "downloadSettings" => {
                     if !val.is_null() {
                         return Err(unsupported(k));
@@ -588,7 +710,6 @@ impl XhttpConfig {
                 }
             }
         }
-        cfg.validate()?;
         Ok(cfg)
     }
 }
@@ -619,6 +740,18 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_cookie_key(key: &str) -> Result<()> {
+    // RFC 6265 cookie-name is an RFC 7230 token, which is also stricter than a
+    // bare base64url string but accepts every valid header name.
+    fn token(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+    }
+    if key.is_empty() || !key.bytes().all(token) {
+        return Err(Error::config("xhttp: invalid uplink data cookie key"));
+    }
+    Ok(())
+}
+
 fn unsupported(field: &str) -> Error {
     Error::Unsupported(format!("xhttp {field} is not supported yet"))
 }
@@ -640,7 +773,17 @@ fn xmux_from_xray(v: &Value) -> Result<XmuxConfig> {
             "cMaxReuseTimes" => x.c_max_reuse_times = r,
             "hMaxRequestTimes" => x.h_max_request_times = r,
             "hMaxReusableSecs" => x.h_max_reusable_secs = r,
-            "hKeepAlivePeriod" => {}
+            "hKeepAlivePeriod" => {
+                x.h_keep_alive_period = match val {
+                    Value::Null => None,
+                    Value::Number(n) => Some(
+                        n.as_i64()
+                            .ok_or_else(|| Error::config("xhttp xmux: hKeepAlivePeriod"))?
+                            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                    ),
+                    _ => return Err(Error::config("xhttp xmux: hKeepAlivePeriod must be a number")),
+                }
+            }
             other => return Err(Error::config(format!("xhttp xmux: unknown field {other:?}"))),
         }
     }
@@ -674,6 +817,38 @@ mod tests {
     }
 
     #[test]
+    fn extra_inherits_the_outer_mode() {
+        // Panels put the placement inside `extra` and the mode outside it; the
+        // mode-dependent check has to see the merged result, not the default
+        // mode of the inner object.
+        let c = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up",
+            "extra": { "uplinkDataPlacement": "header", "uplinkDataKey": "X-Uplink" }
+        }))
+        .unwrap();
+        assert_eq!(c.mode, XhttpMode::PacketUp);
+        assert_eq!(c.uplink_data_placement, "header");
+        // Host, path and mode inside `extra` lose to the outer ones, even to
+        // absent ones, as in Xray; other outer fields are ignored.
+        let c = XhttpConfig::from_xray(&serde_json::json!({
+            "path": "/out", "noGRPCHeader": true,
+            "extra": { "host": "inner.example", "path": "/in", "mode": "stream-up" }
+        }))
+        .unwrap();
+        assert_eq!(c.path, "/out");
+        assert_eq!(c.host, None);
+        assert_eq!(c.mode, XhttpMode::default());
+        assert!(!c.no_grpc_header);
+        assert!(
+            XhttpConfig::from_xray(&serde_json::json!({
+                "mode": "stream-up",
+                "extra": { "uplinkDataPlacement": "header" }
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn rejects_unsafe_wire_settings_and_unimplemented_payload_placements() {
         for bad in [
             serde_json::json!({"sessionIDPlacement":"header", "sessionIDKey":"Content-Length"}),
@@ -683,8 +858,13 @@ mod tests {
             serde_json::json!({"xPaddingBytes":1000000}),
             serde_json::json!({"seqPlacement":"query", "seqKey":"same", "sessionIDPlacement":"query", "sessionIDKey":"same"}),
             serde_json::json!({"uplinkHTTPMethod":"HEAD"}),
-            serde_json::json!({"uplinkDataPlacement":"header"}),
-            serde_json::json!({"uplinkDataPlacement":"cookie"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"nope"}),
+            serde_json::json!({"mode":"stream-up","uplinkDataPlacement":"header"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"header","uplinkDataKey":"bad key"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"cookie","uplinkDataKey":"bad;key"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"header","xPaddingObfsMode":true,"xPaddingPlacement":"header","xPaddingHeader":"X-Data"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"header","xPaddingObfsMode":true,"xPaddingPlacement":"header","xPaddingHeader":"X-Data-0"}),
+            serde_json::json!({"mode":"packet-up","uplinkDataPlacement":"cookie","xPaddingObfsMode":true,"xPaddingPlacement":"cookie","xPaddingKey":"x_data_0"}),
             serde_json::json!({"sessionIDPlacement":"header", "sessionIDKey":"Referer"}),
             serde_json::json!({"xPaddingObfsMode":true, "sessionIDPlacement":"header", "sessionIDKey":"X-Padding"}),
             serde_json::json!({"xPaddingObfsMode":true, "xPaddingHeader":"Cookie"}),
@@ -699,6 +879,71 @@ mod tests {
         ] {
             assert!(XhttpConfig::from_xray(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn uplink_payload_placements_and_defaults() {
+        let header = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "header"
+        }))
+        .unwrap();
+        assert_eq!(header.uplink_placement(), "header");
+        assert_eq!(header.uplink_data_key(), "X-Data");
+        assert_eq!(header.uplink_chunk_size(), Range { from: 3_000, to: 4_000 });
+
+        let cookie = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "cookie"
+        }))
+        .unwrap();
+        assert_eq!(cookie.uplink_placement(), "cookie");
+        assert_eq!(cookie.uplink_data_key(), "x_data");
+        assert_eq!(cookie.uplink_chunk_size(), Range { from: 2 * 1024, to: 3 * 1024 });
+
+        for placement in ["auto", "body"] {
+            let body = XhttpConfig::from_xray(&serde_json::json!({
+                "mode": "packet-up", "uplinkDataPlacement": placement
+            }))
+            .unwrap();
+            assert_eq!(body.uplink_placement(), placement);
+            assert_eq!(body.uplink_data_key(), "X-Data");
+            assert_eq!(body.uplink_chunk_size(), Range::fixed(1_000_000));
+        }
+        let unset = XhttpConfig::from_xray(&serde_json::json!({"mode": "packet-up"})).unwrap();
+        assert_eq!(unset.uplink_placement(), "body");
+        assert_eq!(unset.uplink_data_key(), "X-Data");
+
+        let custom = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "header",
+            "uplinkDataKey": "X-Custom", "uplinkChunkSize": "512-1024"
+        }))
+        .unwrap();
+        assert_eq!(custom.uplink_data_key(), "X-Custom");
+        assert_eq!(custom.uplink_chunk_size(), Range { from: 512, to: 1024 });
+
+        let small = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "cookie",
+            "uplinkChunkSize": 8
+        }))
+        .unwrap();
+        assert_eq!(small.uplink_chunk_size(), Range { from: 64, to: 64 });
+
+        let engine: XhttpConfig = serde_json::from_str(
+            r#"{"mode":"packet-up","uplink_data_placement":"cookie",
+                "uplink_data_key":"c","uplink_chunk_size":"100-200"}"#,
+        )
+        .unwrap();
+        assert_eq!(engine.uplink_placement(), "cookie");
+        assert_eq!(engine.uplink_data_key(), "c");
+        assert_eq!(engine.uplink_chunk_size(), Range { from: 100, to: 200 });
+    }
+
+    /// A per-session connection made the XHTTP path pay a handshake for every
+    /// proxied connection; the default must share the pool instead.
+    #[test]
+    fn default_xmux_shares_the_pool() {
+        let d = XmuxConfig::xray_default();
+        assert!(d.max_concurrency.is_none(), "sessions must share a connection");
+        assert_eq!(d.max_connections.map(|r| r.pick()), Some(8));
     }
 
     #[test]

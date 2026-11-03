@@ -601,7 +601,9 @@ characters), `alpn`, `fingerprint` (§11.2). `tls` and `reality` together are re
 
 VLESS inside ordinary-looking HTTP requests, compatible with Xray (`outbound/xhttp/`). Settings come from the VLESS
 `xhttp` field (snake_case) or from Xray's `xhttpSettings` / a link's `extra` (camelCase, read strictly: unknown and
-unimplemented keys are an `Unsupported` error, never skipped silently).
+unimplemented keys are an `Unsupported` error, never skipped silently). With `extra`, as in Xray, only `host`, `path`
+and `mode` come from outside, even when absent there (then empty); other outer fields are not read. `h2Params` is
+accepted and unused.
 
 - **Modes** (`mode`): `stream-one` — one streaming `POST {path}` carries both directions; `stream-up` —
   `GET {path}{session}` downloads and one streaming `POST` uploads; `packet-up` — `GET` downloads and the upload is cut
@@ -610,8 +612,17 @@ unimplemented keys are an `Unsupported` error, never skipped silently).
 - **HTTP:** HTTP/2 over TLS and REALITY; HTTP/1.1 without TLS or with ALPN `http/1.1`, `packet-up` only. No HTTP/3.
 - **XMUX** (`xmux`): HTTP/2 connections are reused and retired after a number of sessions (`c_max_reuse_times`),
   requests (`h_max_request_times`) or some time (`h_max_reusable_secs`), so long-lived TLS connections do not stand
-  out; `max_concurrency` / `max_connections`. Without `xmux`, Xray's values: 1 session per connection, 600–900
-  requests, 1800–3000 s.
+  out. `max_concurrency` works as in Xray: a new connection only once every one carries that many sessions.
+  `max_connections` is a cap with growth on demand: a new connection is dialed only while all existing ones are busy,
+  otherwise the session joins the least loaded one (the freshest among equals); at the cap sessions wait for the
+  dials in flight (up to 5 s) instead of dialing their own. Without `xmux`: up to 8 connections, 600–900 requests,
+  1800–3000 s (Xray's default without `xmux` is `maxConnections` 3; 8 is our choice, so eight parallel downloads do
+  not share three tunnels). A connection without sessions for over 120 s is closed, the two freshest stay.
+  `h_keep_alive_period` (`hKeepAlivePeriod`): an HTTP/2 PING after that many seconds without incoming frames, like
+  Xray's `ReadIdleTimeout` (0 is 45 s, negative disables PINGs); no answer within 15 s retires the connection.
+- In `stream-one` and `stream-up` writes go straight into the HTTP/2 request body and a separate task reads the
+  download. A stream dropped without shutdown (a torn-down relay) resets its request (`RST_STREAM CANCEL`), the
+  download stops and the session frees its connection.
 - `path` (may carry a query), `host` (the TLS/REALITY name by default, then the server address), `headers` (no
   `Host`), browser-like headers, `no_grpc_header` (no `Content-Type: application/grpc` on streaming uploads),
   `sc_max_each_post_bytes` (1,000,000 by default) and `sc_min_posts_interval_ms` (30) for `packet-up`.
@@ -623,13 +634,19 @@ unimplemented keys are an `Unsupported` error, never skipped silently).
   keys `session_id_key` / `seq_key` (`X-Session` / `X-Seq` in headers, `x_session` / `x_seq` in query and cookies),
   a custom ID alphabet (`session_id_table`, including Xray's named alphabets, URL-safe ASCII) with
   `session_id_length` (1–256, at least 2^31 possible IDs, short dotted alphabets refused), and the upload method
+- **Upload in headers and cookies** (`packet-up` only): `uplink_data_placement` is `body` (the default; `auto` is the
+  same), `header` or `cookie`. A packet is base64url-encoded without `=` and cut into `uplink_chunk_size` pieces
+  (3000–4000 in headers, 2–3 KiB in cookies, at least 64) under `{uplink_data_key}-{i}` (headers, `X-Data`) or
+  `{uplink_data_key}_{i}` (pairs of one `Cookie`, `x_data`); the request body is empty. An Xray server reads at most
+  `serverMaxHeaderBytes` (8192 by default), so lower `sc_max_each_post_bytes` for these placements (to 2000–4000, say)
+  or a packet will not fit.
   `uplink_http_method` (`POST` by default; `GET` with a body in `packet-up` only; `PUT`, `PATCH`, `DELETE`). Metadata
   and padding keys are checked before connecting: reserved HTTP headers (`Host`, `Content-Length`, `Cookie`,
-  `Content-Type`, …) and colliding keys are an error.
+  `Content-Type`, …) and colliding keys (padding and upload keys included) are an error.
 - One request builder for HTTP/1.1 and HTTP/2: the query of `path` is kept byte for byte except transport keys; stale
   transport query/cookie values never shadow new ones; downloads carry no sequence number.
 - TLS, SNI, HTTP Host and the server address are independent: the client keeps TLS to the CDN edge even when the
-  origin takes XHTTP without TLS. Not implemented: HTTP/3, `downloadSettings`, payload in cookies/headers.
+  origin takes XHTTP without TLS. Not implemented: HTTP/3, `downloadSettings`.
 
 ### 11.6 ClientHello fragmentation
 

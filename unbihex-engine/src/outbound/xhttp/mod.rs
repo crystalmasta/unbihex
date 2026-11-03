@@ -12,22 +12,30 @@
 //! headers. HTTP/2 is used over TLS and REALITY (connections are reused like
 //! Xray's XMUX), HTTP/1.1 without TLS or with ALPN `http/1.1` (packet-up only).
 //!
-//! The caller gets one end of an in-memory duplex pipe; tasks move the bytes
-//! between the other end and the HTTP requests.
+//! In the streaming modes the caller writes the request body directly into an
+//! HTTP/2 stream and reads the response body through a shared pipe that a
+//! pump task keeps draining. Packet-up moves both directions that way.
 
 pub mod config;
 pub mod h1;
 pub mod pool;
 
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use bytes::Bytes;
 use h2::client::SendRequest;
 use h2::{RecvStream, SendStream};
 use rand::Rng;
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadBuf, ReadHalf,
+    WriteHalf,
+};
 
 pub use config::{Range, XhttpConfig, XhttpMode, XmuxConfig};
 
@@ -218,6 +226,35 @@ fn remove_cookie(headers: &mut Vec<(String, String)>, key: &str) {
     }
 }
 
+/// Appends one cookie pair to the single `Cookie` header.
+fn add_cookie(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    let pair = format!("{name}={value}");
+    let value = match headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+    {
+        Some((_, old)) => format!("{old}; {pair}"),
+        None => pair,
+    };
+    set_header(headers, "Cookie", value);
+}
+
+/// Splits an upload packet the way Xray does: base64url the whole packet, then
+/// cut the encoded string into random chunks. The server concatenates the
+/// chunks before decoding, so chunk boundaries may fall inside a base64 group.
+fn upload_chunks(cfg: &XhttpConfig, data: &[u8]) -> Vec<String> {
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data);
+    let range = cfg.uplink_chunk_size();
+    let mut chunks = Vec::new();
+    let mut rest = encoded.as_str();
+    while !rest.is_empty() {
+        let n = (range.pick() as usize).min(rest.len());
+        chunks.push(rest[..n].to_string());
+        rest = &rest[n..];
+    }
+    chunks
+}
+
 fn huffman_bits(c: u8) -> usize {
     // RFC 7541 appendix B, restricted to the base62 alphabet used by Xray.
     match c {
@@ -332,13 +369,105 @@ impl Dialer {
     async fn dial(&self) -> Result<BoxStream> {
         let tcp = self.server.connect(&self.sockets).await?;
         Ok(match (&self.reality, &self.tls) {
-            (Some(r), _) => Box::new(r.connect(tcp, self.fragment.as_ref()).await?),
+            (Some(r), _) => {
+                let mut s = r.connect(tcp, self.fragment.as_ref()).await?;
+                // Nothing above HTTP/2 needs record boundaries, so let the TLS
+                // stream drain the socket in bulk: reading one record at a time
+                // took 34 651 syscalls of 1.9 KB for every 64 MiB.
+                s.set_bulk();
+                Box::new(s)
+            }
             (None, Some(t)) if self.fragment.is_some() => {
-                Box::new(t.connect_record(tcp, self.fragment.as_ref()).await?)
+                let mut s = t.connect_record(tcp, self.fragment.as_ref()).await?;
+                s.set_bulk();
+                Box::new(s)
             }
             (None, Some(t)) => Box::new(t.connect(tcp).await?),
             (None, None) => Box::new(tcp),
         })
+    }
+}
+
+/// How often a keep-alive task looks at its pool when nothing else wakes it.
+const RETIRE_CHECK: Duration = Duration::from_secs(60);
+
+/// When a connection last received anything, for the keep-alive.
+#[derive(Clone)]
+struct ReadClock {
+    since: Instant,
+    /// Milliseconds after `since`.
+    last: Arc<AtomicU64>,
+}
+
+impl ReadClock {
+    fn new() -> ReadClock {
+        ReadClock {
+            since: Instant::now(),
+            last: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn tick(&self) {
+        let ms = u64::try_from(self.since.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last.store(ms, Ordering::Relaxed);
+    }
+
+    /// How long nothing has been received.
+    fn quiet(&self) -> Duration {
+        self.since
+            .elapsed()
+            .saturating_sub(Duration::from_millis(self.last.load(Ordering::Relaxed)))
+    }
+}
+
+/// A connection stream that stamps a `ReadClock` on every read.
+struct Heard {
+    io: BoxStream,
+    clock: ReadClock,
+}
+
+impl AsyncRead for Heard {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let r = Pin::new(&mut self.io).poll_read(cx, buf);
+        if matches!(r, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.clock.tick();
+        }
+        r
+    }
+}
+
+impl AsyncWrite for Heard {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
     }
 }
 
@@ -352,7 +481,7 @@ pub struct XhttpClient {
     path: String,
     query: String,
     dialer: Dialer,
-    pool: pool::H2Pool,
+    pool: Arc<pool::H2Pool>,
     fingerprint: Option<Fingerprint>,
 }
 
@@ -418,7 +547,9 @@ impl XhttpClient {
             host,
             path: cfg.normalized_path(),
             query: cfg.query().to_string(),
-            pool: pool::H2Pool::new(cfg.xmux.clone().unwrap_or_else(XmuxConfig::xray_default)),
+            pool: Arc::new(pool::H2Pool::new(
+                cfg.xmux.clone().unwrap_or_else(XmuxConfig::xray_default),
+            )),
             cfg: cfg.clone(),
             dialer: Dialer {
                 server,
@@ -562,15 +693,28 @@ impl XhttpClient {
         }
     }
 
-    fn h2_request(
+    /// Adds packet-up payload headers/cookies to a request shape.
+    fn add_uplink_payload(&self, shape: &mut RequestShape, data: &[u8]) {
+        let placement = self.cfg.uplink_placement();
+        if !matches!(placement, "header" | "cookie") {
+            return;
+        }
+        let key = self.cfg.uplink_data_key();
+        for (i, chunk) in upload_chunks(&self.cfg, data).into_iter().enumerate() {
+            if placement == "header" {
+                set_header(&mut shape.headers, &format!("{key}-{i}"), chunk);
+            } else {
+                add_cookie(&mut shape.headers, &format!("{key}_{i}"), &chunk);
+            }
+        }
+    }
+
+    fn h2_request_shape(
         &self,
         method: http::Method,
-        session: Option<&str>,
-        seq: Option<u64>,
-        stream_body: bool,
+        shape: RequestShape,
         len: Option<usize>,
     ) -> Result<http::Request<()>> {
-        let shape = self.request_shape(session, seq, stream_body);
         let mut b = http::Request::builder()
             .method(method)
             .uri(format!("{}://{}{}", self.scheme, self.host, shape.target));
@@ -583,11 +727,112 @@ impl XhttpClient {
         b.body(()).map_err(|e| Error::protocol(format!("xhttp: {e}")))
     }
 
-    async fn dial_h2(&self) -> Result<(SendRequest<Bytes>, Arc<AtomicBool>)> {
-        let io = self.dialer.dial().await?;
+    /// The HTTP/2 PING period. `hKeepAlivePeriod` follows Xray: `0` is
+    /// Chrome's 45 s and a negative value disables PINGs. An idle tunnel that
+    /// nothing pings is reaped by NATs and CDNs, and the next session then
+    /// pays a handshake.
+    fn keep_alive(&self) -> Option<Duration> {
+        match self.cfg.xmux.as_ref().and_then(|x| x.h_keep_alive_period) {
+            Some(v) if v < 0 => None,
+            Some(v) if v > 0 => Some(Duration::from_secs(u64::try_from(v).unwrap_or(45))),
+            _ => Some(Duration::from_secs(45)),
+        }
+    }
+
+    /// Looks after one pooled connection, the way Go's HTTP/2 transport in
+    /// Xray does (`ReadIdleTimeout`): a PING goes out only after a whole
+    /// period without any frame from the server, so a busy connection is
+    /// never pinged. NATs and CDNs reap bindings that go quiet, and a PING
+    /// also notices a connection that died without a FIN. On each wake-up the
+    /// task also retires the pool's idle connections, so an unused pool
+    /// shrinks without waiting for the next session. The task stops when the
+    /// pool drops the connection; returns the stop flag the pool flips then.
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #42.
+    fn spawn_keep_alive(
+        &self,
+        pings: Option<h2::PingPong>,
+        closed: &Arc<AtomicBool>,
+        heard: ReadClock,
+    ) -> Option<Arc<AtomicBool>> {
+        let mut pings = pings?;
+        let period = self.keep_alive();
+        let pool = Arc::downgrade(&self.pool);
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let closed = closed.clone();
+        tokio::spawn(async move {
+            let mut wait = period.unwrap_or(RETIRE_CHECK).min(RETIRE_CHECK);
+            loop {
+                tokio::time::sleep(wait).await;
+                if flag.load(Ordering::Relaxed) || closed.load(Ordering::Relaxed) {
+                    return;
+                }
+                match pool.upgrade() {
+                    Some(pool) => pool.retire_idle_now(),
+                    None => return,
+                }
+                wait = RETIRE_CHECK;
+                let Some(period) = period else { continue };
+                let quiet = heard.quiet();
+                if quiet < period {
+                    wait = wait.min(period - quiet);
+                    continue;
+                }
+                // A pong that does not come back means the tunnel is gone,
+                // even if TCP has not noticed: retire the connection instead
+                // of handing it to the next session. An immediate error means
+                // the same.
+                match tokio::time::timeout(Duration::from_secs(15), pings.ping(h2::Ping::opaque()))
+                    .await
+                {
+                    Ok(Ok(_)) => wait = wait.min(period),
+                    _ => {
+                        closed.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+        });
+        Some(stop)
+    }
+
+    fn h2_request(
+        &self,
+        method: http::Method,
+        session: Option<&str>,
+        seq: Option<u64>,
+        stream_body: bool,
+        len: Option<usize>,
+    ) -> Result<http::Request<()>> {
+        let shape = self.request_shape(session, seq, stream_body);
+        self.h2_request_shape(method, shape, len)
+    }
+
+    /// A packet-up request whose payload travels in headers or cookies.
+    fn h2_request_with_payload(
+        &self,
+        method: http::Method,
+        session: &str,
+        seq: u64,
+        data: &[u8],
+    ) -> Result<http::Request<()>> {
+        let mut shape = self.request_shape(Some(session), Some(seq), false);
+        self.add_uplink_payload(&mut shape, data);
+        // Xray sends a POST with no body in these placements.
+        self.h2_request_shape(method, shape, Some(0))
+    }
+
+    async fn dial_h2(&self) -> Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)> {
+        let clock = ReadClock::new();
+        let io = Heard {
+            io: self.dialer.dial().await?,
+            clock: clock.clone(),
+        };
         let mut builder = h2::client::Builder::new();
         self.h2_settings().apply(&mut builder);
-        let (send, conn) = builder.handshake::<_, Bytes>(io).await.map_err(h2_err)?;
+        let (send, mut conn) = builder.handshake::<_, Bytes>(io).await.map_err(h2_err)?;
+        // Must be taken from the connection before it is driven to completion.
+        let pings = conn.ping_pong();
         let closed = Arc::new(AtomicBool::new(false));
         let flag = closed.clone();
         tokio::spawn(async move {
@@ -596,11 +841,22 @@ impl XhttpClient {
             }
             flag.store(true, Ordering::Relaxed);
         });
-        Ok((send, closed))
+        let ping = self.spawn_keep_alive(pings, &closed, clock);
+        Ok((send, closed, ping))
     }
 
     /// Opens a new XHTTP session.
     pub async fn open(self: &Arc<Self>) -> Result<BoxStream> {
+        // Stream-one, stream-up and auto let the caller use the h2 streams
+        // directly; packet-up needs batching state and h1 is a different path.
+        if self.http == Http::H2
+            && matches!(
+                self.mode,
+                XhttpMode::StreamOne | XhttpMode::StreamUp | XhttpMode::Auto
+            )
+        {
+            return self.open_bridge().await;
+        }
         let (user, inner) = tokio::io::duplex(PIPE);
         match self.http {
             Http::H2 => self.open_h2(inner).await?,
@@ -609,9 +865,9 @@ impl XhttpClient {
         Ok(Box::new(user))
     }
 
-    async fn open_h2(self: &Arc<Self>, inner: DuplexStream) -> Result<()> {
+    /// Opens a streaming h2 session as one duplex stream, without the pipe.
+    async fn open_bridge(self: &Arc<Self>) -> Result<BoxStream> {
         let lease = self.pool.get(|| self.dial_h2()).await?;
-        let (r, w) = tokio::io::split(inner);
         match self.mode {
             XhttpMode::StreamOne | XhttpMode::Auto => {
                 let req = self.h2_request(self.uplink_method(), None, None, true, None)?;
@@ -622,15 +878,9 @@ impl XhttpClient {
                     .map_err(h2_err)?
                     .send_request(req, false)
                     .map_err(h2_err)?;
-                tokio::spawn(async move {
-                    let _lease = lease;
-                    let up = upload_stream(tx, r);
-                    let down = download_h2(resp, w);
-                    let (u, d) = tokio::join!(up, down);
-                    log_end(u, d);
-                });
+                Ok(Box::new(H2Bridge::new(lease, tx, resp)))
             }
-            XhttpMode::StreamUp | XhttpMode::PacketUp => {
+            XhttpMode::StreamUp => {
                 let session = self.cfg.new_session_id();
                 let get = self.h2_request(http::Method::GET, Some(&session), None, false, None)?;
                 let (resp, _) = lease
@@ -640,36 +890,55 @@ impl XhttpClient {
                     .map_err(h2_err)?
                     .send_request(get, true)
                     .map_err(h2_err)?;
-                if self.mode == XhttpMode::StreamUp {
-                    let post =
-                        self.h2_request(self.uplink_method(), Some(&session), None, true, None)?;
-                    let (post_resp, tx) = lease
-                        .request()
-                        .ready()
-                        .await
-                        .map_err(h2_err)?
-                        .send_request(post, false)
-                        .map_err(h2_err)?;
-                    tokio::spawn(async move {
-                        let _lease = lease;
-                        let up = async {
-                            let r = upload_stream(tx, r).await;
-                            drop(post_resp);
-                            r
-                        };
-                        let (u, d) = tokio::join!(up, download_h2(resp, w));
-                        log_end(u, d);
-                    });
-                } else {
-                    let me = self.clone();
-                    tokio::spawn(async move {
-                        let up = me.upload_packets_h2(&lease, &session, r);
-                        let (u, d) = tokio::join!(up, download_h2(resp, w));
-                        log_end(u, d);
-                    });
-                }
+                let post =
+                    self.h2_request(self.uplink_method(), Some(&session), None, true, None)?;
+                let (post_resp, tx) = lease
+                    .request()
+                    .ready()
+                    .await
+                    .map_err(h2_err)?
+                    .send_request(post, false)
+                    .map_err(h2_err)?;
+                // The upload response carries no data, but it still has to be
+                // polled: an unread response keeps its stream state alive and
+                // blocks the connection once the window is spent. A tiny
+                // detached task is cheaper than polling the future from every
+                // bridge read and write.
+                tokio::spawn(async move {
+                    match post_resp.await {
+                        Ok(r) => {
+                            let mut body = r.into_body();
+                            while let Some(Ok(_)) = body.data().await {}
+                        }
+                        Err(e) => tracing::debug!("xhttp upload response: {e}"),
+                    }
+                });
+                Ok(Box::new(H2Bridge::new(lease, tx, resp)))
             }
+            // `open` only sends the streaming modes here.
+            _ => Err(Error::protocol("xhttp: no streaming bridge for this mode")),
         }
+    }
+
+    /// Opens a packet-up session through the in-memory duplex pipe.
+    async fn open_h2(self: &Arc<Self>, inner: DuplexStream) -> Result<()> {
+        let lease = self.pool.get(|| self.dial_h2()).await?;
+        let (r, w) = tokio::io::split(inner);
+        let session = self.cfg.new_session_id();
+        let get = self.h2_request(http::Method::GET, Some(&session), None, false, None)?;
+        let (resp, _) = lease
+            .request()
+            .ready()
+            .await
+            .map_err(h2_err)?
+            .send_request(get, true)
+            .map_err(h2_err)?;
+        let me = self.clone();
+        tokio::spawn(async move {
+            let up = me.upload_packets_h2(&lease, &session, r);
+            let (u, d) = tokio::join!(up, download_h2(resp, w));
+            log_end(u, d);
+        });
         Ok(())
     }
 
@@ -711,6 +980,7 @@ impl XhttpClient {
         let max = self.cfg.max_post().pick().max(1) as usize;
         let mut buf = vec![0u8; max.min(1 << 20)];
         let interval = self.cfg.post_interval();
+        let in_metadata = matches!(self.cfg.uplink_placement(), "header" | "cookie");
         let failed = Arc::new(AtomicBool::new(false));
         let mut last = None;
         let mut seq = 0u64;
@@ -719,22 +989,33 @@ impl XhttpClient {
             if n == 0 || failed.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let req = self.h2_request(
-                self.uplink_method(),
-                Some(session),
-                Some(seq),
-                false,
-                Some(n),
-            )?;
+            let req = if in_metadata {
+                self.h2_request_with_payload(
+                    self.uplink_method(),
+                    session,
+                    seq,
+                    &buf[..n],
+                )?
+            } else {
+                self.h2_request(
+                    self.uplink_method(),
+                    Some(session),
+                    Some(seq),
+                    false,
+                    Some(n),
+                )?
+            };
             seq += 1;
             let (resp, mut tx) = lease
                 .request()
                 .ready()
                 .await
                 .map_err(h2_err)?
-                .send_request(req, false)
+                .send_request(req, in_metadata)
                 .map_err(h2_err)?;
-            send_data(&mut tx, Bytes::copy_from_slice(&buf[..n]), true).await?;
+            if !in_metadata {
+                send_data(&mut tx, Bytes::copy_from_slice(&buf[..n]), true).await?;
+            }
             let failed = failed.clone();
             tokio::spawn(async move {
                 match resp.await {
@@ -793,6 +1074,7 @@ impl XhttpClient {
         let max = self.cfg.max_post().pick().max(1) as usize;
         let mut buf = vec![0u8; max.min(1 << 20)];
         let interval = self.cfg.post_interval();
+        let in_metadata = matches!(self.cfg.uplink_placement(), "header" | "cookie");
         let mut last = None;
         let mut seq = 0u64;
         type Conn = (BufReader<ReadHalf<BoxStream>>, WriteHalf<BoxStream>);
@@ -802,7 +1084,13 @@ impl XhttpClient {
             if n == 0 {
                 return Ok(());
             }
-            let shape = self.request_shape(Some(session), Some(seq), false);
+            let mut shape = self.request_shape(Some(session), Some(seq), false);
+            let body: &[u8] = if in_metadata {
+                self.add_uplink_payload(&mut shape, &buf[..n]);
+                &[]
+            } else {
+                &buf[..n]
+            };
             seq += 1;
             let mut attempt = 0;
             loop {
@@ -822,7 +1110,7 @@ impl XhttpClient {
                         &shape.target,
                         &self.host,
                         &shape.headers,
-                        Some(&buf[..n]),
+                        Some(body),
                     )
                     .await?;
                     let head = h1::read_head(cr).await?;
@@ -861,6 +1149,131 @@ impl XhttpClient {
     }
 }
 
+/// One XHTTP stream: writes go straight into the h2 request body, reads come
+/// out of a pipe that a pump task fills from the response body.
+///
+/// The download side keeps the pipe on purpose. The pump drains the response
+/// while the caller is busy writing to its own peer, so the h2 window stays
+/// open; letting the caller read the body itself closes that window every
+/// time the peer stalls, which cost 12% of one download stream at RTT 50.
+/// The upload side is direct: a caller write becomes an h2 data frame with no
+/// pipe and no second task to hand it over.
+///
+/// Dropping the bridge without `shutdown` (the relay was torn down) resets
+/// the request and stops the pump: h2 does not cancel a stream on its own
+/// while the pump still holds the response, so the server would wait for the
+/// rest of the body and the lease would stay taken.
+// By Pavel Shakhmin (github.com/pshakhmin), PR #42.
+struct H2Bridge {
+    tx: SendStream<Bytes>,
+    down: DuplexStream,
+    write_done: bool,
+    /// The stream can outlive the download (stream-up uploads keep going after
+    /// the server ends the GET), so it holds the connection too. The lease is
+    /// shared with the pump: one session counts once.
+    _lease: Arc<pool::Lease>,
+    /// Dropped with the bridge, which stops the pump.
+    _cancel: tokio::sync::oneshot::Sender<()>,
+}
+
+impl H2Bridge {
+    /// Starts the download pump, which also holds the pooled connection lease.
+    fn new(lease: pool::Lease, tx: SendStream<Bytes>, resp: h2::client::ResponseFuture) -> H2Bridge {
+        let (down, inner) = tokio::io::duplex(PIPE);
+        let lease = Arc::new(lease);
+        let held = lease.clone();
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _lease = held;
+            tokio::select! {
+                r = download_h2(resp, inner) => {
+                    if let Err(e) = r {
+                        tracing::debug!("xhttp download ended: {e}");
+                    }
+                }
+                // The bridge is gone: dropping the response resets the stream.
+                _ = cancelled => {}
+            }
+        });
+        H2Bridge {
+            tx,
+            down,
+            write_done: false,
+            _lease: lease,
+            _cancel: cancel,
+        }
+    }
+}
+
+impl Drop for H2Bridge {
+    fn drop(&mut self) {
+        if !self.write_done {
+            self.tx.send_reset(h2::Reason::CANCEL);
+        }
+    }
+}
+
+impl AsyncRead for H2Bridge {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.down).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for H2Bridge {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = &mut *self;
+        if this.write_done {
+            return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
+        }
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        this.tx.reserve_capacity(buf.len());
+        match this.tx.poll_capacity(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(io::Error::from(h2_err(e)))),
+            Poll::Ready(None) => {
+                this.write_done = true;
+                Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+            }
+            // No capacity yet. h2 keeps the waker and wakes us when the window
+            // opens, so returning `Pending` does not spin.
+            Poll::Ready(Some(Ok(0))) => Poll::Pending,
+            Poll::Ready(Some(Ok(cap))) => {
+                let n = cap.min(buf.len());
+                match this.tx.send_data(Bytes::copy_from_slice(&buf[..n]), false) {
+                    Ok(()) => Poll::Ready(Ok(n)),
+                    Err(e) => Poll::Ready(Err(io::Error::from(h2_err(e)))),
+                }
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = &mut *self;
+        if !this.write_done {
+            this.write_done = true;
+            // An empty data frame with the end-of-stream flag ends the request.
+            if let Err(e) = this.tx.send_data(Bytes::new(), true) {
+                return Poll::Ready(Err(io::Error::from(h2_err(e))));
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
 fn log_end(up: Result<()>, down: Result<()>) {
     if let Err(e) = up {
         tracing::debug!("xhttp upload ended: {e}");
@@ -892,18 +1305,6 @@ async fn send_data(tx: &mut SendStream<Bytes>, mut data: Bytes, end: bool) -> Re
         tx.send_data(chunk, end && data.is_empty()).map_err(h2_err)?;
     }
     Ok(())
-}
-
-/// Copies the caller's writes into a streaming request body.
-async fn upload_stream(mut tx: SendStream<Bytes>, mut r: ReadHalf<DuplexStream>) -> Result<()> {
-    let mut buf = vec![0u8; 32 * 1024];
-    loop {
-        let n = r.read(&mut buf).await?;
-        if n == 0 {
-            return send_data(&mut tx, Bytes::new(), true).await;
-        }
-        send_data(&mut tx, Bytes::copy_from_slice(&buf[..n]), false).await?;
-    }
 }
 
 /// Copies a response body to the caller, then ends the caller's read side.
@@ -944,6 +1345,172 @@ mod tests {
         let tls = TlsClient::new(&tls_cfg, "srv.example").ok();
         XhttpClient::new(&cfg, server, Arc::new(SocketFactory::default()), tls, &[], None, None, None)
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn bridge_carries_a_stream() {
+        // An h2 server that echoes the request body back as the response body.
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            while let Some(Ok((req, mut respond))) = conn.accept().await {
+                tokio::spawn(async move {
+                    let mut body = req.into_body();
+                    let mut data = Vec::new();
+                    while let Some(chunk) = body.data().await {
+                        let chunk = chunk.unwrap();
+                        let _ = body.flow_control().release_capacity(chunk.len());
+                        data.extend_from_slice(&chunk);
+                    }
+                    let resp = http::Response::builder().status(200).body(()).unwrap();
+                    let mut send = respond.send_response(resp, false).unwrap();
+                    send.send_data(Bytes::from(data), true).unwrap();
+                });
+            }
+        });
+
+        let pool = pool::H2Pool::new(XmuxConfig::xray_default());
+        let (send, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let lease = pool
+            .get(|| async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
+            .await
+            .unwrap();
+        let req = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("https://example.test/x")
+            .body(())
+            .unwrap();
+        let (resp, tx) = lease
+            .request()
+            .ready()
+            .await
+            .unwrap()
+            .send_request(req, false)
+            .unwrap();
+        let mut bridge = H2Bridge::new(lease, tx, resp);
+        bridge.write_all(b"hello bridge").await.unwrap();
+        bridge.shutdown().await.unwrap();
+        let mut out = Vec::new();
+        bridge.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, b"hello bridge");
+    }
+
+    /// A bridge dropped mid-upload (the relay was torn down) resets its
+    /// request and frees the lease, even though the server never ends the
+    /// response.
+    #[tokio::test]
+    async fn dropped_bridge_resets_the_stream_and_frees_the_lease() {
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let (seen_tx, seen) = tokio::sync::oneshot::channel::<Option<h2::Reason>>();
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            let (req, mut respond) = conn.accept().await.unwrap().unwrap();
+            tokio::spawn(async move {
+                // Keep the connection driven.
+                while let Some(Ok(_)) = conn.accept().await {}
+            });
+            let resp = http::Response::builder().status(200).body(()).unwrap();
+            let _send = respond.send_response(resp, false).unwrap();
+            let mut body = req.into_body();
+            let reason = loop {
+                match body.data().await {
+                    Some(Ok(chunk)) => {
+                        let _ = body.flow_control().release_capacity(chunk.len());
+                    }
+                    Some(Err(e)) => break e.reason(),
+                    None => break None,
+                }
+            };
+            let _ = seen_tx.send(reason);
+        });
+
+        let pool = pool::H2Pool::new(XmuxConfig::xray_default());
+        let (send, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let lease = pool
+            .get(|| async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
+            .await
+            .unwrap();
+        let req = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("https://example.test/x")
+            .body(())
+            .unwrap();
+        let (resp, tx) = lease
+            .request()
+            .ready()
+            .await
+            .unwrap()
+            .send_request(req, false)
+            .unwrap();
+        let mut bridge = H2Bridge::new(lease, tx, resp);
+        bridge.write_all(b"partial upload").await.unwrap();
+        assert_eq!(pool.sessions(), 1, "one session counts once");
+        drop(bridge);
+
+        let reason = tokio::time::timeout(Duration::from_secs(5), seen)
+            .await
+            .expect("the server saw the stream end")
+            .unwrap();
+        assert_eq!(reason, Some(h2::Reason::CANCEL));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.sessions() != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the lease was released");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_of_sessions_respects_the_connection_cap() {
+        let mut xmux = XmuxConfig::xray_default();
+        xmux.max_connections = Some(Range::fixed(2));
+        let pool = Arc::new(pool::H2Pool::new(xmux));
+        let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            let dials = dials.clone();
+            tasks.push(tokio::spawn(async move {
+                pool.get(move || async move {
+                    dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+                    tokio::spawn(async move {
+                        let mut conn = h2::server::handshake(server_io).await.unwrap();
+                        while let Some(Ok(_)) = conn.accept().await {}
+                    });
+                    let (send, conn) = h2::client::handshake(client_io).await.unwrap();
+                    tokio::spawn(async move {
+                        let _ = conn.await;
+                    });
+                    Ok::<_, crate::error::Error>((
+                        send,
+                        Arc::new(AtomicBool::new(false)),
+                        None::<Arc<AtomicBool>>,
+                    ))
+                })
+                .await
+                .unwrap()
+            }));
+        }
+        let mut leases = Vec::new();
+        for task in tasks {
+            leases.push(task.await.unwrap());
+        }
+        assert_eq!(
+            dials.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "a burst of sessions dialed more connections than the cap"
+        );
+        assert_eq!(pool.len(), 2);
+        drop(leases);
     }
 
     #[test]
@@ -1010,6 +1577,23 @@ mod tests {
             client.h2_settings(),
             H2Settings::for_fingerprint(Some(Fingerprint::Firefox))
         );
+    }
+
+    #[test]
+    fn keep_alive_follows_xmux() {
+        let with = |v: i32| {
+            let cfg = XhttpConfig {
+                xmux: Some(XmuxConfig {
+                    h_keep_alive_period: Some(v),
+                    ..XmuxConfig::default()
+                }),
+                ..XhttpConfig::default()
+            };
+            client(cfg).keep_alive()
+        };
+        assert_eq!(with(0), Some(Duration::from_secs(45)), "0 is Chrome's period");
+        assert_eq!(with(-1), None, "a negative period disables PINGs");
+        assert_eq!(with(20), Some(Duration::from_secs(20)));
     }
 
     #[test]
@@ -1229,4 +1813,137 @@ mod tests {
         }
     }
 
+    #[test]
+    fn upload_chunks_split_encoded_data_and_round_trip() {
+        use base64::Engine as _;
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "header",
+            "uplinkChunkSize": 3000
+        }))
+        .unwrap();
+        let data: Vec<u8> = (0..10 * 1024).map(|i| (i % 251) as u8).collect();
+        let chunks = upload_chunks(&cfg, &data);
+        // 10240 raw bytes encode to 13656 base64 characters: five 3000-char chunks.
+        assert_eq!(chunks.len(), 5);
+        assert!(chunks.iter().all(|c| !c.contains('=')));
+        assert_eq!(chunks.iter().map(String::len).sum::<usize>(), 13_654);
+        let encoded = chunks.concat();
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn upload_chunks_round_trip_around_the_chunk_boundary() {
+        use base64::Engine as _;
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "cookie",
+            "uplinkDataKey": "d", "uplinkChunkSize": 64
+        }))
+        .unwrap();
+        for n in [0usize, 1, 63, 64, 65] {
+            let data: Vec<u8> = (0..n).map(|i| (i % 253) as u8).collect();
+            let chunks = upload_chunks(&cfg, &data);
+            assert!(chunks.iter().all(|c| !c.contains('=')), "{n}");
+            assert_eq!(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(chunks.concat())
+                    .unwrap(),
+                data,
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_upload_uses_one_cookie_header_with_semicolons() {
+        use base64::Engine as _;
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "cookie",
+            "uplinkChunkSize": 3000
+        }))
+        .unwrap();
+        let c = client(cfg);
+        let data = vec![0xa5u8; 10 * 1024];
+        let mut shape = c.request_shape(Some("s"), Some(0), false);
+        c.add_uplink_payload(&mut shape, &data);
+        let cookie = shape
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+            .expect("one Cookie header")
+            .1
+            .clone();
+        assert_eq!(
+            shape
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+                .count(),
+            1
+        );
+        assert!(cookie.contains("x_data_0="), "{cookie}");
+        assert!(cookie.contains("; x_data_1="), "{cookie}");
+        let pairs: Vec<&str> = cookie.split(';').map(str::trim).collect();
+        for pair in &pairs {
+            // A browser cookie is limited to 4096 bytes, name included.
+            assert!(pair.len() < 4096, "{pair}");
+        }
+        let chunks: Vec<String> = pairs
+            .iter()
+            .filter_map(|p| p.strip_prefix("x_data_"))
+            .filter_map(|p| p.split_once('=').map(|(_, v)| v.to_string()))
+            .collect();
+        assert_eq!(chunks.len(), 5);
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(chunks.concat())
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn packet_requests_carry_metadata_headers_and_an_empty_body() {
+        let cfg = XhttpConfig::from_xray(&serde_json::json!({
+            "mode": "packet-up", "uplinkDataPlacement": "header",
+            "uplinkDataKey": "X-Data", "uplinkChunkSize": 64
+        }))
+        .unwrap();
+        let c = client(cfg);
+        let data = vec![0x5au8; 200];
+        let req = c
+            .h2_request_with_payload(http::Method::POST, "s", 7, &data)
+            .unwrap();
+        assert_eq!(req.headers()["content-length"], "0");
+        let chunks: Vec<String> = (0..)
+            .map_while(|i| {
+                req.headers()
+                    .get(format!("x-data-{i}").as_str())
+                    .map(|v| v.to_str().unwrap().to_string())
+            })
+            .collect();
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|c| !c.contains('=')));
+
+        let mut shape = c.request_shape(Some("s"), Some(7), false);
+        c.add_uplink_payload(&mut shape, &data);
+        let h1 = shape
+            .headers
+            .iter()
+            .filter(|(k, _)| k.starts_with("X-Data-"))
+            .count();
+        assert_eq!(h1, chunks.len());
+        assert_eq!(
+            shape
+                .headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+                .count(),
+            0
+        );
+    }
 }
