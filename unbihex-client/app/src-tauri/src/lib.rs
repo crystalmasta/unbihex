@@ -56,6 +56,8 @@ fn err(e: impl std::fmt::Display) -> String {
 
 fn notify(app: &AppHandle) {
     let _ = app.emit("state-changed", ());
+    #[cfg(desktop)]
+    update_tray(app);
 }
 
 // ---------------------------------------------------------------- connect
@@ -204,6 +206,8 @@ async fn do_disconnect(_app: &AppHandle, client: &Client) {
 #[tauri::command]
 async fn connect(app: AppHandle, state: State<'_, AppState>) -> Result<ConnectionInfo, String> {
     let _op = state.op.lock().await;
+    #[cfg(desktop)]
+    set_tray_transition(&app, true);
     let r = do_connect(&app, &state.client).await;
     notify(&app);
     r.map_err(err)
@@ -212,6 +216,8 @@ async fn connect(app: AppHandle, state: State<'_, AppState>) -> Result<Connectio
 #[tauri::command]
 async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let _op = state.op.lock().await;
+    #[cfg(desktop)]
+    set_tray_transition(&app, false);
     do_disconnect(&app, &state.client).await;
     notify(&app);
     Ok(())
@@ -526,10 +532,117 @@ fn show_window(app: &AppHandle) {
 }
 
 #[cfg(desktop)]
+struct TrayState {
+    status_item: tauri::menu::MenuItem,
+    toggle_item: tauri::menu::MenuItem,
+}
+
+#[cfg(desktop)]
+static CONNECTED_TRAY_ICON: std::sync::OnceLock<Option<tauri::image::Image<'static>>> =
+    std::sync::OnceLock::new();
+#[cfg(desktop)]
+static DISCONNECTED_TRAY_ICON: std::sync::OnceLock<Option<tauri::image::Image<'static>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(desktop)]
+fn get_tray_icon(app: &AppHandle, connected: bool) -> Option<tauri::image::Image<'static>> {
+    let lock = if connected {
+        &CONNECTED_TRAY_ICON
+    } else {
+        &DISCONNECTED_TRAY_ICON
+    };
+    lock.get_or_init(|| {
+        let bytes = if connected {
+            include_bytes!("../icons/tray-connected.png").as_slice()
+        } else {
+            include_bytes!("../icons/tray-disconnected.png").as_slice()
+        };
+        tauri::image::Image::from_bytes(bytes).ok()
+    })
+    .clone()
+    .or_else(|| app.default_window_icon().cloned())
+}
+
+#[cfg(desktop)]
+fn set_tray_transition(app: &AppHandle, connecting: bool) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let tip = if connecting {
+            "Unbihex · Подключение…"
+        } else {
+            "Unbihex · Отключение…"
+        };
+        let _ = tray.set_tooltip(Some(tip));
+    }
+    if let Some(tray_state) = app.try_state::<TrayState>() {
+        let (status, toggle) = if connecting {
+            ("⏳ Подключение…", "Подключение…")
+        } else {
+            ("⏳ Отключение…", "Отключение…")
+        };
+        let _ = tray_state.status_item.set_text(status);
+        let _ = tray_state.toggle_item.set_text(toggle);
+    }
+}
+
+#[cfg(desktop)]
+fn update_tray(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let status = state.client.status().await;
+        let selected_name = state.client.snapshot().selected_server().map(|s| s.name.clone());
+
+        if let Some(tray) = app.tray_by_id("main") {
+            let (status_text, toggle_text, tooltip, icon) = if status.connected {
+                let name = status
+                    .info
+                    .as_ref()
+                    .map(|i| i.server_name.as_str())
+                    .or(selected_name.as_deref())
+                    .unwrap_or("сервер");
+                (
+                    format!("● Подключено: {name}"),
+                    "Отключить".to_string(),
+                    format!("Unbihex · Подключено: {name}"),
+                    get_tray_icon(&app, true),
+                )
+            } else {
+                let toggle = match &selected_name {
+                    Some(name) => format!("Подключить ({name})"),
+                    None => "Подключить".to_string(),
+                };
+                let tip = match &selected_name {
+                    Some(name) => format!("Unbihex · Не подключено ({name})"),
+                    None => "Unbihex · Не подключено".to_string(),
+                };
+                (
+                    "○ Не подключено".to_string(),
+                    toggle,
+                    tip,
+                    get_tray_icon(&app, false),
+                )
+            };
+
+            let _ = tray.set_tooltip(Some(tooltip));
+            if let Some(icon) = icon {
+                let _ = tray.set_icon(Some(icon));
+            }
+
+            if let Some(tray_state) = app.try_state::<TrayState>() {
+                let _ = tray_state.status_item.set_text(status_text);
+                let _ = tray_state.toggle_item.set_text(toggle_text);
+            }
+        }
+    });
+}
+
+#[cfg(desktop)]
 async fn toggle_connection(app: AppHandle) {
     let state = app.state::<AppState>();
     let _op = state.op.lock().await;
-    if state.client.controller.is_connected().await {
+    let was_connected = state.client.controller.is_connected().await;
+    set_tray_transition(&app, !was_connected);
+    if was_connected {
         do_disconnect(&app, &state.client).await;
     } else if let Err(e) = do_connect(&app, &state.client).await {
         tracing::error!("connect: {e}");
@@ -544,13 +657,15 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
+    let status_item = MenuItem::with_id(app, "status", "○ Не подключено", false, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
     let show = MenuItem::with_id(app, "show", "Открыть Unbihex", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle", "Подключить / отключить", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
+    let toggle = MenuItem::with_id(app, "toggle", "Подключить", true, None::<&str>)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &toggle, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&status_item, &sep1, &show, &toggle, &sep2, &quit])?;
     let mut tray = TrayIconBuilder::with_id("main")
-        .tooltip("Unbihex")
+        .tooltip("Unbihex · Не подключено")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -571,10 +686,20 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 show_window(tray.app_handle());
             }
         });
-    if let Some(icon) = app.default_window_icon() {
+    if let Some(icon) = get_tray_icon(app.handle(), false) {
+        tray = tray.icon(icon);
+    } else if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
     tray.build(app)?;
+
+    app.manage(TrayState {
+        status_item,
+        toggle_item: toggle,
+    });
+
+    update_tray(app.handle());
+
     Ok(())
 }
 
@@ -589,6 +714,8 @@ fn start_background(app: AppHandle) {
         let auto = state.client.settings().auto_connect;
         if auto && state.client.selected_server().is_ok() {
             let _op = state.op.lock().await;
+            #[cfg(desktop)]
+            set_tray_transition(&app, true);
             if let Err(e) = do_connect(&app, &state.client).await {
                 tracing::warn!("auto-connect: {e}");
             }
