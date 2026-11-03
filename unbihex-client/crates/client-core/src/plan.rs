@@ -278,6 +278,15 @@ fn proxy_outbound(server: &Server, settings: &Settings) -> Result<Value> {
     Ok(ob)
 }
 
+/// The TUN MTU for a target. Mobile: the same value goes to `VpnService` and to
+/// the engine, so the stack never sends segments larger than the interface.
+/// Jumbo sizes are measured on Linux only; elsewhere the ceiling stays 9000.
+// By Pavel Shakhmin (github.com/pshakhmin), PR #45.
+pub fn tun_mtu(settings: &Settings, target: Target) -> u16 {
+    let max = if target != Target::Mobile && cfg!(target_os = "linux") { 65_535 } else { 9000 };
+    settings.mtu.clamp(1280, max)
+}
+
 /// The engine config as JSON text, validated by the engine.
 pub fn build_config_json(
     server: &Server,
@@ -291,7 +300,7 @@ pub fn build_config_json(
         let mut tun = json!({
             "type": "tun",
             "tag": "tun-in",
-            "mtu": settings.mtu.clamp(1280, 9000),
+            "mtu": tun_mtu(settings, target),
             "ipv4": format!("{TUN_ADDRESS}/{TUN_PREFIX}"),
             "ipv6": format!("{TUN_ADDRESS6}/{TUN_PREFIX6}"),
             "auto_route": target == Target::DesktopTun && settings.tun_routes,
@@ -406,6 +415,27 @@ mod tests {
         assert_eq!(cfg.inbounds[0].tag(), "socks-in");
         assert!(matches!(&cfg.inbounds[1], InboundConfig::Http(h) if h.listen.port() == 10809));
         assert_eq!(cfg.dns.upstream[0].to_string(), "1.1.1.1:53");
+    }
+
+    #[test]
+    fn desktop_default_mtu_matches_the_platform() {
+        // Jumbo is measured on Linux only; elsewhere the default stays 1500.
+        let expected = if cfg!(target_os = "linux") { 16_384 } else { 1500 };
+        assert_eq!(Settings::default().mtu, expected);
+    }
+
+    #[test]
+    fn mobile_uses_the_user_mtu_for_both_the_os_and_the_engine() {
+        // VpnService gets `tun_mtu` too, so the stack matches the interface.
+        let s = Settings { mtu: 1350, ..Settings::default() };
+        assert_eq!(tun_mtu(&s, Target::Mobile), 1350);
+        let cfg = build_config(&server(), &s, &Geo::default(), Target::Mobile).unwrap();
+        assert_eq!(cfg.tun().unwrap().mtu, 1350);
+        let big = Settings { mtu: 16_384, ..Settings::default() };
+        assert_eq!(tun_mtu(&big, Target::Mobile), 9000);
+        let cfg = build_config(&server(), &big, &Geo::default(), Target::DesktopTun).unwrap();
+        let desktop = if cfg!(target_os = "linux") { 16_384 } else { 9000 };
+        assert_eq!(cfg.tun().unwrap().mtu, desktop);
     }
 
     #[test]

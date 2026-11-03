@@ -1,6 +1,6 @@
 # ipstack 1.0.1 — Unbihex patch
 
-This is ipstack 1.0.1 from crates.io (the latest release) with five changes. The build
+This is ipstack 1.0.1 from crates.io (the latest release) with seven changes. The build
 script, examples and dev-dependencies are dropped: the build script only copied
 `wintun.dll` for the examples.
 
@@ -51,12 +51,31 @@ Changes (search for "Unbihex patch"):
    Windows bench this took one download through the TUN from 136 to 155 MB/s and the
    client's peak with 64 parallel downloads from 152 to 85 MB.
 
+6. **No artificial 8 KiB split.** `extract_data_n_write_upstream`
+   (`src/stream/tcp.rs`) took at most 8192 bytes per call, so any segment larger
+   than that — an MSS above 8 KiB, i.e. a TUN MTU above ~8250 — was split: the
+   tail became an out-of-order hole and the sender waited for an RTO on every
+   segment (1 MiB took 40 s at MTU 9000). Now everything contiguous is taken at once:
+   with any fixed budget, a retransmission that fills a hole with more than the budget
+   queued behind it left the rest waiting for the app's next packet. The advertised
+   window already bounds the queue. (Found by Pavel Shakhmin, PR #45.)
+
+7. **The app's MSS is respected.** Stock ipstack sized segments by its own MTU only and
+   ignored the MSS option of the app's SYN. With a TUN MTU above the LAN's (16 KiB on
+   Linux), a router or a container host forwarding through the TUN got segments it could
+   not pass on: they carry DF, and the ICMP "fragmentation needed" that comes back is
+   ignored. Now `IpStackTcpStream::new` (`src/stream/tcp.rs`) reads the option and
+   `Tcb::calculate_payload_max_len` (`src/stream/tcb.rs`) never exceeds it. Without the
+   option everything works as before.
+
 To move to a new ipstack version: check which of these upstream has fixed, copy the new
 crate source here, reapply what is still needed, keep the version in
 `unbihex-engine/Cargo.toml` in step, and run the engine tests
 (`inbound::tun::tests`: `tcp_window_scale_and_non_blocking_drop` covers the first two
 changes, `unread_data_closes_the_window_and_reading_reopens_it` the third,
-`unacknowledged_tail_is_resent_then_reset` the fourth). The Windows bench
+`unacknowledged_tail_is_resent_then_reset` the fourth, `a_segment_larger_than_8k_is_delivered_whole`
+and `a_filled_hole_releases_everything_behind_it` the sixth,
+`segments_respect_the_mss_of_the_syn` the seventh). The Windows bench
 (64 parallel downloads through the TUN) found the fourth and measures the fifth.
 
 Licensed like ipstack itself: Apache-2.0 (see LICENSE here).

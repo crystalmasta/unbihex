@@ -237,9 +237,12 @@ Outbound fields are described in §11, rules in §6, DNS in §8.
 
 ### 5.3 `tun` defaults
 
-`name` = `unbihex0` (on macOS `utunN`, picked by the OS), `mtu` = 1500, `ipv4` = `10.199.233.1/30`, no `ipv6`,
-`auto_route` = true, `dns_hijack` = true, `sniff` = true. The DNS server inside the TUN is at the **second address of
-the ipv4 subnet** (`10.199.233.2` for a `/30`).
+`name` = `unbihex0` (on macOS `utunN`, picked by the OS), `mtu` = 16,384 on Linux and 1500 elsewhere (the stack pays
+per packet: on Linux 16 KiB gave ~4.5× the throughput of 1500; wintun and utun are untested at large MTUs),
+`ipv4` = `10.199.233.1/30`, no `ipv6`, `auto_route` = true, `dns_hijack` = true, `sniff` = true. The DNS server inside
+the TUN is at the **second address of the ipv4 subnet** (`10.199.233.2` for a `/30`). The client takes `mtu` from its
+"tunnel MTU" setting (1280–9000, up to 65,535 on Linux; the engine's default by default); on mobile the same value goes
+to both `VpnService` and the engine.
 
 ### 5.4 Share links (`type: "link"`)
 
@@ -480,6 +483,11 @@ The socket is created with `socket2` and configured **before** `connect`/`bind`,
 - Packets are handled by the userspace stack `ipstack` (`vendor/ipstack`, `UNBIHEX-PATCH.md`), MTU = device MTU:
   - TCP window scaling (RFC 7323) when the app's SYN offers it; a 1 MiB read window, a 256 KiB send window,
     MSS = MTU − 60;
+  - segments to the app are no larger than the MSS of its SYN: a router, container or VM forwarding through the TUN
+    announces the MSS of its 1500-byte network and could not pass a 16 KiB segment on (DF; the stack does not read
+    ICMP "fragmentation needed"); without an MSS in the SYN, by MTU as before;
+  - everything contiguous goes to the reader at once: segments above 8 KiB are not split, and a hole filled by a
+    retransmission releases the whole queue behind it without waiting for the next packet;
   - it accepts at most 1 MiB of unread data: the window closes and reopens by itself after a read;
   - lost segments are retransmitted on a timer, not only on the app's next packet; out of retries → RST;
   - closing a stream does not block tokio threads (no multi-threaded runtime required);
@@ -626,6 +634,12 @@ accepted and unused.
 - `path` (may carry a query), `host` (the TLS/REALITY name by default, then the server address), `headers` (no
   `Host`), browser-like headers, `no_grpc_header` (no `Content-Type: application/grpc` on streaming uploads),
   `sc_max_each_post_bytes` (1,000,000 by default) and `sc_min_posts_interval_ms` (30) for `packet-up`.
+- **Upload in headers and cookies** (`packet-up` only): `uplink_data_placement` is `body` (the default; `auto` is the
+  same), `header` or `cookie`. A packet is base64url-encoded without `=` and cut into `uplink_chunk_size` pieces
+  (3000–4000 in headers, 2–3 KiB in cookies, at least 64) under `{uplink_data_key}-{i}` (headers, `X-Data`) or
+  `{uplink_data_key}_{i}` (pairs of one `Cookie`, `x_data`); the request body is empty. An Xray server reads at most
+  `serverMaxHeaderBytes` (8192 by default), so lower `sc_max_each_post_bytes` for these placements (to 2000–4000, say)
+  or a packet will not fit.
 - **Padding:** by default a random `x_padding` (100–1000 bytes, `x_padding_bytes`, at most 65,536) in
   `Referer: …?x_padding=…`. With `x_padding_obfs_mode`, as in Xray: `x_padding_placement` (`query`, `header`, `cookie`,
   `queryInHeader` — the default), `x_padding_key` (`x_padding`), `x_padding_header` (`X-Padding`), `x_padding_method`
@@ -634,12 +648,6 @@ accepted and unused.
   keys `session_id_key` / `seq_key` (`X-Session` / `X-Seq` in headers, `x_session` / `x_seq` in query and cookies),
   a custom ID alphabet (`session_id_table`, including Xray's named alphabets, URL-safe ASCII) with
   `session_id_length` (1–256, at least 2^31 possible IDs, short dotted alphabets refused), and the upload method
-- **Upload in headers and cookies** (`packet-up` only): `uplink_data_placement` is `body` (the default; `auto` is the
-  same), `header` or `cookie`. A packet is base64url-encoded without `=` and cut into `uplink_chunk_size` pieces
-  (3000–4000 in headers, 2–3 KiB in cookies, at least 64) under `{uplink_data_key}-{i}` (headers, `X-Data`) or
-  `{uplink_data_key}_{i}` (pairs of one `Cookie`, `x_data`); the request body is empty. An Xray server reads at most
-  `serverMaxHeaderBytes` (8192 by default), so lower `sc_max_each_post_bytes` for these placements (to 2000–4000, say)
-  or a packet will not fit.
   `uplink_http_method` (`POST` by default; `GET` with a body in `packet-up` only; `PUT`, `PATCH`, `DELETE`). Metadata
   and padding keys are checked before connecting: reserved HTTP headers (`Host`, `Content-Length`, `Cookie`,
   `Content-Type`, …) and colliding keys (padding and upload keys included) are an error.

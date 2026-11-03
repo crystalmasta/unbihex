@@ -57,6 +57,8 @@ pub(crate) struct Tcb {
     wscale_on: bool,
     // Unbihex patch: bytes handed to the stream's reader channel but not read yet.
     unread: usize,
+    // Unbihex patch: the MSS from the app's SYN, if it sent one.
+    peer_mss: Option<u16>,
     state: TcpState,
     inflight_packets: BTreeMap<SeqNum, InflightPacket>,
     unordered_packets: BTreeMap<SeqNum, Vec<u8>>,
@@ -93,6 +95,7 @@ impl Tcb {
             recv_wscale: 0,
             wscale_on: false,
             unread: 0,
+            peer_mss: None,
             state: TcpState::Listen,
             inflight_packets: BTreeMap::new(),
             unordered_packets: BTreeMap::new(),
@@ -109,7 +112,19 @@ impl Tcb {
     pub fn calculate_payload_max_len(&self, ip_header_size: usize, tcp_header_size: usize) -> usize {
         let send_window = self.get_send_window() as usize;
         let mtu = self.get_mtu() as usize;
-        std::cmp::min(send_window, mtu.saturating_sub(ip_header_size + tcp_header_size))
+        let mut max = mtu.saturating_sub(ip_header_size + tcp_header_size);
+        // Unbihex patch: never more than the app's MSS (TCP options count against
+        // it, RFC 6691). With a TUN MTU above the LAN's, a host forwarding through
+        // the TUN cannot pass larger segments on: they carry DF and get dropped.
+        if let Some(mss) = self.peer_mss {
+            max = max.min(usize::from(mss).saturating_sub(tcp_header_size.saturating_sub(20)));
+        }
+        std::cmp::min(send_window, max)
+    }
+
+    /// Unbihex patch: the MSS option of the app's SYN.
+    pub(super) fn set_peer_mss(&mut self, mss: u16) {
+        self.peer_mss = Some(mss.max(64));
     }
 
     pub fn update_duplicate_ack_count(&mut self, rcvd_ack: SeqNum) {

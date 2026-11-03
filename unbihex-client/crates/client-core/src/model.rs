@@ -262,7 +262,7 @@ impl Default for Settings {
             lan_username: DEFAULT_LAN_USERNAME.into(),
             lan_password: Uuid::new_v4().simple().to_string(),
             dns_upstream: vec!["1.1.1.1".into(), "8.8.8.8".into()],
-            mtu: 1500,
+            mtu: unbihex_engine::config::default_mtu(),
             tun_routes: true,
             tun_name: crate::plan::TUN_NAME.into(),
             default_interface: None,

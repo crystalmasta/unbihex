@@ -822,6 +822,170 @@ mod tests {
         h.cancel.cancel();
     }
 
+    /// A segment larger than the old 8 KiB extraction budget must arrive whole.
+    /// `consume_unordered_packets(8192)` used to split it, park the tail behind
+    /// a hole and let the sender wait for an RTO on every segment: an upload at
+    /// MTU 9000 collapsed from ~160 to 0.2 Mbit/s.
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #45.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_segment_larger_than_8k_is_delivered_whole() {
+        let mut h = harness_with(
+            r#"{"inbounds":[{"type":"tun","tag":"tun-in","mtu":16384}],
+                "outbounds":[{"type":"direct","tag":"direct"}]}"#,
+        )
+        .await;
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let (mut r, mut w) = s.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                });
+            }
+        });
+        let app: SocketAddr = "10.199.233.1:40003".parse().unwrap();
+        h.inject
+            .send(tcp_packet(app, echo_addr, 2000, None, true, b""))
+            .await
+            .unwrap();
+        let (server_seq, syn, ack, _) = next_tcp(&mut h).await;
+        assert!(syn && ack, "expected SYN-ACK");
+        let payload: Vec<u8> = (0..16_000u32).map(|i| (i % 251) as u8).collect();
+        h.inject
+            .send(tcp_packet(
+                app,
+                echo_addr,
+                2001,
+                Some(server_seq.wrapping_add(1)),
+                false,
+                &payload,
+            ))
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while got.len() < payload.len() {
+            let (_, _, _, data) = next_tcp(&mut h).await;
+            got.extend_from_slice(&data);
+        }
+        assert_eq!(got, payload);
+        h.cancel.cancel();
+    }
+
+    /// A host forwarding through the TUN (a router's LAN, a container) announces the
+    /// MSS of its own 1500-byte link: the stack must not send it larger segments,
+    /// whatever the TUN MTU. A 16 KiB segment carries DF and cannot leave the host.
+    #[tokio::test]
+    async fn segments_respect_the_mss_of_the_syn() {
+        use etherparse::TcpOptionElement;
+        let (inject, rx) = mpsc::channel(64);
+        let (tx, mut out) = mpsc::channel(QUEUE);
+        let mut cfg = IpStackConfig::default();
+        cfg.mtu(16_384).unwrap();
+        cfg.with_tcp_config(tcp_config(16_384, Duration::from_secs(60)));
+        let mut stack = IpStack::new(cfg, TunIo::new(rx, tx));
+        let (app, server) = ([10, 199, 233, 1], [93, 184, 216, 34]);
+
+        let mut syn = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40013, 443, 1000, 65_535)
+            .syn()
+            .options(&[TcpOptionElement::MaximumSegmentSize(1460)])
+            .unwrap()
+            .write(&mut syn, &[])
+            .unwrap();
+        inject.send(syn).await.unwrap();
+        let IpStackStream::Tcp(mut s) = stack.accept().await.unwrap() else {
+            panic!("expected a TCP stream")
+        };
+        let pkt = out.recv().await.unwrap();
+        let Some(TransportSlice::Tcp(t)) = SlicedPacket::from_ip(&pkt).unwrap().transport else {
+            panic!("expected TCP")
+        };
+        let mut ack = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40013, 443, 1001, 65_535)
+            .ack(t.sequence_number().wrapping_add(1))
+            .write(&mut ack, &[])
+            .unwrap();
+        inject.send(ack).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        s.write_all(&[3u8; 40_000]).await.unwrap();
+        let (mut sent, mut largest) = (0, 0);
+        while let Ok(Some(pkt)) =
+            tokio::time::timeout(Duration::from_millis(300), out.recv()).await
+        {
+            if let Some(TransportSlice::Tcp(t)) = SlicedPacket::from_ip(&pkt).unwrap().transport {
+                sent += t.payload().len();
+                largest = largest.max(t.payload().len());
+            }
+        }
+        assert!(sent > 0, "the stack sent nothing");
+        assert!(largest <= 1460, "a {largest}-byte segment exceeds the MSS");
+        drop(s);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    /// When a retransmission fills a hole, everything queued behind it goes to the
+    /// reader at once. With a cap on one extraction the rest waited for the app's
+    /// next packet, and with nothing more to send the app waited for an RTO.
+    #[tokio::test]
+    async fn a_filled_hole_releases_everything_behind_it() {
+        let (inject, rx) = mpsc::channel(64);
+        let (tx, mut out) = mpsc::channel(QUEUE);
+        let mut cfg = IpStackConfig::default();
+        cfg.mtu(16_384).unwrap();
+        cfg.with_tcp_config(tcp_config(16_384, Duration::from_secs(60)));
+        let mut stack = IpStack::new(cfg, TunIo::new(rx, tx));
+        let (app, server) = ([10, 199, 233, 1], [93, 184, 216, 34]);
+
+        let mut syn = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40014, 443, 1000, 65_535)
+            .syn()
+            .write(&mut syn, &[])
+            .unwrap();
+        inject.send(syn).await.unwrap();
+        let IpStackStream::Tcp(mut s) = stack.accept().await.unwrap() else {
+            panic!("expected a TCP stream")
+        };
+        let pkt = out.recv().await.unwrap();
+        let Some(TransportSlice::Tcp(t)) = SlicedPacket::from_ip(&pkt).unwrap().transport else {
+            panic!("expected TCP")
+        };
+        let our_ack = t.sequence_number().wrapping_add(1);
+        let segment = |seq: u32, payload: &[u8]| {
+            let mut p = Vec::new();
+            PacketBuilder::ipv4(app, server, 64)
+                .tcp(40014, 443, seq, 65_535)
+                .ack(our_ack)
+                .write(&mut p, payload)
+                .unwrap();
+            p
+        };
+        inject.send(segment(1001, &[])).await.unwrap();
+
+        // Six 16 000-byte segments: the last five first, then the hole.
+        const SEG: usize = 16_000;
+        let data: Vec<u8> = (0..6 * SEG).map(|i| (i % 249) as u8).collect();
+        for i in 1..6 {
+            let seq = 1001 + (i * SEG) as u32;
+            inject.send(segment(seq, &data[i * SEG..(i + 1) * SEG])).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        inject.send(segment(1001, &data[..SEG])).await.unwrap();
+
+        let mut got = vec![0u8; data.len()];
+        tokio::time::timeout(Duration::from_millis(500), s.read_exact(&mut got))
+            .await
+            .expect("the data behind the hole must not wait for another packet")
+            .unwrap();
+        assert_eq!(got, data);
+        drop(s);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     /// The patched ipstack (vendor/ipstack) scales windows when the app's SYN offers
     /// it, and drops a TCP stream without blocking: on a current-thread runtime the
     /// old `block_in_place` in its Drop panicked.

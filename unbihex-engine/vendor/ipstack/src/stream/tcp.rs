@@ -204,6 +204,15 @@ impl IpStackTcpStream {
         {
             tcb.enable_window_scale(shift);
         }
+        // Unbihex patch: segments no larger than the MSS the app's SYN asks for.
+        if tcp.syn
+            && let Some(mss) = tcp.options_iterator().find_map(|o| match o {
+                Ok(TcpOptionElement::MaximumSegmentSize(mss)) => Some(mss),
+                _ => None,
+            })
+        {
+            tcb.set_peer_mss(mss);
+        }
         let tuple = NetworkTuple::new(src_addr, dst_addr, true);
         if !tcp.syn {
             if !tcp.rst
@@ -984,7 +993,10 @@ fn extract_data_n_write_upstream(
         return Ok(());
     }
 
-    if let Some(data) = tcb.consume_unordered_packets(8192) {
+    // Unbihex patch: everything contiguous at once (stock: 8192 bytes). A cap
+    // split segments above it, and a filled hole left the rest queued until the
+    // app's next packet; the window already bounds how much can wait here.
+    if let Some(data) = tcb.consume_unordered_packets(usize::MAX) {
         tcb.add_unread(data.len()); // Unbihex patch: see `Tcb::get_available_read_buffer_size`.
         let hint = if state == TcpState::Established { "normally" } else { "still" };
         log::trace!("{network_tuple} {state:?}: {l_info} {hint} receiving data, len = {}", data.len());
