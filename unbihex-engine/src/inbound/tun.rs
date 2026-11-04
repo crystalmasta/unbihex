@@ -986,6 +986,72 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
+    /// A segment beyond the receive window is dropped, not queued: otherwise an app
+    /// (or a LAN host routing through the TUN) could park any amount of data ahead
+    /// of a hole and have it released past the window in one piece.
+    #[tokio::test]
+    async fn a_segment_beyond_the_window_is_dropped() {
+        const SEG: usize = 16_000;
+        let (inject, rx) = mpsc::channel(64);
+        let (tx, mut out) = mpsc::channel(QUEUE);
+        let mut cfg = IpStackConfig::default();
+        cfg.mtu(16_384).unwrap();
+        let mut tcp = tcp_config(16_384, Duration::from_secs(60));
+        tcp.read_buffer_size = 2 * SEG;
+        cfg.with_tcp_config(tcp);
+        let mut stack = IpStack::new(cfg, TunIo::new(rx, tx));
+        let (app, server) = ([10, 199, 233, 1], [93, 184, 216, 34]);
+
+        let mut syn = Vec::new();
+        PacketBuilder::ipv4(app, server, 64)
+            .tcp(40015, 443, 1000, 65_535)
+            .syn()
+            .write(&mut syn, &[])
+            .unwrap();
+        inject.send(syn).await.unwrap();
+        let IpStackStream::Tcp(mut s) = stack.accept().await.unwrap() else {
+            panic!("expected a TCP stream")
+        };
+        let pkt = out.recv().await.unwrap();
+        let Some(TransportSlice::Tcp(t)) = SlicedPacket::from_ip(&pkt).unwrap().transport else {
+            panic!("expected TCP")
+        };
+        let our_ack = t.sequence_number().wrapping_add(1);
+        let segment = |seq: u32, payload: &[u8]| {
+            let mut p = Vec::new();
+            PacketBuilder::ipv4(app, server, 64)
+                .tcp(40015, 443, seq, 65_535)
+                .ack(our_ack)
+                .write(&mut p, payload)
+                .unwrap();
+            p
+        };
+        inject.send(segment(1001, &[])).await.unwrap();
+
+        let data: Vec<u8> = (0..3 * SEG).map(|i| (i % 247) as u8).collect();
+        // The second segment ends exactly at the window's edge; the third lies past it.
+        for i in [1usize, 2] {
+            let seq = 1001 + (i * SEG) as u32;
+            inject.send(segment(seq, &data[i * SEG..(i + 1) * SEG])).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        inject.send(segment(1001, &data[..SEG])).await.unwrap();
+
+        let mut got = vec![0u8; 2 * SEG];
+        tokio::time::timeout(Duration::from_millis(500), s.read_exact(&mut got))
+            .await
+            .expect("the data inside the window arrives")
+            .unwrap();
+        assert_eq!(got, data[..2 * SEG]);
+        let mut more = [0u8; 1];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), s.read(&mut more)).await.is_err(),
+            "the segment past the window must not be delivered"
+        );
+        drop(s);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     /// The patched ipstack (vendor/ipstack) scales windows when the app's SYN offers
     /// it, and drops a TCP stream without blocking: on a current-thread runtime the
     /// old `block_in_place` in its Drop panicked.

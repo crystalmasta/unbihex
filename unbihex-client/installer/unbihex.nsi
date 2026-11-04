@@ -138,6 +138,21 @@ SectionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "Ярлык для запуска с рабочего стола."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
+; Убирает автозапуск из ветки HKU\$R1, если запись ведёт в $INSTDIR. Портит $R2–$R6.
+Function un.ClearRun
+  StrLen $R2 "$INSTDIR"
+  IntOp $R5 $R2 + 1
+  ReadRegStr $R3 HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Run" "${APPNAME}"
+  ; Значение: "<папка>\Unbihex.exe" --autostart
+  StrCpy $R4 $R3 $R2 1
+  StrCpy $R6 $R3 1 $R5
+  ${If} $R4 == "$INSTDIR"
+  ${AndIf} $R6 == "\"
+    DeleteRegValue HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Run" "${APPNAME}"
+    DeleteRegValue HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "${APPNAME}"
+  ${EndIf}
+FunctionEnd
+
 Section "Uninstall"
   !insertmacro StopApp
   Delete "$INSTDIR\${EXE}"
@@ -160,8 +175,6 @@ Section "Uninstall"
   ; администратора — возможно, под другой учётной записью. Поэтому запись убирается у всех
   ; вошедших пользователей (их ветки загружены в HKU), если она ведёт в $INSTDIR.
   ; By Finorion (github.com/Finorion), PR #43.
-  StrLen $R2 "$INSTDIR"
-  IntOp $R5 $R2 + 1
   StrCpy $R0 0
   ${Do}
     EnumRegKey $R1 HKU "" $R0
@@ -169,14 +182,36 @@ Section "Uninstall"
       ${ExitDo}
     ${EndIf}
     IntOp $R0 $R0 + 1
-    ReadRegStr $R3 HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Run" "${APPNAME}"
-    ; Значение: "<папка>\Unbihex.exe" --autostart
-    StrCpy $R4 $R3 $R2 1
-    StrCpy $R6 $R3 1 $R5
-    ${If} $R4 == "$INSTDIR"
-    ${AndIf} $R6 == "\"
-      DeleteRegValue HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Run" "${APPNAME}"
-      DeleteRegValue HKU "$R1\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "${APPNAME}"
+    Call un.ClearRun
+  ${Loop}
+  ; У тех, кто сейчас не в системе, ветка не загружена, и запись осталась бы вести в
+  ; удалённую папку: если $INSTDIR был вне Program Files, любой пользователь мог бы
+  ; положить туда свой Unbihex.exe. Их NTUSER.DAT загружается на время очистки.
+  StrCpy $R0 0
+  ${Do}
+    EnumRegKey $R7 HKLM "Software\Microsoft\Windows NT\CurrentVersion\ProfileList" $R0
+    ${If} $R7 == ""
+      ${ExitDo}
+    ${EndIf}
+    IntOp $R0 $R0 + 1
+    ; Ветка уже в HKU — очищена выше.
+    ClearErrors
+    EnumRegKey $R8 HKU "$R7" 0
+    ${IfNot} ${Errors}
+      ${Continue}
+    ${EndIf}
+    ReadRegStr $R8 HKLM "Software\Microsoft\Windows NT\CurrentVersion\ProfileList\$R7" "ProfileImagePath"
+    ExpandEnvStrings $R8 $R8
+    ${IfNot} ${FileExists} "$R8\NTUSER.DAT"
+      ${Continue}
+    ${EndIf}
+    nsExec::Exec '"$SYSDIR\reg.exe" load "HKU\${APPNAME}Uninstall" "$R8\NTUSER.DAT"'
+    Pop $R9
+    ${If} $R9 == 0
+      StrCpy $R1 "${APPNAME}Uninstall"
+      Call un.ClearRun
+      nsExec::Exec '"$SYSDIR\reg.exe" unload "HKU\${APPNAME}Uninstall"'
+      Pop $R9
     ${EndIf}
   ${Loop}
 

@@ -1,6 +1,6 @@
 # ipstack 1.0.1 — Unbihex patch
 
-This is ipstack 1.0.1 from crates.io (the latest release) with seven changes. The build
+This is ipstack 1.0.1 from crates.io (the latest release) with eight changes. The build
 script, examples and dev-dependencies are dropped: the build script only copied
 `wintun.dll` for the examples.
 
@@ -57,8 +57,8 @@ Changes (search for "Unbihex patch"):
    tail became an out-of-order hole and the sender waited for an RTO on every
    segment (1 MiB took 40 s at MTU 9000). Now everything contiguous is taken at once:
    with any fixed budget, a retransmission that fills a hole with more than the budget
-   queued behind it left the rest waiting for the app's next packet. The advertised
-   window already bounds the queue. (Found by Pavel Shakhmin, PR #45.)
+   queued behind it left the rest waiting for the app's next packet. The queue is
+   bounded by the eighth change. (Found by Pavel Shakhmin, PR #45.)
 
 7. **The app's MSS is respected.** Stock ipstack sized segments by its own MTU only and
    ignored the MSS option of the app's SYN. With a TUN MTU above the LAN's (16 KiB on
@@ -68,6 +68,16 @@ Changes (search for "Unbihex patch"):
    `Tcb::calculate_payload_max_len` (`src/stream/tcb.rs`) never exceeds it. Without the
    option everything works as before.
 
+8. **Segments beyond the receive window are dropped.** Stock ipstack queued any
+   segment ahead of `ack` in `unordered_packets`, whatever the window, so a sender
+   (an app, or a LAN host routing through the TUN) could park any amount of data ahead
+   of a hole, and filling the hole sent it all to the reader at once. Now
+   `Tcb::add_unordered_packet` (`src/stream/tcb.rs`) keeps only what fits between `ack`
+   and `ack + read_buffer_size - unread` (never below a window we advertised) and
+   drops a segment that would push the queue past that; `consume_unordered_packets`
+   trims a queued segment that a retransmission cut differently has overtaken, instead
+   of leaving it before `ack` for good.
+
 To move to a new ipstack version: check which of these upstream has fixed, copy the new
 crate source here, reapply what is still needed, keep the version in
 `unbihex-engine/Cargo.toml` in step, and run the engine tests
@@ -75,7 +85,8 @@ crate source here, reapply what is still needed, keep the version in
 changes, `unread_data_closes_the_window_and_reading_reopens_it` the third,
 `unacknowledged_tail_is_resent_then_reset` the fourth, `a_segment_larger_than_8k_is_delivered_whole`
 and `a_filled_hole_releases_everything_behind_it` the sixth,
-`segments_respect_the_mss_of_the_syn` the seventh). The Windows bench
+`segments_respect_the_mss_of_the_syn` the seventh, `a_segment_beyond_the_window_is_dropped`
+the eighth). The Windows bench
 (64 parallel downloads through the TUN) found the fourth and measures the fifth.
 
 Licensed like ipstack itself: Apache-2.0 (see LICENSE here).

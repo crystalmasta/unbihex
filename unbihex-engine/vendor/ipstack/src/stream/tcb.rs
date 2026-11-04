@@ -141,10 +141,26 @@ impl Tcb {
         self.duplicate_ack_count >= self.max_count_for_dup_ack
     }
 
-    pub(super) fn add_unordered_packet(&mut self, seq: SeqNum, buf: Vec<u8>) {
+    pub(super) fn add_unordered_packet(&mut self, seq: SeqNum, mut buf: Vec<u8>) {
         if seq < self.ack {
             #[rustfmt::skip]
             log::warn!("{:?}: Received packet seq {seq} < self ack {}, len = {}", self.state, self.ack, buf.len());
+            return;
+        }
+        // Unbihex patch: only what fits the receive buffer is kept (stock ipstack
+        // queued any segment ahead of `ack`). The right edge, `ack` plus the buffer
+        // minus unread data, never falls below a window we advertised, so a sender
+        // that respects the window loses nothing; the rest is dropped and resent.
+        let room = self.read_buffer_size.saturating_sub(self.unread);
+        let offset = usize::from(seq - self.ack);
+        if offset >= room {
+            log::debug!("{:?}: segment seq {seq} beyond the receive window, dropped", self.state);
+            return;
+        }
+        buf.truncate(room - offset);
+        let queued = self.get_unordered_packets_total_len() - self.unordered_packets.get(&seq).map_or(0, Vec::len);
+        if queued + buf.len() > room {
+            log::debug!("{:?}: receive buffer full, segment seq {seq} dropped", self.state);
             return;
         }
         self.unordered_packets.insert(seq, buf);
@@ -180,6 +196,18 @@ impl Tcb {
 
         while remaining_bytes > 0 {
             if let Some(seq) = self.unordered_packets.keys().next().copied() {
+                // Unbihex patch: a segment that overlaps data already taken (a
+                // retransmission cut differently) would otherwise sit before `ack`
+                // forever, holding its bytes against the window. Keep only its tail.
+                if seq < self.ack {
+                    let mut payload = self.unordered_packets.remove(&seq).unwrap();
+                    let taken = usize::from(self.ack - seq);
+                    if payload.len() > taken {
+                        let tail = payload.split_off(taken);
+                        self.unordered_packets.entry(self.ack).or_insert(tail);
+                    }
+                    continue;
+                }
                 if seq != self.ack {
                     break; // sequence number is not continuous, stop extracting
                 }

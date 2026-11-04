@@ -858,11 +858,15 @@ impl XhttpClient {
             return self.open_bridge().await;
         }
         let (user, inner) = tokio::io::duplex(PIPE);
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
         match self.http {
-            Http::H2 => self.open_h2(inner).await?,
-            Http::H1 => self.open_h1(inner).await?,
+            Http::H2 => self.open_h2(inner, cancelled).await?,
+            Http::H1 => self.open_h1(inner, cancelled).await?,
         }
-        Ok(Box::new(user))
+        Ok(Box::new(PacketPipe {
+            inner: user,
+            _cancel: cancel,
+        }))
     }
 
     /// Opens a streaming h2 session as one duplex stream, without the pipe.
@@ -921,7 +925,11 @@ impl XhttpClient {
     }
 
     /// Opens a packet-up session through the in-memory duplex pipe.
-    async fn open_h2(self: &Arc<Self>, inner: DuplexStream) -> Result<()> {
+    async fn open_h2(
+        self: &Arc<Self>,
+        inner: DuplexStream,
+        cancelled: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
         let lease = self.pool.get(|| self.dial_h2()).await?;
         let (r, w) = tokio::io::split(inner);
         let session = self.cfg.new_session_id();
@@ -936,8 +944,12 @@ impl XhttpClient {
         let me = self.clone();
         tokio::spawn(async move {
             let up = me.upload_packets_h2(&lease, &session, r);
-            let (u, d) = tokio::join!(up, download_h2(resp, w));
-            log_end(u, d);
+            tokio::select! {
+                (u, d) = async { tokio::join!(up, download_h2(resp, w)) } => log_end(u, d),
+                // The caller dropped the session: dropping the response resets
+                // the GET, and the lease goes with this task.
+                _ = cancelled => {}
+            }
         });
         Ok(())
     }
@@ -1036,7 +1048,11 @@ impl XhttpClient {
         }
     }
 
-    async fn open_h1(self: &Arc<Self>, inner: DuplexStream) -> Result<()> {
+    async fn open_h1(
+        self: &Arc<Self>,
+        inner: DuplexStream,
+        cancelled: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
         let session = self.cfg.new_session_id();
         let io = self.dialer.dial().await?;
         let (rd, mut wr) = tokio::io::split(io);
@@ -1064,8 +1080,13 @@ impl XhttpClient {
                 drop(wr);
                 res
             };
-            let (u, d) = tokio::join!(me.upload_packets_h1(&session, r), down);
-            log_end(u, d);
+            tokio::select! {
+                (u, d) = async { tokio::join!(me.upload_packets_h1(&session, r), down) } => {
+                    log_end(u, d)
+                }
+                // The caller dropped the session: close the download connection.
+                _ = cancelled => {}
+            }
         });
         Ok(())
     }
@@ -1146,6 +1167,42 @@ impl XhttpClient {
             "DELETE" => http::Method::DELETE,
             _ => http::Method::POST,
         }
+    }
+}
+
+/// The caller's end of a packet-up or HTTP/1.1 session. Dropping it stops the
+/// session task: otherwise the download would wait for the server to send or
+/// end the GET, holding the pooled lease and the upload buffer meanwhile.
+struct PacketPipe {
+    inner: DuplexStream,
+    _cancel: tokio::sync::oneshot::Sender<()>,
+}
+
+impl AsyncRead for PacketPipe {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PacketPipe {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -1460,6 +1517,53 @@ mod tests {
         assert_eq!(reason, Some(h2::Reason::CANCEL));
         tokio::time::timeout(Duration::from_secs(5), async {
             while pool.sessions() != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the lease was released");
+    }
+
+    /// A packet-up session dropped by the caller resets its GET and frees the
+    /// lease, even though the server never answers the GET.
+    #[tokio::test]
+    async fn dropped_packet_up_session_resets_the_get_and_frees_the_lease() {
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let (seen_tx, seen) = tokio::sync::oneshot::channel::<Option<h2::Reason>>();
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            let (_req, mut respond) = conn.accept().await.unwrap().unwrap();
+            tokio::spawn(async move { while let Some(Ok(_)) = conn.accept().await {} });
+            // Never answer; report how the client ended the stream.
+            let reason = std::future::poll_fn(|cx| respond.poll_reset(cx)).await.ok();
+            let _ = seen_tx.send(reason);
+        });
+
+        let c = Arc::new(client(
+            XhttpConfig::from_xray(&serde_json::json!({ "mode": "packet-up" })).unwrap(),
+        ));
+        let (send, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        // Seed the pool so the session reuses this connection instead of dialing.
+        let seed = c
+            .pool
+            .get(|| async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
+            .await
+            .unwrap();
+        drop(seed);
+        let session = c.open().await.unwrap();
+        assert_eq!(c.pool.sessions(), 1);
+        drop(session);
+
+        let reason = tokio::time::timeout(Duration::from_secs(5), seen)
+            .await
+            .expect("the server saw the GET end")
+            .unwrap();
+        assert_eq!(reason, Some(h2::Reason::CANCEL));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while c.pool.sessions() != 0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })

@@ -1,7 +1,8 @@
 //! DNS server answering queries captured from the TUN (SPEC §8.2).
 //!
 //! A → fake IP; AAAA, SVCB, HTTPS → empty NOERROR (keeps traffic on fake IPv4
-//! addresses); PTR of a fake address → the pool's name or NXDOMAIN; single-label
+//! addresses); PTR of a fake address → the pool's name or NXDOMAIN; names only the
+//! LAN knows → NXDOMAIN when every upstream is public; otherwise single-label
 //! names, `dns.fakeip_exclude` suffixes and other types → forwarded upstream. A name every session to which a rule blocks by the name
 //! alone (ad-blocking lists) gets NXDOMAIN.
 //!
@@ -127,6 +128,13 @@ impl DnsServer {
             }
             return resp.to_vec().ok();
         }
+        // Names only this network can answer (single labels, `local`, `home.arpa`,
+        // reverse zones of private addresses) do not exist for a public resolver, and
+        // asking one tells it, and the path to it, about the LAN. They get NXDOMAIN
+        // here unless an upstream is itself on the LAN or this host.
+        if is_local_only(&domain) && self.upstream_is_public() {
+            return error(&msg, ResponseCode::NXDomain);
+        }
         // Names a rule blocks outright (ad-blocking lists) do not exist: apps give
         // up at once instead of retrying connections that are refused.
         if !local
@@ -167,6 +175,12 @@ impl DnsServer {
             }
             _ => self.forward(&msg, packet).await,
         }
+    }
+
+    /// Whether every upstream server is a public address.
+    fn upstream_is_public(&self) -> bool {
+        let servers = self.upstream.upstream();
+        !servers.is_empty() && servers.iter().all(|a| is_public(a.ip()))
     }
 
     async fn forward(&self, msg: &Message, packet: &[u8]) -> Option<Vec<u8>> {
@@ -281,6 +295,67 @@ fn reverse_v4(name: &str) -> Option<Ipv4Addr> {
         *octet = labels.next()?.parse().ok()?;
     }
     labels.next().is_none().then_some(Ipv4Addr::from(ip))
+}
+
+/// A name only a resolver on this network can answer: a single label (except
+/// `localhost`, left to the upstream as before), `local` (RFC 6762), `home.arpa`
+/// (RFC 8375), or a reverse zone of private, loopback, link-local or shared
+/// addresses (RFC 6303).
+fn is_local_only(domain: &str) -> bool {
+    let d = domain.to_ascii_lowercase();
+    if d.is_empty() {
+        return false;
+    }
+    if !d.contains('.') {
+        return d != "localhost";
+    }
+    let under = |zone: &str| d == zone || d.strip_suffix(zone).is_some_and(|h| h.ends_with('.'));
+    if under("local") || under("home.arpa") {
+        return true;
+    }
+    if let Some(rest) = d.strip_suffix(".in-addr.arpa") {
+        let mut it = rest.rsplit('.');
+        let a = it.next().and_then(|s| s.parse::<u8>().ok());
+        let b = it.next().and_then(|s| s.parse::<u8>().ok());
+        return match (a, b) {
+            (Some(0 | 10 | 127), _) | (Some(192), Some(168)) | (Some(169), Some(254)) => true,
+            (Some(172), Some(b)) => (16..=31).contains(&b),
+            (Some(100), Some(b)) => (64..=127).contains(&b),
+            _ => false,
+        };
+    }
+    if let Some(rest) = d.strip_suffix(".ip6.arpa") {
+        let nibbles: Vec<&str> = rest.split('.').collect();
+        let mut top = nibbles.iter().rev();
+        return match (top.next(), top.next(), top.next()) {
+            // fc00::/7
+            (Some(&"f"), Some(&("c" | "d")), _) => true,
+            // fe80::/10
+            (Some(&"f"), Some(&"e"), Some(&("8" | "9" | "a" | "b"))) => true,
+            // ::1
+            _ => nibbles.len() == 32 && nibbles[0] == "1" && nibbles[1..].iter().all(|n| *n == "0"),
+        };
+    }
+    false
+}
+
+/// Neither on the LAN nor on this host.
+fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || (a == 100 && (64..=127).contains(&b)))
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments()[0];
+            !(v6.is_loopback() || v6.is_unspecified() || s & 0xfe00 == 0xfc00 || s & 0xffc0 == 0xfe80)
+                && v6.to_ipv4_mapped().is_none_or(|v4| is_public(IpAddr::V4(v4)))
+        }
+    }
 }
 
 fn error(query: &Message, code: ResponseCode) -> Option<Vec<u8>> {
@@ -409,6 +484,67 @@ mod tests {
         assert_eq!(reverse_v4("4.3.2.1.in-addr.arpa"), Some(Ipv4Addr::new(1, 2, 3, 4)));
         for bad in ["3.2.1.in-addr.arpa", "5.4.3.2.1.in-addr.arpa", "x.3.2.1.in-addr.arpa", "1.2.3.4"] {
             assert_eq!(reverse_v4(bad), None, "{bad}");
+        }
+    }
+
+    /// With a public upstream, names only the LAN knows are answered here; with an
+    /// upstream on the LAN or this host (`server()`) they are still forwarded.
+    #[tokio::test]
+    async fn local_names_stay_local_with_a_public_upstream() {
+        let pool = Arc::new(FakeIpPool::new("198.18.0.0/15".parse().unwrap()));
+        let client = Arc::new(DnsClient::new(
+            vec!["192.0.2.53:53".parse().unwrap(), "[2001:db8::53]:53".parse().unwrap()],
+            Default::default(),
+        ));
+        let public = DnsServer::new(pool, client, 10);
+        let lan = server();
+        for (name, t) in [
+            ("wpad.", RecordType::A),
+            ("nas.", RecordType::AAAA),
+            ("printer.local.", RecordType::A),
+            ("router.home.arpa.", RecordType::A),
+            ("1.1.168.192.in-addr.arpa.", RecordType::PTR),
+            ("5.0.20.172.in-addr.arpa.", RecordType::PTR),
+            ("1.0.0.10.in-addr.arpa.", RecordType::PTR),
+            ("1.0.0.127.in-addr.arpa.", RecordType::PTR),
+            ("1.0.254.169.in-addr.arpa.", RecordType::PTR),
+            ("1.0.64.100.in-addr.arpa.", RecordType::PTR),
+            ("168.192.in-addr.arpa.", RecordType::SOA),
+            (
+                "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa.",
+                RecordType::PTR,
+            ),
+            ("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa.", RecordType::PTR),
+            ("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa.", RecordType::PTR),
+        ] {
+            assert_eq!(code(&public, name, t).await, (ResponseCode::NXDomain, 0), "{name}");
+            assert_eq!(code(&lan, name, t).await.0, ResponseCode::ServFail, "{name}");
+        }
+        for name in [
+            "",
+            "localhost",
+            "example.com",
+            "local.example.com",
+            "4.3.2.1.in-addr.arpa",
+            "5.0.32.172.in-addr.arpa",
+            "1.0.128.100.in-addr.arpa",
+            "in-addr.arpa",
+            "f.ip6.arpa",
+        ] {
+            assert!(!is_local_only(name), "{name}");
+        }
+        for (ip, public) in [
+            ("1.1.1.1", true),
+            ("2606:4700:4700::1111", true),
+            ("192.168.1.1", false),
+            ("100.100.100.100", false),
+            ("127.0.0.53", false),
+            ("fd00::1", false),
+            ("fe80::1", false),
+            ("::1", false),
+            ("::ffff:10.0.0.1", false),
+        ] {
+            assert_eq!(is_public(ip.parse().unwrap()), public, "{ip}");
         }
     }
 

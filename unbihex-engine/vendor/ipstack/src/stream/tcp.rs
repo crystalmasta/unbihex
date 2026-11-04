@@ -995,7 +995,8 @@ fn extract_data_n_write_upstream(
 
     // Unbihex patch: everything contiguous at once (stock: 8192 bytes). A cap
     // split segments above it, and a filled hole left the rest queued until the
-    // app's next packet; the window already bounds how much can wait here.
+    // app's next packet. `Tcb::add_unordered_packet` keeps the queue inside the
+    // receive window, which bounds how much can wait here.
     if let Some(data) = tcb.consume_unordered_packets(usize::MAX) {
         tcb.add_unread(data.len()); // Unbihex patch: see `Tcb::get_available_read_buffer_size`.
         let hint = if state == TcpState::Established { "normally" } else { "still" };

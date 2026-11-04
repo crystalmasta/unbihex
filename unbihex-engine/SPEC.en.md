@@ -396,6 +396,9 @@ impl Dispatcher {
      itself (§11.14).
   4. AAAA, HTTPS, SVCB (28/65/64) → NOERROR with no answers: no IPv6 and no ECH/IP hints that bypass the fake IPs.
      PTR of a fake address (`…in-addr.arpa` inside the pool) → the name it maps to, or NXDOMAIN; it never goes upstream.
+     When every upstream is a public address (not LAN, loopback, link-local or 100.64/10), names only the local network
+     knows get NXDOMAIN at once: single labels (except `localhost`), `local` and `home.arpa` with subdomains, PTR in the
+     reverse zones of private, loopback, link-local and 100.64/10 addresses (RFC 6303), `fc00::/7`, `fe80::/10`, `::1`.
   5. Other types (MX, TXT, other PTR …) and single-label names are forwarded to the upstream as a UDP session through the
      Dispatcher (the inbound is the TUN tag): with a proxy as `final` the query goes through the proxy, not in the
      clear. For an outbound without UDP (SOCKS5) the query goes over TCP. The ID is replaced with a random one and
@@ -633,7 +636,8 @@ accepted and unused.
   out. `max_concurrency` works as in Xray: a new connection only once every one carries that many sessions.
   `max_connections` is a cap with growth on demand: a new connection is dialed only while all existing ones are busy,
   otherwise the session joins the least loaded one (the freshest among equals); at the cap sessions wait for the
-  dials in flight (up to 5 s) instead of dialing their own. Without `xmux`: up to 8 connections, 600–900 requests,
+  dials in flight (up to 5 s) instead of dialing their own; after that they take any live connection past
+  `max_concurrency`, and with no connection yet at most two dials past the cap run at once. Without `xmux`: up to 8 connections, 600–900 requests,
   1800–3000 s (Xray's default without `xmux` is `maxConnections` 3; 8 is our choice, so eight parallel downloads do
   not share three tunnels). A connection without sessions for over 120 s is closed, the two freshest stay.
   `h_keep_alive_period` (`hKeepAlivePeriod`): an HTTP/2 PING after that many seconds without incoming frames, like

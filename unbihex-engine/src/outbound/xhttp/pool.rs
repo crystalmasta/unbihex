@@ -88,17 +88,23 @@ impl Drop for Lease {
 
 /// Counts a dial in flight against the connection cap until it lands, then
 /// wakes the sessions waiting for it.
-struct DialSlot<'a>(&'a H2Pool);
+/// The second field is the counter the slot was taken from: `dialing` or
+/// `overflow`.
+struct DialSlot<'a>(&'a H2Pool, &'a AtomicUsize);
 
 impl Drop for DialSlot<'_> {
     fn drop(&mut self) {
-        self.0.dialing.fetch_sub(1, Ordering::Relaxed);
+        self.1.fetch_sub(1, Ordering::Relaxed);
         self.0.landed.notify_waiters();
     }
 }
 
 /// How long a session waits for dials in flight before dialing past the cap.
 const DIAL_WAIT: Duration = Duration::from_secs(5);
+
+/// Dials past the cap allowed at once. A server that takes longer than
+/// `DIAL_WAIT` to answer must not get a handshake per proxied connection.
+const OVERFLOW_DIALS: usize = 2;
 
 /// The connections of one outbound.
 pub struct H2Pool {
@@ -109,6 +115,8 @@ pub struct H2Pool {
     /// Dials that have not produced a connection yet, counted against
     /// `connections` so a burst of sessions cannot open more than the cap.
     dialing: AtomicUsize,
+    /// Dials past the cap in flight, at most `OVERFLOW_DIALS`.
+    overflow: AtomicUsize,
     /// Signalled whenever a dial lands or fails.
     landed: Notify,
 }
@@ -125,9 +133,22 @@ impl H2Pool {
             connections: pick(xmux.max_connections) as usize,
             conns: Mutex::new(Vec::new()),
             dialing: AtomicUsize::new(0),
+            overflow: AtomicUsize::new(0),
             landed: Notify::new(),
             xmux,
         }
+    }
+
+    /// Reserves one of the few dials allowed past the cap.
+    fn reserve_overflow(&self) -> bool {
+        let mut n = self.overflow.load(Ordering::Relaxed);
+        while n < OVERFLOW_DIALS {
+            match self.overflow.compare_exchange_weak(n, n + 1, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(now) => n = now,
+            }
+        }
+        false
     }
 
     /// Reserves one dial slot, or refuses when the cap is reached.
@@ -171,11 +192,19 @@ impl H2Pool {
     }
 
     fn take(&self) -> Option<Lease> {
+        self.take_with(false)
+    }
+
+    /// `share`: past the wait, any live connection will do, even one already
+    /// carrying `maxConcurrency` sessions.
+    fn take_with(&self, share: bool) -> Option<Lease> {
         let mut conns = self.conns.lock();
         conns.retain(|c| c.usable());
         self.retire_idle(&mut conns);
         let load = |c: &Arc<PooledConn>| c.open.load(Ordering::Relaxed);
-        let pickable: Vec<&Arc<PooledConn>> = if self.concurrency > 0 {
+        let pickable: Vec<&Arc<PooledConn>> = if share {
+            conns.iter().collect()
+        } else if self.concurrency > 0 {
             // An explicit `maxConcurrency` works as in Xray: a new connection
             // only once every one carries that many sessions.
             conns.iter().filter(|c| load(c) < self.concurrency).collect()
@@ -218,7 +247,7 @@ impl H2Pool {
         // A burst of sessions must not dial a connection each: at the cap the
         // others wait for the dials in flight, then share what they bring.
         let deadline = tokio::time::Instant::now() + DIAL_WAIT;
-        let reserved = loop {
+        let _slot = loop {
             let landed = self.landed.notified();
             tokio::pin!(landed);
             // Registered before looking, so a dial landing in between is not missed.
@@ -227,14 +256,22 @@ impl H2Pool {
                 return Ok(l);
             }
             if self.reserve() {
-                break true;
+                break DialSlot(self, &self.dialing);
             }
-            if tokio::time::timeout_at(deadline, landed).await.is_err() {
-                // Dial anyway rather than stall the session.
-                break false;
+            if tokio::time::Instant::now() < deadline {
+                let _ = tokio::time::timeout_at(deadline, landed).await;
+                continue;
             }
+            // Waited long enough: share a full connection, or dial past the
+            // cap rather than stall the session, but only a few at a time.
+            if let Some(l) = self.take_with(true) {
+                return Ok(l);
+            }
+            if self.reserve_overflow() {
+                break DialSlot(self, &self.overflow);
+            }
+            landed.await;
         };
-        let _slot = reserved.then(|| DialSlot(self));
         let (send, closed, ping_stop) = dial().await?;
         let reuse = pick(self.xmux.c_max_reuse_times);
         let requests = pick(self.xmux.h_max_request_times);
@@ -419,5 +456,33 @@ mod tests {
         let (a, b) = (first.await.unwrap().unwrap(), second.await.unwrap().unwrap());
         assert!(Arc::ptr_eq(&a.0, &b.0));
         assert_eq!(pool.sessions(), 2);
+    }
+
+    /// A server slower than `DIAL_WAIT` does not get a dial per session: past
+    /// the wait only `OVERFLOW_DIALS` extra dials run at once.
+    #[tokio::test(start_paused = true)]
+    async fn slow_dials_do_not_multiply_past_the_cap() {
+        let pool = Arc::new(pool_at(1));
+        let dials = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..10 {
+            let pool = pool.clone();
+            let dials = dials.clone();
+            tasks.push(tokio::spawn(async move {
+                pool.get(|| async move {
+                    dials.fetch_add(1, Ordering::Relaxed);
+                    std::future::pending::<
+                        Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)>,
+                    >()
+                    .await
+                })
+                .await
+            }));
+        }
+        tokio::time::sleep(DIAL_WAIT * 4).await;
+        assert_eq!(dials.load(Ordering::Relaxed), 1 + OVERFLOW_DIALS);
+        for t in tasks {
+            t.abort();
+        }
     }
 }
