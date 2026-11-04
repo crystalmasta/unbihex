@@ -184,6 +184,17 @@
             <label>MTU туннеля<input name="mtu" type="number" min="1280" max="9000" /></label>
           </fieldset>
           <fieldset>
+            <legend>Автовыбор сервера</legend>
+            <label>Если сервер не работает
+              <select name="auto_select">
+                <option value="off">Не переключать</option>
+                <option value="fallback">Переходить на следующий рабочий</option>
+                <option value="least_ping">Выбирать с наименьшей задержкой</option>
+              </select>
+            </label>
+            <p class="hint">Группа — выбранный сервер и остальные серверы его подписки, которые поддерживает ядро (до 20). Каждый проверяется запросом к www.gstatic.com раз в минуту и сразу после сбоя; при сбое новые соединения идут через следующий сервер, открытые не рвутся. Текущий сервер виден под кнопкой подключения.</p>
+          </fieldset>
+          <fieldset>
             <legend>Подписки</legend>
             <label>User-Agent<input name="user_agent" /></label>
             <label class="check"><input name="send_hwid" type="checkbox" /> Передавать данные устройства провайдеру — имя, система и случайный идентификатор (x-hwid); по ним панели с лимитом устройств различают устройства</label>

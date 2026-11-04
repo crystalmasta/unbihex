@@ -33,6 +33,9 @@ pub struct ConnectionInfo {
     pub http_port: Option<u16>,
     /// The engine runs in another process (iOS extension): no live counters.
     pub external: bool,
+    /// Auto-select: the group's server names, by member number (`proxy-<n>`);
+    /// empty without auto-select.
+    pub group: Vec<String>,
 }
 
 /// Connection state for the UI.
@@ -50,6 +53,22 @@ pub struct Status {
     pub direct_up: u64,
     /// Bytes received directly.
     pub direct_down: u64,
+    /// Auto-select: the server new connections go to now.
+    pub auto_server: Option<String>,
+}
+
+/// The server names of the auto-select group, by member number.
+fn group_names(servers: &[Server], settings: &Settings) -> Vec<String> {
+    let group = crate::plan::auto_group(servers, settings);
+    if group.len() < 2 {
+        return Vec::new();
+    }
+    group.iter().map(|s| s.name.clone()).collect()
+}
+
+/// The selected server: the first of `servers`.
+fn first(servers: &[Server]) -> Result<&Server> {
+    servers.first().ok_or_else(|| ClientError::State("выберите сервер".into()))
 }
 
 struct Running {
@@ -153,6 +172,13 @@ impl Controller {
             return Status::default();
         };
         let (pu, pd, du, dd) = r.counters.as_ref().map_or((0, 0, 0, 0), |c| c.snapshot());
+        let auto_server = r
+            .instance
+            .as_ref()
+            .and_then(|i| i.balancers().into_iter().find(|b| b.tag == "proxy"))
+            .and_then(|b| b.current)
+            .and_then(|tag| tag.strip_prefix("proxy-")?.parse::<usize>().ok())
+            .and_then(|n| r.info.group.get(n).cloned());
         Status {
             connected: true,
             info: Some(r.info.clone()),
@@ -160,6 +186,7 @@ impl Controller {
             proxy_down: pd,
             direct_up: du,
             direct_down: dd,
+            auto_server,
         }
     }
 
@@ -167,12 +194,13 @@ impl Controller {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub async fn connect_desktop(
         &self,
-        server: &Server,
+        servers: &[Server],
         settings: &Settings,
         geo: &Geo,
     ) -> Result<ConnectionInfo> {
         use crate::platform;
 
+        let server = first(servers)?;
         let mut guard = self.running.lock().await;
         if guard.is_some() {
             return Err(ClientError::State("уже подключено".into()));
@@ -181,6 +209,7 @@ impl Controller {
         let mut info = ConnectionInfo {
             server_id: server.id,
             server_name: server.name.clone(),
+            group: group_names(servers, settings),
             mode: mode_name(mode).into(),
             since: now_secs(),
             socks_port: Some(settings.socks_port),
@@ -194,7 +223,7 @@ impl Controller {
                         "для режима TUN нужны права администратора".into(),
                     ));
                 }
-                let mut config = build_config(server, settings, geo, Target::DesktopTun)?;
+                let mut config = build_config(servers, settings, geo, Target::DesktopTun)?;
                 // A clean tunnel: the TUN comes up, routes and DNS stay the admin's.
                 let uplink = if settings.tun_routes {
                     Some(platform::detect_default()?)
@@ -253,7 +282,7 @@ impl Controller {
                 }
             }
             ProxyMode::SystemProxy | ProxyMode::ProxyOnly => {
-                let config = build_config(server, settings, geo, Target::DesktopProxy)?;
+                let config = build_config(servers, settings, geo, Target::DesktopProxy)?;
                 let instance = Instance::start(config, PlatformHooks::default())
                     .await
                     .map_err(explain_start)?;
@@ -290,13 +319,13 @@ impl Controller {
     /// Mobile (Android): starts the engine on a TUN descriptor from the VPN service.
     pub async fn connect_tun_fd(
         &self,
-        server: &Server,
+        servers: &[Server],
         settings: &Settings,
         geo: &Geo,
         tun_fd: i32,
         protect: Option<unbihex_engine::ProtectFn>,
     ) -> Result<ConnectionInfo> {
-        self.connect_tun_fd_with_dns(server, settings, geo, tun_fd, protect, &[]).await
+        self.connect_tun_fd_with_dns(servers, settings, geo, tun_fd, protect, &[]).await
     }
 
     // By dubr1k (github.com/dubr1k), PR #36.
@@ -304,7 +333,7 @@ impl Controller {
     #[allow(clippy::too_many_arguments)]
     pub async fn connect_tun_fd_with_dns(
         &self,
-        server: &Server,
+        servers: &[Server],
         settings: &Settings,
         geo: &Geo,
         tun_fd: i32,
@@ -315,7 +344,8 @@ impl Controller {
         if guard.is_some() {
             return Err(ClientError::State("уже подключено".into()));
         }
-        let config = build_config(server, settings, geo, Target::Mobile)?;
+        let server = first(servers)?;
+        let config = build_config(servers, settings, geo, Target::Mobile)?;
         let hooks = PlatformHooks {
             tun_fd: Some(tun_fd),
             protect: protect.clone(),
@@ -334,6 +364,7 @@ impl Controller {
         let info = ConnectionInfo {
             server_id: server.id,
             server_name: server.name.clone(),
+            group: group_names(servers, settings),
             mode: "vpn".into(),
             since: now_secs(),
             socks_port: None,
@@ -357,10 +388,11 @@ impl Controller {
     /// means the change needs a full reconnect (another mode, ports, DNS…).
     pub async fn reload(
         &self,
-        server: &Server,
+        servers: &[Server],
         settings: &Settings,
         geo: &Geo,
     ) -> Result<Option<ConnectionInfo>> {
+        let server = first(servers)?;
         let mut guard = self.running.lock().await;
         let Some(running) = guard.as_mut() else {
             return Ok(None);
@@ -377,10 +409,11 @@ impl Controller {
         let Some(instance) = running.instance.as_ref() else {
             return Err(ClientError::State("ядро работает в расширении: нужно переподключение".into()));
         };
-        let config = build_config(server, settings, geo, target)?;
+        let config = build_config(servers, settings, geo, target)?;
         instance.reload(config).await?;
         running.info.server_id = server.id;
         running.info.server_name = server.name.clone();
+        running.info.group = group_names(servers, settings);
         tracing::info!("hot reload: {}", server.name);
         Ok(Some(running.info.clone()))
     }
@@ -390,6 +423,7 @@ impl Controller {
         let info = ConnectionInfo {
             server_id: server.id,
             server_name: server.name.clone(),
+            group: Vec::new(),
             mode: "vpn".into(),
             since: now_secs(),
             socks_port: None,
@@ -460,7 +494,7 @@ mod tests {
             http_port: free_port,
             ..Settings::default()
         };
-        let mut config = build_config(&server, &settings, &Geo::default(), Target::DesktopTun).unwrap();
+        let mut config = build_config(std::slice::from_ref(&server), &settings, &Geo::default(), Target::DesktopTun).unwrap();
         assert_eq!(drop_busy_proxy_inbounds(&mut config), vec![busy_port]);
         assert!(config.tun().is_some());
         assert!(!config.inbounds.iter().any(|i| matches!(i, InboundConfig::Mixed(_))));

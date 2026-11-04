@@ -145,6 +145,20 @@ pub enum RoutingMode {
     BlockedOnly,
 }
 
+/// Auto-select (issue #46): the selected server and the other servers of its
+/// subscription become one balancer in the engine (SPEC §11.16).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSelect {
+    /// Only the selected server.
+    #[default]
+    Off,
+    /// The first working server, the selected one first.
+    Fallback,
+    /// The working server with the lowest delay.
+    LeastPing,
+}
+
 /// How the server delay is measured.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -250,6 +264,8 @@ pub struct Settings {
     pub fragment_interval: String,
     /// How "Проверить пинг" measures the delay.
     pub ping_method: PingMethod,
+    /// Auto-select among the servers of the selected one's subscription.
+    pub auto_select: AutoSelect,
 }
 
 /// Default proxy login for LAN devices.
@@ -296,6 +312,7 @@ impl Default for Settings {
             fragment_length: "100-200".into(),
             fragment_interval: "10-20".into(),
             ping_method: PingMethod::default(),
+            auto_select: AutoSelect::default(),
         }
     }
 }

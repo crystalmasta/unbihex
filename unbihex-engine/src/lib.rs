@@ -38,7 +38,7 @@ use dns::fakeip::FakeIpPool;
 use dns::server::DnsServer;
 use dns::{DnsClient, Resolver};
 use net::SocketFactory;
-use outbound::{OutboundContext, build_outbound};
+use outbound::OutboundContext;
 use router::Router;
 
 /// Engine version.
@@ -90,13 +90,7 @@ async fn build_outbounds(
     config: &Config,
     ctx: &OutboundContext,
 ) -> Result<(Vec<Arc<dyn outbound::Outbound>>, Vec<IpAddr>)> {
-    let mut outbounds = Vec::with_capacity(config.outbounds.len());
-    for oc in &config.outbounds {
-        let ob = build_outbound(oc, ctx)
-            .await
-            .map_err(|e| Error::config(format!("outbound {}: {e}", oc.tag())))?;
-        outbounds.push(ob);
-    }
+    let outbounds = outbound::build_outbounds(&config.outbounds, ctx).await?;
     let mut server_ips: Vec<IpAddr> = outbounds
         .iter()
         .filter_map(|o| o.server())
@@ -358,6 +352,13 @@ impl Instance {
         *self.server_ips.lock() = server_ips;
         tracing::info!("configuration reloaded");
         Ok(())
+    }
+
+    /// What the balancers (SPEC §11.16) know about their members, by tag.
+    pub fn balancers(&self) -> Vec<outbound::balancer::BalancerState> {
+        let mut out: Vec<_> = self.dispatcher.outbounds().iter().filter_map(|o| o.balancer()).collect();
+        out.sort_by(|a, b| a.tag.cmp(&b.tag));
+        out
     }
 
     /// Live traffic counters.

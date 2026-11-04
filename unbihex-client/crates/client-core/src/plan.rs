@@ -10,7 +10,7 @@ use unbihex_engine::config::DnsUpstream;
 use crate::error::{ClientError, Result};
 use crate::geo::Geo;
 use crate::links::outbound_json;
-use crate::model::{RoutingMode, Server, Settings};
+use crate::model::{AutoSelect, RoutingMode, Server, Settings};
 
 /// Where the config will run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +264,48 @@ fn routing_rules(
 }
 
 /// The proxy outbound, with ClientHello fragmentation when enabled.
+/// Most servers in an auto-select group: each one is checked every minute.
+pub const MAX_GROUP: usize = 20;
+
+/// Tag of the `n`-th server of an auto-select group; the balancer itself is `proxy`.
+pub fn member_tag(n: usize) -> String {
+    format!("proxy-{n}")
+}
+
+/// The servers that go into the engine: the first one, or with auto-select on
+/// up to [`MAX_GROUP`] of them.
+pub fn auto_group<'a>(servers: &'a [Server], settings: &Settings) -> &'a [Server] {
+    let n = match settings.auto_select {
+        AutoSelect::Off => 1,
+        AutoSelect::Fallback | AutoSelect::LeastPing => MAX_GROUP,
+    };
+    &servers[..servers.len().min(n)]
+}
+
+/// The `proxy` outbound: one server, or a balancer over the group (SPEC §11.16).
+fn proxy_outbounds(servers: &[Server], settings: &Settings) -> Result<Vec<Value>> {
+    let group = auto_group(servers, settings);
+    match group {
+        [] => Err(ClientError::State("выберите сервер".into())),
+        [one] => Ok(vec![proxy_outbound(one, settings)?]),
+        _ => {
+            let mut out = Vec::with_capacity(group.len() + 1);
+            for (n, s) in group.iter().enumerate() {
+                let mut ob = proxy_outbound(s, settings)?;
+                ob["tag"] = json!(member_tag(n));
+                out.push(ob);
+            }
+            let strategy = match settings.auto_select {
+                AutoSelect::LeastPing => "leastPing",
+                _ => "fallback",
+            };
+            let members: Vec<String> = (0..group.len()).map(member_tag).collect();
+            out.push(json!({ "type": "balancer", "tag": "proxy", "outbounds": members, "strategy": strategy }));
+            Ok(out)
+        }
+    }
+}
+
 fn proxy_outbound(server: &Server, settings: &Settings) -> Result<Value> {
     let mut ob = outbound_json(server)?;
     let tls_like = server.transport.contains("tls") || server.transport.contains("reality");
@@ -285,9 +327,10 @@ pub fn tun_mtu(settings: &Settings, target: Target) -> u16 {
     settings.mtu.clamp(1280, max)
 }
 
-/// The engine config as JSON text, validated by the engine.
+/// The engine config as JSON text, validated by the engine. `servers`: the
+/// selected server first, then the rest of its auto-select group.
 pub fn build_config_json(
-    server: &Server,
+    servers: &[Server],
     settings: &Settings,
     geo: &Geo,
     target: Target,
@@ -364,14 +407,13 @@ pub fn build_config_json(
         l @ ("error" | "warn" | "info" | "debug" | "trace") => l,
         _ => "info",
     };
+    let mut outbounds = proxy_outbounds(servers, settings)?;
+    outbounds.push(json!({ "type": "direct", "tag": "direct" }));
+    outbounds.push(json!({ "type": "block", "tag": "block" }));
     let config = json!({
         "log": { "level": level },
         "inbounds": inbounds,
-        "outbounds": [
-            proxy_outbound(server, settings)?,
-            { "type": "direct", "tag": "direct" },
-            { "type": "block", "tag": "block" },
-        ],
+        "outbounds": outbounds,
         "route": route,
         "dns": { "upstream": upstream, "allow_private_answers": private_names(settings) },
     });
@@ -381,8 +423,8 @@ pub fn build_config_json(
 }
 
 /// The parsed engine config.
-pub fn build_config(server: &Server, settings: &Settings, geo: &Geo, target: Target) -> Result<Config> {
-    let text = build_config_json(server, settings, geo, target)?;
+pub fn build_config(servers: &[Server], settings: &Settings, geo: &Geo, target: Target) -> Result<Config> {
+    let text = build_config_json(servers, settings, geo, target)?;
     Config::from_json(&text).map_err(ClientError::from)
 }
 
@@ -398,13 +440,13 @@ mod tests {
     }
 
     fn cfg_json_has_ipv6(target: Target) -> bool {
-        let text = build_config_json(&server(), &Settings::default(), &Geo::default(), target).unwrap();
+        let text = build_config_json(&[server()], &Settings::default(), &Geo::default(), target).unwrap();
         text.contains("\"ipv6\"")
     }
 
     #[test]
     fn desktop_proxy_config() {
-        let cfg = build_config(&server(), &Settings::default(), &Geo::default(), Target::DesktopProxy).unwrap();
+        let cfg = build_config(&[server()], &Settings::default(), &Geo::default(), Target::DesktopProxy).unwrap();
         assert_eq!(cfg.inbounds.len(), 2);
         assert!(cfg.tun().is_none());
         assert!(!cfg_json_has_ipv6(Target::DesktopProxy));
@@ -427,11 +469,11 @@ mod tests {
         // VpnService gets `tun_mtu` too, so the stack matches the interface.
         let s = Settings { mtu: 1350, ..Settings::default() };
         assert_eq!(tun_mtu(&s, Target::Mobile), 1350);
-        let cfg = build_config(&server(), &s, &Geo::default(), Target::Mobile).unwrap();
+        let cfg = build_config(&[server()], &s, &Geo::default(), Target::Mobile).unwrap();
         assert_eq!(cfg.tun().unwrap().mtu, 1350);
         let big = Settings { mtu: 16_384, ..Settings::default() };
         assert_eq!(tun_mtu(&big, Target::Mobile), 9000);
-        let cfg = build_config(&server(), &big, &Geo::default(), Target::DesktopTun).unwrap();
+        let cfg = build_config(&[server()], &big, &Geo::default(), Target::DesktopTun).unwrap();
         let desktop = if cfg!(target_os = "linux") { 16_384 } else { 9000 };
         assert_eq!(cfg.tun().unwrap().mtu, desktop);
     }
@@ -444,28 +486,28 @@ mod tests {
             default_interface: Some("eth1".into()),
             ..Settings::default()
         };
-        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopTun).unwrap();
+        let cfg = build_config(&[server()], &s, &Geo::default(), Target::DesktopTun).unwrap();
         let tun = cfg.tun().unwrap();
         assert!(!tun.auto_route);
         assert_eq!(tun.name.as_deref(), Some("utun-vpn"));
         assert_eq!(cfg.route.default_interface.as_deref(), Some("eth1"));
-        let cfg = build_config(&server(), &s, &Geo::default(), Target::Mobile).unwrap();
+        let cfg = build_config(&[server()], &s, &Geo::default(), Target::Mobile).unwrap();
         assert_eq!(cfg.route.default_interface, None);
-        let cfg = build_config(&server(), &Settings::default(), &Geo::default(), Target::DesktopTun).unwrap();
+        let cfg = build_config(&[server()], &Settings::default(), &Geo::default(), Target::DesktopTun).unwrap();
         assert!(cfg.tun().unwrap().auto_route);
         assert_eq!(cfg.route.default_interface, None);
     }
 
     #[test]
     fn tun_and_mobile_configs() {
-        let cfg = build_config(&server(), &Settings::default(), &Geo::default(), Target::DesktopTun).unwrap();
+        let cfg = build_config(&[server()], &Settings::default(), &Geo::default(), Target::DesktopTun).unwrap();
         let tun = cfg.tun().unwrap();
         assert_eq!(tun.name.as_deref(), Some(TUN_NAME));
         assert_eq!(tun.dns_addr().to_string(), TUN_DNS);
         let v6 = format!("{TUN_ADDRESS6}/{TUN_PREFIX6}");
         assert_eq!(tun.ipv6.map(|n| n.to_string()), Some(v6.clone()));
         assert_eq!(cfg.inbounds.len(), 3);
-        let cfg = build_config(&server(), &Settings::default(), &Geo::default(), Target::Mobile).unwrap();
+        let cfg = build_config(&[server()], &Settings::default(), &Geo::default(), Target::Mobile).unwrap();
         assert_eq!(cfg.inbounds.len(), 1);
         assert!(!cfg.tun().unwrap().auto_route);
         assert_eq!(cfg.tun().unwrap().ipv6.map(|n| n.to_string()), Some(v6));
@@ -482,7 +524,7 @@ mod tests {
             block_list: vec!["full:ads.example".into()],
             ..Default::default()
         };
-        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopProxy).unwrap();
+        let cfg = build_config(&[server()], &s, &Geo::default(), Target::DesktopProxy).unwrap();
         let tags: Vec<&str> = cfg.route.rules.iter().map(|r| r.outbound.as_str()).collect();
         assert_eq!(tags, ["block", "direct", "proxy", "direct", "direct", "direct"]);
         assert_eq!(cfg.route.rules[0].domain, ["ads.example"]);
@@ -493,12 +535,38 @@ mod tests {
         assert!(cfg.route.rules[5].domain_suffix.contains(&"ru".to_string()));
         assert_eq!(cfg.final_outbound(), "proxy");
         s.private_names = vec!["*.plex.direct".into(), " ".into()];
-        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopProxy).unwrap();
+        let cfg = build_config(&[server()], &s, &Geo::default(), Target::DesktopProxy).unwrap();
         assert_eq!(cfg.dns.private_answer_suffixes(false).unwrap().len(), 1);
         s.routing = RoutingMode::OnlyListed;
-        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopTun).unwrap();
+        let cfg = build_config(&[server()], &s, &Geo::default(), Target::DesktopTun).unwrap();
         assert_eq!(cfg.final_outbound(), "direct");
         assert!(!cfg.route.rules.iter().any(|r| r.network.is_some()));
+    }
+
+    #[test]
+    fn auto_select_builds_a_balancer() {
+        let other = parse_server("vless://b831381d-6324-4d53-ad4f-8cda48b30811@b.com:443?security=tls#B").unwrap();
+        let servers = [server(), other];
+        // Off: only the selected server, even when more are given.
+        let cfg = build_config(&servers, &Settings::default(), &Geo::default(), Target::DesktopProxy).unwrap();
+        assert_eq!(cfg.outbounds.len(), 3);
+        assert_eq!(cfg.outbounds[0].tag(), "proxy");
+        let s = Settings {
+            auto_select: AutoSelect::LeastPing,
+            ..Default::default()
+        };
+        let cfg = build_config(&servers, &s, &Geo::default(), Target::DesktopProxy).unwrap();
+        let tags: Vec<&str> = cfg.outbounds.iter().map(|o| o.tag()).collect();
+        assert_eq!(tags, ["proxy-0", "proxy-1", "proxy", "direct", "block"]);
+        let unbihex_engine::config::OutboundConfig::Balancer(b) = &cfg.outbounds[2] else {
+            panic!("expected a balancer")
+        };
+        assert_eq!(b.outbounds, ["proxy-0", "proxy-1"]);
+        assert_eq!(b.strategy, unbihex_engine::config::BalancerStrategy::LeastPing);
+        assert_eq!(cfg.final_outbound(), "proxy");
+        // A group of one is just that server.
+        let cfg = build_config(&servers[..1], &s, &Geo::default(), Target::DesktopProxy).unwrap();
+        assert_eq!(cfg.outbounds[0].tag(), "proxy");
     }
 
     #[test]
@@ -514,7 +582,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopProxy).unwrap();
+        let cfg = build_config(&[server()], &s, &Geo::default(), Target::DesktopProxy).unwrap();
         assert!(matches!(&cfg.inbounds[0], InboundConfig::Mixed(h) if h.listen.ip().is_unspecified()));
         assert_eq!(cfg.dns.upstream.len(), 4);
         assert_eq!(cfg.dns.upstream[2].to_string(), "https://dns.google:443/dns-query");
@@ -529,7 +597,7 @@ mod tests {
         }
         assert_eq!(s.lan_password.len(), 32);
 
-        let cfg = build_config(&server(), &Settings::default(), &Geo::default(), Target::DesktopProxy).unwrap();
+        let cfg = build_config(&[server()], &Settings::default(), &Geo::default(), Target::DesktopProxy).unwrap();
         for i in &cfg.inbounds {
             let (InboundConfig::Mixed(p) | InboundConfig::Http(p)) = i else {
                 panic!("unexpected inbound {i:?}");
@@ -555,7 +623,7 @@ mod tests {
             ..Default::default()
         };
         let json: serde_json::Value =
-            serde_json::from_str(&build_config_json(&server(), &s, &geo, Target::DesktopProxy).unwrap()).unwrap();
+            serde_json::from_str(&build_config_json(&[server()], &s, &geo, Target::DesktopProxy).unwrap()).unwrap();
         let rules = json["route"]["rules"].as_array().unwrap();
         assert_eq!(rules[0]["geosite"][0], "ru-blocked");
         assert!(rules.iter().any(|r| r["geoip"][0] == "ru" && r["outbound"] == "direct"));
@@ -563,13 +631,13 @@ mod tests {
         s.routing = RoutingMode::BlockedOnly;
         s.block_list.clear();
         let json: serde_json::Value =
-            serde_json::from_str(&build_config_json(&server(), &s, &geo, Target::Mobile).unwrap()).unwrap();
+            serde_json::from_str(&build_config_json(&[server()], &s, &geo, Target::Mobile).unwrap()).unwrap();
         assert_eq!(json["route"]["final"], "direct");
         // Without databases the mode and geo entries are refused with a hint.
-        assert!(build_config_json(&server(), &s, &Geo::default(), Target::Mobile).is_err());
+        assert!(build_config_json(&[server()], &s, &Geo::default(), Target::Mobile).is_err());
         s.routing = RoutingMode::Global;
         s.proxy_list = vec!["geoip:cn".into()];
-        assert!(build_config_json(&server(), &s, &geo, Target::Mobile).is_err());
+        assert!(build_config_json(&[server()], &s, &geo, Target::Mobile).is_err());
     }
 
     #[test]
@@ -586,10 +654,10 @@ mod tests {
             direct_list: vec!["shop.example".into()],
             ..Default::default()
         };
-        let cfg = build_config(&server(), &s, &geo, Target::DesktopTun).unwrap();
+        let cfg = build_config(&[server()], &s, &geo, Target::DesktopTun).unwrap();
         assert!(cfg.route.rules.iter().all(|r| r.domain.is_empty()), "off by default");
         s.adblock = true;
-        let cfg = build_config(&server(), &s, &geo, Target::DesktopTun).unwrap();
+        let cfg = build_config(&[server()], &s, &geo, Target::DesktopTun).unwrap();
         let tags: Vec<&str> = cfg.route.rules.iter().map(|r| r.outbound.as_str()).collect();
         assert_eq!(tags, ["direct", "direct", "block", "block"]);
         assert_eq!(cfg.route.rules[2].domain, ["ads.example.com", "tracker.example.net"]);
@@ -598,7 +666,7 @@ mod tests {
         assert_eq!(router.pick_by_name("ads.example.com", "tun-in"), Some("block"));
         assert_eq!(router.pick_by_name("www.ads.example.com", "tun-in"), None);
         // Not downloaded yet: connecting still works, without the rule.
-        let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopTun).unwrap();
+        let cfg = build_config(&[server()], &s, &Geo::default(), Target::DesktopTun).unwrap();
         assert!(cfg.route.rules.iter().all(|r| r.domain.is_empty()));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -610,7 +678,7 @@ mod tests {
             ..Default::default()
         };
         let json: serde_json::Value = serde_json::from_str(
-            &build_config_json(&server(), &s, &Geo::default(), Target::DesktopProxy).unwrap(),
+            &build_config_json(&[server()], &s, &Geo::default(), Target::DesktopProxy).unwrap(),
         )
         .unwrap();
         assert_eq!(json["outbounds"][0]["fragment"]["length"], "100-200");
@@ -619,12 +687,12 @@ mod tests {
             fragment_length: "0-1".into(),
             ..Default::default()
         };
-        assert!(build_config_json(&server(), &bad, &Geo::default(), Target::DesktopProxy).is_err());
+        assert!(build_config_json(&[server()], &bad, &Geo::default(), Target::DesktopProxy).is_err());
     }
 
     #[test]
     fn unsupported_server_is_refused() {
         let s = parse_server("hysteria://pw@t.example:443#T").unwrap();
-        assert!(build_config(&s, &Settings::default(), &Geo::default(), Target::DesktopProxy).is_err());
+        assert!(build_config(std::slice::from_ref(&s), &Settings::default(), &Geo::default(), Target::DesktopProxy).is_err());
     }
 }

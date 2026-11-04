@@ -55,7 +55,7 @@ unbihex-engine/
 │  ├─ dns/           # fake IP (§8.1), TUN DNS server (§8.2), upstream client and resolvers (§8.3)
 │  ├─ inbound/       # socks, http, mixed, tun (§10); vless, reality, reality_shape, mux: `server` feature only (§16)
 │  └─ outbound/      # vless, trojan, vmess, ws, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
-│                    # hysteria2/, shadowsocks, socks, direct, block (§11)
+│                    # hysteria2/, shadowsocks, socks, direct, block, balancer (§11)
 └─ tests/            # integration.rs, xray_interop.rs, hysteria2_interop.rs (§15)
 ```
 
@@ -860,6 +860,29 @@ RFC 1928/1929: CONNECT, optional username and password. Domains are sent as ATYP
 
 `connect_tcp` and `connect_udp` return `Error::Blocked` at once; the incoming connection is closed (TCP RST when the
 stack allows it). Names a domain rule blocks are not resolved by the TUN DNS server (§8.2).
+
+### 11.16 Balancer
+
+`{"type": "balancer", "tag", "outbounds": [tags], "strategy"?, "probe_url"?, "probe_interval_secs"?, "probe_timeout_secs"?}`
+is a group of other outbounds (issue #46); every **new** connection goes through one of them, open ones stay where
+they are.
+
+- `outbounds`: member tags in order, a non-empty list without repeats; a member is not a balancer. An unknown tag is a
+  config error. A member that cannot be built (its server name does not resolve) is left out with a warning when it
+  belongs to a balancer; with no member left it is an error.
+- `strategy`: `fallback` (default), the first live member in order; `leastPing` (or `least_ping`), the live member
+  with the lowest delay of the last check; the current one stays unless another is faster by more than 50 ms. Members
+  not checked yet count as live and come after the measured ones; those known to be down come last (when none works,
+  all are tried).
+- Checks: a `GET` of `probe_url` (default `https://www.gstatic.com/generate_204`, `http://` or `https://`; TLS with
+  rustls's own ClientHello, ALPN `http/1.1`) through every member in parallel: at once when built, then every
+  `probe_interval_secs` (60), and no sooner than 5 s after a failed connection. Live means a 2xx/3xx answer within
+  `probe_timeout_secs` (5); the delay is the time to the status line.
+- A connection (TCP and UDP) tries the members in this order; an error or 4 s without an answer (the last one gets the
+  whole `handshake_timeout`) marks the member down, brings the next check forward and moves on to the next member.
+  `Unsupported` for UDP (SOCKS5) is not a failure.
+- `Instance::balancers()` gives every balancer's current member (the one the last connection went through) and the
+  members' state (`alive`, `delay_ms`). The checks stop when a hot reload replaces the balancer.
 
 ---
 

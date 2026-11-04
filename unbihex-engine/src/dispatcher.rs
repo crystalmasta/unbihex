@@ -244,6 +244,11 @@ impl Dispatcher {
         }
     }
 
+    /// The outbounds new sessions may use.
+    pub fn outbounds(&self) -> Vec<Arc<dyn Outbound>> {
+        self.table.load().outbounds.values().cloned().collect()
+    }
+
     /// Replaces rules and outbounds for new sessions (hot reload).
     pub fn swap_table(&self, table: Table) {
         self.table.store(Arc::new(table));

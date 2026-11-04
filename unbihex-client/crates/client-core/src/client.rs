@@ -441,13 +441,32 @@ impl Client {
         results
     }
 
-    /// Desktop: connects to the selected server.
+    /// The selected server and, with auto-select on, the other servers of its
+    /// subscription the engine supports (manual servers: the other manual
+    /// ones), in list order, up to `plan::MAX_GROUP` in all.
+    pub fn connect_servers(&self) -> Result<Vec<Server>> {
+        let first = self.selected_server()?;
+        let mut out = vec![first.clone()];
+        let d = self.data.read();
+        if d.settings.auto_select != crate::model::AutoSelect::Off {
+            out.extend(
+                d.servers
+                    .iter()
+                    .filter(|s| s.id != first.id && s.subscription_id == first.subscription_id && s.is_supported())
+                    .take(crate::plan::MAX_GROUP - 1)
+                    .cloned(),
+            );
+        }
+        Ok(out)
+    }
+
+    /// Desktop: connects to the selected server (or its auto-select group).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub async fn connect(&self) -> Result<crate::controller::ConnectionInfo> {
-        let server = self.selected_server()?;
+        let servers = self.connect_servers()?;
         let settings = self.settings();
         self.controller
-            .connect_desktop(&server, &settings, &self.geo())
+            .connect_desktop(&servers, &settings, &self.geo())
             .await
     }
 
@@ -462,9 +481,9 @@ impl Client {
         if !self.controller.is_connected().await {
             return Ok(None);
         }
-        let server = self.selected_server()?;
+        let servers = self.connect_servers()?;
         let settings = self.settings();
-        self.controller.reload(&server, &settings, &self.geo()).await
+        self.controller.reload(&servers, &settings, &self.geo()).await
     }
 
     /// Downloads the rule databases.

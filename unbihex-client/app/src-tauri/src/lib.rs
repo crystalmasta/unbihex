@@ -81,11 +81,11 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
     if client.controller.is_connected().await {
         return Err(ClientError::State("уже подключено".into()));
     }
-    let server = client.selected_server()?;
+    let servers = client.connect_servers()?;
     let settings = client.settings();
     // Validate before asking the OS for anything.
     let geo = client.geo();
-    let config_json = build_config_json(&server, &settings, &geo, Target::Mobile)?;
+    let config_json = build_config_json(&servers, &settings, &geo, Target::Mobile)?;
     let args = StartArgs {
         // The same MTU as in the engine config, so the stack matches the interface.
         mtu: tun_mtu(&settings, Target::Mobile),
@@ -118,7 +118,7 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
         .ok_or_else(|| ClientError::State("VPN-сервис не вернул дескриптор TUN".into()))?;
     match client
         .controller
-        .connect_tun_fd_with_dns(&server, &settings, &geo, fd, None, &resp.bootstrap_dns)
+        .connect_tun_fd_with_dns(&servers, &settings, &geo, fd, None, &resp.bootstrap_dns)
         .await
     {
         Ok(info) => {

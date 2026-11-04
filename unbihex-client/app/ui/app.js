@@ -118,7 +118,8 @@ function renderHome() {
       proxy_only: info.http_port == null ? "прокси" : `прокси 127.0.0.1:${info.http_port}`,
       vpn: "VPN",
     }[info.mode] || info.mode;
-    $("#status-sub").textContent = `${modeName} · ${fmtDuration(Math.max(0, Math.floor(Date.now() / 1000 - info.since)))}`;
+    const auto = st.auto_server ? ` · автовыбор: ${st.auto_server}` : "";
+    $("#status-sub").textContent = `${modeName} · ${fmtDuration(Math.max(0, Math.floor(Date.now() / 1000 - info.since)))}${auto}`;
   } else {
     $("#status-text").textContent = "Не подключено";
     $("#status-sub").textContent = sel ? "Нажмите, чтобы подключиться" : "Добавьте подписку и выберите сервер";
@@ -403,6 +404,7 @@ function fillSettings() {
   f.dns_upstream.value = s.dns_upstream.join(", ");
   f.mtu.value = s.mtu;
   f.user_agent.value = s.user_agent;
+  f.auto_select.value = s.auto_select || "off";
   f.send_hwid.checked = s.send_hwid;
   f.device_name.value = s.device_name || "";
   f.device_name.placeholder = S.device_name || "";
@@ -491,6 +493,7 @@ function readSettings() {
     dns_upstream: f.dns_upstream.value.split(/[\s,;]+/).filter(Boolean),
     mtu: Math.min(9000, Math.max(1280, parseInt(f.mtu.value, 10) || 1500)),
     user_agent: f.user_agent.value.trim(),
+    auto_select: f.auto_select.value,
     send_hwid: f.send_hwid.checked,
     device_name: f.device_name.value.trim(),
     auto_start: f.auto_start.checked,

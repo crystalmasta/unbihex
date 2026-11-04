@@ -53,6 +53,10 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
 - The engine's DNS: plain (`1.1.1.1`), DNS over HTTPS (`https://1.1.1.1/dns-query`) and over TLS (`tls://1.1.1.1`)
   with the certificate checked; presets for Cloudflare, Google, Quad9, AdGuard. Queries to them follow the same
   routing rules (through the server with "Everything through VPN").
+- Auto-select (off by default): the selected server and the other servers of its subscription (up to 20) form a
+  group; new connections go through the first working one in order or through the one with the lowest delay. Servers
+  are checked with a request to `www.gstatic.com/generate_204` every minute and right after a failure; switching never
+  drops open connections, and the current server shows under the connect button.
 - Speed and traffic statistics, a log, a tray icon, auto-connect.
 - Start at Windows login: a plain one through the user's `Run` entry; one with administrator rights (TUN needs them)
   through a Task Scheduler task at this user's logon, with no password and no UAC prompt. Only Unbihex running as

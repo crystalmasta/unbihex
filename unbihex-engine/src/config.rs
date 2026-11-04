@@ -383,6 +383,8 @@ pub enum OutboundConfig {
     Shadowsocks(ShadowsocksConfig),
     /// Upstream SOCKS5 proxy.
     Socks(SocksOutboundConfig),
+    /// A group of other outbounds; each new connection goes to one of them.
+    Balancer(BalancerConfig),
     /// A share link (`vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, `tt://`).
     Link(LinkConfig),
     /// Connect directly.
@@ -403,6 +405,7 @@ impl OutboundConfig {
             OutboundConfig::Shadowsocks(c) => &c.tag,
             OutboundConfig::Socks(c) => &c.tag,
             OutboundConfig::Link(c) => &c.tag,
+            OutboundConfig::Balancer(c) => &c.tag,
             OutboundConfig::Direct(c) | OutboundConfig::Block(c) => &c.tag,
         }
     }
@@ -420,6 +423,55 @@ impl OutboundConfig {
             _ => None,
         }
     }
+}
+
+/// Balancer settings (SPEC §11.16).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BalancerConfig {
+    /// Outbound tag.
+    pub tag: String,
+    /// Tags of the members, in order of preference (`fallback`). Not balancers.
+    pub outbounds: Vec<String>,
+    /// How a member is picked for a new connection.
+    #[serde(default)]
+    pub strategy: BalancerStrategy,
+    /// Requested through every member to check it; any 2xx or 3xx is fine.
+    #[serde(default = "default_probe_url")]
+    pub probe_url: String,
+    /// How often every member is checked, in seconds.
+    #[serde(default = "default_probe_interval")]
+    pub probe_interval_secs: u64,
+    /// Time limit of one check, in seconds.
+    #[serde(default = "default_probe_timeout")]
+    pub probe_timeout_secs: u64,
+}
+
+/// How a balancer picks a member.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+pub enum BalancerStrategy {
+    /// The first live member in the configured order.
+    #[default]
+    #[serde(rename = "fallback")]
+    Fallback,
+    /// The live member with the lowest delay of the last check.
+    #[serde(rename = "leastPing", alias = "least_ping")]
+    LeastPing,
+}
+
+/// The default `probe_url`: an empty answer, as Xray's observatory uses.
+pub const DEFAULT_PROBE_URL: &str = "https://www.gstatic.com/generate_204";
+
+fn default_probe_url() -> String {
+    DEFAULT_PROBE_URL.into()
+}
+
+fn default_probe_interval() -> u64 {
+    60
+}
+
+fn default_probe_timeout() -> u64 {
+    5
 }
 
 /// VMess outbound settings (SPEC §11.9): the AEAD header only (alterId 0).
@@ -1594,6 +1646,43 @@ impl Config {
                 p.to_range()?;
             }
         }
+        for o in &self.outbounds {
+            let OutboundConfig::Balancer(b) = o else { continue };
+            if b.outbounds.is_empty() {
+                return Err(Error::config(format!("balancer {}: no outbounds", b.tag)));
+            }
+            for (i, m) in b.outbounds.iter().enumerate() {
+                match self.outbounds.iter().find(|o| o.tag() == m) {
+                    None => {
+                        return Err(Error::config(format!(
+                            "balancer {}: unknown outbound {m:?}",
+                            b.tag
+                        )));
+                    }
+                    Some(OutboundConfig::Balancer(_)) => {
+                        return Err(Error::config(format!(
+                            "balancer {}: {m:?} is a balancer itself",
+                            b.tag
+                        )));
+                    }
+                    Some(_) if b.outbounds[..i].contains(m) => {
+                        return Err(Error::config(format!(
+                            "balancer {}: {m:?} is listed twice",
+                            b.tag
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
+            let url = url::Url::parse(&b.probe_url)
+                .map_err(|e| Error::config(format!("balancer {}: probe_url: {e}", b.tag)))?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err(Error::config(format!(
+                    "balancer {}: probe_url must be an http:// or https:// URL",
+                    b.tag
+                )));
+            }
+        }
         if let Some(f) = &self.route.final_outbound
             && !out_tags.contains(f.as_str())
         {
@@ -1634,6 +1723,36 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn balancers() {
+        let cfg = |b: &str| {
+            Config::from_json(&format!(
+                r#"{{"outbounds":[{{"type":"direct","tag":"a"}},{{"type":"direct","tag":"b"}},{b}],
+                    "route":{{"final":"auto"}}}}"#
+            ))
+        };
+        let c = cfg(r#"{"type":"balancer","tag":"auto","outbounds":["b","a"],"strategy":"leastPing"}"#).unwrap();
+        let OutboundConfig::Balancer(b) = &c.outbounds[2] else {
+            panic!("expected a balancer")
+        };
+        assert_eq!(b.strategy, BalancerStrategy::LeastPing);
+        assert_eq!(b.probe_url, DEFAULT_PROBE_URL);
+        assert_eq!((b.probe_interval_secs, b.probe_timeout_secs), (60, 5));
+        let c = cfg(r#"{"type":"balancer","tag":"auto","outbounds":["a"]}"#).unwrap();
+        assert!(matches!(&c.outbounds[2], OutboundConfig::Balancer(b) if b.strategy == BalancerStrategy::Fallback));
+        for (bad, why) in [
+            (r#"{"type":"balancer","tag":"auto","outbounds":[]}"#, "no outbounds"),
+            (r#"{"type":"balancer","tag":"auto","outbounds":["x"]}"#, "unknown"),
+            (r#"{"type":"balancer","tag":"auto","outbounds":["a","a"]}"#, "twice"),
+            (r#"{"type":"balancer","tag":"auto","outbounds":["auto"]}"#, "balancer itself"),
+            (r#"{"type":"balancer","tag":"auto","outbounds":["a"],"probe_url":"ftp://x/"}"#, "probe_url"),
+            (r#"{"type":"balancer","tag":"auto","outbounds":["a"],"strategy":"random"}"#, "unknown variant"),
+        ] {
+            let e = cfg(bad).unwrap_err().to_string();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+    }
 
     #[test]
     fn dns_upstream_forms() {

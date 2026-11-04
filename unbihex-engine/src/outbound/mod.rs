@@ -1,5 +1,6 @@
 //! Outbounds: how a routed session leaves the device (SPEC §3, §11).
 
+pub mod balancer;
 /// Refuse everything.
 pub mod block;
 pub mod direct;
@@ -67,6 +68,10 @@ pub trait Outbound: Send + Sync {
     fn is_block(&self) -> bool {
         false
     }
+    /// A balancer's view of its members (SPEC §11.16); `None` for the rest.
+    fn balancer(&self) -> Option<balancer::BalancerState> {
+        None
+    }
     /// Opens a TCP stream to one of `ips`, already resolved and checked by the
     /// dispatcher. Only the direct outbound dials them itself.
     async fn connect_tcp_resolved(&self, sess: &Session, ips: &[IpAddr]) -> Result<BoxStream> {
@@ -110,6 +115,45 @@ pub struct ServerEndpoint {
 
 const PER_ADDR_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Builds every outbound of `configs`, in order: balancers after the outbounds
+/// they group. Errors name the outbound.
+pub async fn build_outbounds(
+    configs: &[OutboundConfig],
+    ctx: &OutboundContext,
+) -> Result<Vec<Arc<dyn Outbound>>> {
+    let in_balancer = |tag: &str| {
+        configs
+            .iter()
+            .any(|c| matches!(c, OutboundConfig::Balancer(b) if b.outbounds.iter().any(|m| m == tag)))
+    };
+    let mut built: Vec<Option<Arc<dyn Outbound>>> = Vec::with_capacity(configs.len());
+    for oc in configs {
+        built.push(match oc {
+            OutboundConfig::Balancer(_) => None,
+            _ => match build_outbound(oc, ctx).await {
+                Ok(o) => Some(o),
+                // One server of a group that cannot be built (its name does not
+                // resolve) must not take the others down: the balancer goes without it.
+                Err(e) if in_balancer(oc.tag()) => {
+                    tracing::warn!("outbound {} left out of its balancer: {e}", oc.tag());
+                    None
+                }
+                Err(e) => return Err(Error::config(format!("outbound {}: {e}", oc.tag()))),
+            },
+        });
+    }
+    for (i, oc) in configs.iter().enumerate() {
+        let OutboundConfig::Balancer(c) = oc else { continue };
+        let members: Vec<Arc<dyn Outbound>> = c
+            .outbounds
+            .iter()
+            .filter_map(|tag| built.iter().flatten().find(|o| o.tag() == tag).cloned())
+            .collect();
+        built[i] = Some(Arc::new(balancer::BalancerOutbound::new(c, members)?));
+    }
+    Ok(built.into_iter().flatten().collect())
+}
+
 impl ServerEndpoint {
     /// Resolves the server once.
     pub async fn resolve(host: &str, port: u16, resolver: &Resolver) -> Result<ServerEndpoint> {
@@ -150,6 +194,7 @@ pub async fn connect_any(
 }
 
 /// Builds an outbound from its config, resolving server names on the way.
+/// A balancer needs its members: see [`build_outbounds`].
 pub async fn build_outbound(
     cfg: &OutboundConfig,
     ctx: &OutboundContext,
@@ -190,6 +235,12 @@ pub async fn build_outbound(
         OutboundConfig::Socks(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
             Arc::new(socks::SocksOutbound::new(c, server, ctx.sockets.clone()))
+        }
+        OutboundConfig::Balancer(c) => {
+            return Err(Error::config(format!(
+                "balancer {}: built with its members by build_outbounds",
+                c.tag
+            )));
         }
         OutboundConfig::Link(c) => {
             let mut parsed = crate::link::parse_link(c.url.expose(), &c.tag)?;
