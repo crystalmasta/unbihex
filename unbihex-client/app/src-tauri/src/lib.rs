@@ -82,6 +82,8 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
         return Err(ClientError::State("уже подключено".into()));
     }
     let servers = client.connect_servers()?;
+    // The selected server; with auto-select the rest follow it in `servers`.
+    let server = &servers[0];
     let settings = client.settings();
     // Validate before asking the OS for anything.
     let geo = client.geo();
