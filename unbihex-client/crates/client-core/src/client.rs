@@ -12,7 +12,7 @@ use crate::geo::Geo;
 use crate::links::{b64_decode, is_share_link, parse_server};
 use crate::model::{AppData, Server, Settings, Subscription, now_secs};
 use crate::ping::{describe_error, measure};
-use crate::subscription::{FetchOptions, fallback_name, fetch};
+use crate::subscription::{Device, FetchOptions, fallback_name, fetch};
 
 const STATE_FILE: &str = "state.json";
 /// Shortest LAN proxy password a user may set (generated ones are 32 characters).
@@ -212,8 +212,11 @@ impl Client {
                 .clone()
                 .filter(|u| !u.trim().is_empty())
                 .unwrap_or_else(|| d.settings.user_agent.clone());
-            let hwid = d.settings.send_hwid.then(|| d.settings.hwid.clone());
-            (sub.url.clone(), FetchOptions { user_agent: ua, hwid })
+            let device = d.settings.send_hwid.then(|| Device {
+                hwid: d.settings.hwid.clone(),
+                name: d.settings.device_name.clone(),
+            });
+            (sub.url.clone(), FetchOptions { user_agent: ua, device })
         };
         match fetch(&url, &opts).await {
             Ok(f) => {

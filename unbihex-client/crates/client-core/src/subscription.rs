@@ -36,8 +36,131 @@ pub struct Fetched {
 pub struct FetchOptions {
     /// User-Agent header.
     pub user_agent: String,
-    /// `x-hwid` value, when device headers are enabled.
-    pub hwid: Option<String>,
+    /// Device headers, when the user lets them be sent.
+    pub device: Option<Device>,
+}
+
+/// What the provider's panel is told about this device (issue #47). Panels
+/// such as Remnawave list devices by these headers and count them against the
+/// device limit: `x-hwid`, `x-device-os`, `x-ver-os`, `x-device-model`. Only
+/// subscription requests carry them, never DNS or proxied traffic.
+#[derive(Clone, Debug)]
+pub struct Device {
+    /// `x-hwid`: random, made once per installation; nothing read from the hardware.
+    pub hwid: String,
+    /// `x-device-model`: the name the panel shows.
+    pub name: String,
+}
+
+/// Longest device name sent, in characters.
+const MAX_DEVICE_NAME: usize = 64;
+
+/// The name a panel shows when the user set none: the computer's name, the
+/// phone's maker and model on Android; the system's name when unknown.
+pub fn default_device_name() -> String {
+    os_device_name()
+        .map(|n| clean_header_text(&n))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| device_os().to_string())
+}
+
+/// No control characters (they would end the header), trimmed, at most
+/// [`MAX_DEVICE_NAME`] characters. Non-ASCII is sent as UTF-8.
+fn clean_header_text(s: &str) -> String {
+    let s: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    s.trim().chars().take(MAX_DEVICE_NAME).collect::<String>().trim_end().to_string()
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn os_device_name() -> Option<String> {
+    use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
+    // The DNS host name keeps the case the user typed, unlike the NetBIOS name.
+    let mut buf = vec![0u16; 256];
+    let mut len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+    // SAFETY: the buffer is writable for `len` UTF-16 units during the call.
+    let ok = unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) } != 0;
+    if ok {
+        buf.truncate(len as usize);
+        Some(String::from_utf16_lossy(&buf))
+    } else {
+        std::env::var("COMPUTERNAME").ok()
+    }
+}
+
+#[cfg(target_os = "android")]
+fn os_device_name() -> Option<String> {
+    let model = android_property("ro.product.model")?;
+    // "samsung" + "SM-S918B" → "Samsung SM-S918B"; Pixels say "Google Pixel 8" already.
+    match android_property("ro.product.manufacturer") {
+        Some(maker) if !model.to_lowercase().starts_with(&maker.to_lowercase()) => {
+            let mut c = maker.chars();
+            let maker: String = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+            Some(format!("{maker} {model}"))
+        }
+        _ => Some(model),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn os_device_name() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/hostname").ok()
+}
+
+#[cfg(not(any(windows, target_os = "android", target_os = "linux")))]
+fn os_device_name() -> Option<String> {
+    None
+}
+
+/// Version of the system for `x-ver-os`: "11 24H2", "14" (Android), "24.04".
+pub fn os_version() -> Option<String> {
+    os_version_raw().map(|v| clean_header_text(&v)).filter(|v| !v.is_empty())
+}
+
+#[cfg(windows)]
+fn os_version_raw() -> Option<String> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", KEY_READ)
+        .ok()?;
+    let major: u32 = key.get_value("CurrentMajorVersionNumber").ok()?;
+    let build: u32 = key.get_value::<String, _>("CurrentBuildNumber").ok()?.parse().ok()?;
+    // Windows 11 still calls itself 10.0; its builds start at 22000.
+    let major = if major == 10 && build >= 22000 { 11 } else { major };
+    Some(match key.get_value::<String, _>("DisplayVersion") {
+        Ok(v) if !v.is_empty() => format!("{major} {v}"),
+        _ => major.to_string(),
+    })
+}
+
+#[cfg(target_os = "android")]
+fn os_version_raw() -> Option<String> {
+    android_property("ro.build.version.release")
+}
+
+#[cfg(target_os = "linux")]
+fn os_version_raw() -> Option<String> {
+    let release = std::fs::read_to_string("/etc/os-release").ok()?;
+    release.lines().find_map(|l| l.strip_prefix("VERSION_ID=")).map(|v| v.trim_matches('"').to_string())
+}
+
+#[cfg(not(any(windows, target_os = "android", target_os = "linux")))]
+fn os_version_raw() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "android")]
+#[allow(unsafe_code)]
+fn android_property(name: &str) -> Option<String> {
+    let name = std::ffi::CString::new(name).ok()?;
+    // PROP_VALUE_MAX: values are at most 91 bytes plus the NUL.
+    let mut buf = [0u8; 92];
+    // SAFETY: `name` is NUL-terminated and the buffer holds PROP_VALUE_MAX bytes,
+    // the most the call writes.
+    let n = unsafe { libc::__system_property_get(name.as_ptr(), buf.as_mut_ptr().cast()) };
+    let n = usize::try_from(n).ok().filter(|&n| n > 0)?.min(buf.len());
+    Some(String::from_utf8_lossy(&buf[..n]).trim().to_string()).filter(|v| !v.is_empty())
 }
 
 /// Name of the OS for `x-device-os`.
@@ -158,12 +281,21 @@ pub async fn fetch(url: &str, opts: &FetchOptions) -> Result<Fetched> {
         .build()
         .map_err(|e| ClientError::Subscription(e.to_string()))?;
     let mut req = client.get(parsed).header("Accept", "*/*");
-    if let Some(hwid) = &opts.hwid {
+    if let Some(device) = &opts.device {
+        let name = Some(clean_header_text(&device.name)).filter(|n| !n.is_empty()).unwrap_or_else(default_device_name);
+        // Byte values, not str: a name may be in Cyrillic (sent as UTF-8).
+        let name = reqwest::header::HeaderValue::from_bytes(name.as_bytes())
+            .map_err(|e| ClientError::Subscription(format!("имя устройства: {e}")))?;
         req = req
-            .header("x-hwid", hwid)
+            .header("x-hwid", device.hwid.as_str())
             .header("x-device-os", device_os())
-            .header("x-device-model", "Unbihex")
+            .header("x-device-model", name)
             .header("x-app-version", env!("CARGO_PKG_VERSION"));
+        if let Some(v) = os_version()
+            && let Ok(v) = reqwest::header::HeaderValue::from_bytes(v.as_bytes())
+        {
+            req = req.header("x-ver-os", v);
+        }
     }
     let resp = req.send().await.map_err(|e| {
         let msg = if e.is_timeout() {
@@ -367,8 +499,10 @@ mod tests {
             let (mut s, _) = l.accept().await.unwrap();
             let mut buf = vec![0u8; 4096];
             let n = s.read(&mut buf).await.unwrap();
-            let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
             assert!(req.contains("x-hwid: abc"), "{req}");
+            assert!(req.contains("x-device-model: ноутбук  анны"), "{req}");
+            assert!(req.contains(&format!("x-device-os: {}", device_os().to_lowercase())), "{req}");
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nprofile-title: base64:0JzQvtC5IFZQTg==\r\nsubscription-userinfo: upload=1; download=2; total=3; expire=0\r\nprofile-update-interval: 6\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -380,7 +514,10 @@ mod tests {
             &format!("http://127.0.0.1:{port}/sub"),
             &FetchOptions {
                 user_agent: "test".into(),
-                hwid: Some("abc".into()),
+                device: Some(Device {
+                    hwid: "abc".into(),
+                    name: "Ноутбук\r\nАнны".into(),
+                }),
             },
         )
         .await
@@ -427,7 +564,19 @@ mod tests {
     fn opts() -> FetchOptions {
         FetchOptions {
             user_agent: "test".into(),
-            hwid: None,
+            device: None,
+        }
+    }
+
+    #[test]
+    fn device_names() {
+        assert_eq!(clean_header_text("  Ноутбук\r\nАнны\t"), "Ноутбук  Анны");
+        assert_eq!(clean_header_text(&"x".repeat(100)).len(), MAX_DEVICE_NAME);
+        // Whatever the system says, the default is a usable header value.
+        let name = default_device_name();
+        assert!(!name.is_empty() && !name.chars().any(char::is_control), "{name:?}");
+        if let Some(v) = os_version() {
+            assert!(!v.chars().any(char::is_control), "{v:?}");
         }
     }
 

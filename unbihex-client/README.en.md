@@ -17,7 +17,10 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
 - Subscriptions by `https://…` link: base64 and plain link lists, panel headers
   (`profile-title`, `subscription-userinfo` with traffic and expiry, `profile-update-interval`,
   `support-url`, `profile-web-page-url`), automatic updates, a User-Agent per subscription,
-  and the `x-hwid` header for panels with a device limit.
+  and device data for panels with a device limit (Remnawave and others): `x-hwid` (a random id of the installation,
+  nothing from the hardware), `x-device-os`, `x-ver-os`, `x-device-model` — the computer's name or the phone's model,
+  which can be changed in the settings. A switch in the settings turns them off; they never go into DNS or proxied
+  traffic.
   Subscriptions and rule databases are downloaded over `https://` only; `http://` is allowed just for addresses
   of this computer and the local network (`127.0.0.1`, `localhost`, `192.168.x.x` and so on), and redirects to
   `http://` on the internet are refused. A subscription response is at most 8 MB, a database file at most 256 MB

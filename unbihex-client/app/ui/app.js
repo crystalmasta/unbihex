@@ -404,6 +404,8 @@ function fillSettings() {
   f.mtu.value = s.mtu;
   f.user_agent.value = s.user_agent;
   f.send_hwid.checked = s.send_hwid;
+  f.device_name.value = s.device_name || "";
+  f.device_name.placeholder = S.device_name || "";
   f.auto_start.checked = s.auto_start;
   f.auto_start_admin.checked = s.auto_start_admin;
   f.auto_start_admin.disabled = !s.auto_start;
@@ -490,6 +492,7 @@ function readSettings() {
     mtu: Math.min(9000, Math.max(1280, parseInt(f.mtu.value, 10) || 1500)),
     user_agent: f.user_agent.value.trim(),
     send_hwid: f.send_hwid.checked,
+    device_name: f.device_name.value.trim(),
     auto_start: f.auto_start.checked,
     auto_start_admin: f.auto_start_admin.checked,
     auto_connect: f.auto_connect.checked,

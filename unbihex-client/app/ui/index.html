@@ -174,7 +174,9 @@
           <fieldset>
             <legend>Подписки</legend>
             <label>User-Agent<input name="user_agent" /></label>
-            <label class="check"><input name="send_hwid" type="checkbox" /> Отправлять идентификатор устройства (x-hwid) — нужен панелям с лимитом устройств</label>
+            <label class="check"><input name="send_hwid" type="checkbox" /> Передавать данные устройства провайдеру — имя, система и случайный идентификатор (x-hwid); по ним панели с лимитом устройств различают устройства</label>
+            <label>Имя устройства у провайдера<input name="device_name" maxlength="64" /></label>
+            <p class="hint">Пусто — имя компьютера или модель телефона. Уходит только с запросом подписки.</p>
           </fieldset>
           <fieldset>
             <legend>Прочее</legend>

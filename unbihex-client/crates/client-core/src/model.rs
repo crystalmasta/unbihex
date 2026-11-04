@@ -210,10 +210,14 @@ pub struct Settings {
     pub default_mark: Option<u32>,
     /// User-Agent for subscription requests.
     pub user_agent: String,
-    /// Send `x-hwid` and device headers (needed by panels with device limits).
+    /// Send `x-hwid` and the other device headers with subscription requests
+    /// (panels with device limits need them; see `subscription::Device`).
     pub send_hwid: bool,
-    /// Random device id sent as `x-hwid`.
+    /// Random device id sent as `x-hwid`, made once per installation.
     pub hwid: String,
+    /// Device name sent as `x-device-model`; empty: the computer's name or the
+    /// phone's model (`subscription::default_device_name`).
+    pub device_name: String,
     /// Connect to the last server when the app starts.
     pub auto_connect: bool,
     /// Windows: start the app at login. The registry is what counts (the user
@@ -277,6 +281,7 @@ impl Default for Settings {
             user_agent: DEFAULT_USER_AGENT.into(),
             send_hwid: true,
             hwid: Uuid::new_v4().simple().to_string(),
+            device_name: String::new(),
             auto_connect: false,
             auto_start: false,
             auto_start_admin: false,

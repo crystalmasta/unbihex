@@ -38,6 +38,8 @@ struct StateView {
     engine_version: &'static str,
     data_dir: String,
     notice: Option<String>,
+    /// What panels see as the device name unless the user sets one.
+    device_name: String,
 }
 
 fn platform_name() -> &'static str {
@@ -320,6 +322,7 @@ async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
         engine_version: unbihex_client_core::ENGINE_VERSION,
         data_dir: state.client.dir().display().to_string(),
         notice: state.notice.lock().take(),
+        device_name: unbihex_client_core::subscription::default_device_name(),
     })
 }
 
