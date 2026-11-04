@@ -405,6 +405,8 @@ function fillSettings() {
   f.user_agent.value = s.user_agent;
   f.send_hwid.checked = s.send_hwid;
   f.auto_start.checked = s.auto_start;
+  f.auto_start_admin.checked = s.auto_start_admin;
+  f.auto_start_admin.disabled = !s.auto_start;
   $("#desktop-autostart").hidden = S.platform !== "windows";
   f.auto_connect.checked = s.auto_connect;
   f.android_notification.checked = s.android_notification;
@@ -489,6 +491,7 @@ function readSettings() {
     user_agent: f.user_agent.value.trim(),
     send_hwid: f.send_hwid.checked,
     auto_start: f.auto_start.checked,
+    auto_start_admin: f.auto_start_admin.checked,
     auto_connect: f.auto_connect.checked,
     android_notification: f.android_notification.checked,
     log_level: f.log_level.value,
@@ -704,6 +707,9 @@ function bind() {
     }
   });
 
+  $("#settings-form").auto_start.addEventListener("change", (e) => {
+    $("#settings-form").auto_start_admin.disabled = !e.target.checked;
+  });
   $("#settings-form").allow_lan.addEventListener("change", (e) => {
     $("#lan-auth").hidden = !e.target.checked;
   });
@@ -782,6 +788,14 @@ function bind() {
     }
   });
   listen("toast", (e) => toast(String(e.payload), "error"));
+  // Autostart with administrator rights switched on or off by an unelevated copy.
+  listen("autostart-admin", () => {
+    if (confirm("Включить или выключить автозапуск с правами администратора может только Unbihex, запущенный от администратора. Перезапустить его сейчас? Подключение прервётся.")) {
+      call("relaunch_admin", { autostart: true }).catch(() => {});
+    } else {
+      toast("Автозапуск не изменён");
+    }
+  });
 }
 
 async function tick() {

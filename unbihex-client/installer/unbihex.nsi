@@ -215,6 +215,14 @@ Section "Uninstall"
     ${EndIf}
   ${Loop}
 
+  ; Автозапуск с правами администратора — задания Планировщика «Unbihex autostart (…)» в
+  ; корневой папке, по одному на пользователя (issue #39). Удаляются те, что запускают
+  ; программу из $INSTDIR. Путь передаётся через переменную окружения, а не в тексте
+  ; команды, — так кавычки и апострофы в нём ничего не ломают.
+  System::Call 'kernel32::SetEnvironmentVariable(t "UNBIHEX_DIR", t "$INSTDIR")'
+  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$d = $$env:UNBIHEX_DIR.TrimEnd('\') + '\'; $$s = New-Object -ComObject Schedule.Service; $$s.Connect(); $$f = $$s.GetFolder('\'); foreach ($$t in $$f.GetTasks(1)) { if ($$t.Name -like 'Unbihex autostart*') { foreach ($$a in $$t.Definition.Actions) { if ($$a.Type -eq 0 -and $$a.Path.StartsWith($$d, [StringComparison]::OrdinalIgnoreCase)) { $$f.DeleteTask($$t.Name, 0); break } } } }"`
+  Pop $R9
+
   ; Подписки и настройки пользователя удаляются только по согласию.
   SetShellVarContext current
   IfFileExists "$APPDATA\${DATADIR}\*.*" 0 done

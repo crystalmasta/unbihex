@@ -11,7 +11,8 @@ use winreg::enums::{
 };
 
 use super::{
-    Cmd, DefaultRoute, HALF_ROUTES, HALF_ROUTES6, JournalFile, PROXY_BYPASS, ProxyBackup, Undo,
+    Autostart, Cmd, DefaultRoute, HALF_ROUTES, HALF_ROUTES6, JournalFile, PROXY_BYPASS, ProxyBackup,
+    Undo,
 };
 use crate::error::{ClientError, Result};
 
@@ -37,12 +38,16 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-#[allow(unsafe_code)]
 pub(super) fn relaunch_elevated() -> Result<()> {
+    relaunch_elevated_args("--elevated")
+}
+
+#[allow(unsafe_code)]
+pub(super) fn relaunch_elevated_args(args: &str) -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe = wide(&exe.to_string_lossy());
     let verb = wide("runas");
-    let args = wide("--elevated");
+    let args = wide(args);
     // SAFETY: every pointer is a NUL-terminated UTF-16 buffer that outlives the call;
     // null HWND and directory are allowed by ShellExecuteW.
     let r = unsafe {
@@ -425,8 +430,183 @@ const RUN_APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\
 /// Our value name under both keys.
 const RUN_VALUE: &str = "Unbihex";
 
+/// Prefix of our Task Scheduler tasks (in the root folder: a folder of our own
+/// would stay behind empty), one per user: see [`task_name`].
+const TASK_PREFIX: &str = "Unbihex autostart";
+
+/// Asked of an unelevated program to create or delete the task.
+const AUTOSTART_NEEDS_ADMIN: &str =
+    "автозапуск с правами администратора включает и выключает только Unbihex, запущенный от администратора";
+
+pub(super) fn set_autostart(want: Autostart) -> Result<()> {
+    let had_task = task_present();
+    if (want == Autostart::Admin || had_task) && !is_elevated() {
+        return Err(ClientError::platform(AUTOSTART_NEEDS_ADMIN));
+    }
+    // The new way first, then the old one goes: a failure never leaves both
+    // off when one was on.
+    match want {
+        Autostart::Admin => {
+            create_task()?;
+            set_run_entry(false)
+        }
+        Autostart::User | Autostart::Off => {
+            set_run_entry(want == Autostart::User)?;
+            if had_task {
+                delete_task()?;
+            }
+            Ok(())
+        }
+    }
+}
+
+pub(super) fn autostart() -> Autostart {
+    if task_present() {
+        Autostart::Admin
+    } else if run_entry_on() {
+        Autostart::User
+    } else {
+        Autostart::Off
+    }
+}
+
+/// The current user as the Task Scheduler takes it, `DOMAIN\name`.
+fn task_user() -> Result<String> {
+    let name = std::env::var("USERNAME")
+        .ok()
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| ClientError::platform("автозапуск: неизвестно имя пользователя"))?;
+    Ok(match std::env::var("USERDOMAIN") {
+        Ok(d) if !d.is_empty() => format!(r"{d}\{name}"),
+        _ => name,
+    })
+}
+
+/// `Unbihex autostart (DOMAIN_name)`: characters a task name may not have become `_`.
+fn task_name(user: &str) -> String {
+    let user: String = user
+        .chars()
+        .map(|c| if c.is_control() || r#"\/:*?"<>|"#.contains(c) { '_' } else { c })
+        .collect();
+    format!("{TASK_PREFIX} ({user})")
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// The task: at `user`'s logon, `"<exe>" --autostart` with the highest rights
+/// in the user's session (no stored password), on battery too, without a time
+/// limit, at normal priority (tasks get below normal by default).
+fn task_xml(user: &str, exe: &str) -> String {
+    let user = xml_escape(user);
+    let exe = xml_escape(exe);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Unbihex: запуск при входе с правами администратора (режим TUN).</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>5</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe}</Command>
+      <Arguments>--autostart</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#
+    )
+}
+
+/// Whether our task exists, as of the last check or change: `schtasks` takes
+/// a moment, and the UI asks often.
+static TASK_PRESENT: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+fn task_cache() -> std::sync::MutexGuard<'static, Option<bool>> {
+    TASK_PRESENT.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn task_present() -> bool {
+    let mut cached = task_cache();
+    *cached.get_or_insert_with(|| {
+        // The task's principal may read it, so this works unelevated too.
+        task_user().is_ok_and(|u| Cmd::new("schtasks", ["/Query", "/TN", task_name(&u).as_str()]).run().is_ok())
+    })
+}
+
+fn create_task() -> Result<()> {
+    let user = task_user()?;
+    let exe = std::env::current_exe()?;
+    let xml = task_xml(&user, &exe.to_string_lossy());
+    // schtasks takes the definition from a file. It goes to the Windows temp
+    // folder, not %TEMP%: there the user's unelevated programs may create
+    // files but not replace one this elevated process made, and the task runs
+    // with administrator rights.
+    let schtasks = super::system_program("schtasks")?;
+    let windir = schtasks
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| ClientError::platform("не найдена папка Windows"))?;
+    let file = windir
+        .join("Temp")
+        .join(format!("unbihex-autostart-{}.xml", uuid::Uuid::new_v4().simple()));
+    let mut bytes = vec![0xFF, 0xFE];
+    for u in xml.encode_utf16() {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&file)?;
+        f.write_all(&bytes)?;
+    }
+    let file_arg = file.to_string_lossy().into_owned();
+    let r = Cmd::new("schtasks", ["/Create", "/TN", task_name(&user).as_str(), "/XML", file_arg.as_str(), "/F"]).run();
+    let _ = std::fs::remove_file(&file);
+    *task_cache() = r.is_ok().then_some(true);
+    r.map(drop)
+}
+
+fn delete_task() -> Result<()> {
+    let user = task_user()?;
+    let r = Cmd::new("schtasks", ["/Delete", "/TN", task_name(&user).as_str(), "/F"]).run();
+    *task_cache() = r.is_ok().then_some(false);
+    r.map(drop)
+}
+
 // By Finorion (github.com/Finorion), PR #43.
-pub(super) fn set_autostart(enable: bool) -> Result<()> {
+fn set_run_entry(enable: bool) -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let reg = |e: std::io::Error| ClientError::platform(format!("автозапуск (реестр Run): {e}"));
     if enable {
@@ -447,7 +627,7 @@ pub(super) fn set_autostart(enable: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn is_autostart_enabled() -> bool {
+fn run_entry_on() -> bool {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let present = hkcu
         .open_subkey_with_flags(RUN_KEY, KEY_READ)
@@ -459,4 +639,21 @@ pub(super) fn is_autostart_enabled() -> bool {
         .and_then(|k| k.get_raw_value(RUN_VALUE).ok())
         .is_some_and(|v| v.bytes.first().is_some_and(|b| b & 1 == 1));
     present && !switched_off
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_definition() {
+        assert_eq!(task_name(r"PC\Анна"), "Unbihex autostart (PC_Анна)");
+        assert_eq!(task_name("a:b*c?|"), "Unbihex autostart (a_b_c__)");
+        let xml = task_xml(r"PC\a&b", r"C:\R&D <x>\Unbihex.exe");
+        assert!(xml.contains(r"<UserId>PC\a&amp;b</UserId>"), "{xml}");
+        assert!(xml.contains(r"<Command>C:\R&amp;D &lt;x&gt;\Unbihex.exe</Command>"), "{xml}");
+        assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+    }
 }

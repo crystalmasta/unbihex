@@ -183,6 +183,14 @@ pub fn relaunch_elevated() -> Result<()> {
     os::relaunch_elevated()
 }
 
+/// Windows: [`relaunch_elevated`] that then applies the saved autostart choice
+/// (`--apply-autostart`): only an administrator may create or delete the task
+/// of [`Autostart::Admin`].
+#[cfg(windows)]
+pub fn relaunch_elevated_for_autostart() -> Result<()> {
+    os::relaunch_elevated_args("--elevated --apply-autostart")
+}
+
 /// Windows: lets Microsoft Store apps use the local proxy (`allow`), or undoes
 /// that. Returns how many apps changed.
 pub fn store_apps_loopback(dir: &Path, allow: bool) -> Result<usize> {
@@ -197,31 +205,63 @@ pub fn store_apps_loopback(dir: &Path, allow: bool) -> Result<usize> {
     }
 }
 
-/// Windows: starts the program at login (`HKCU\…\Run`, issue #39) or stops
-/// doing that. Other systems: not supported.
-// By Finorion (github.com/Finorion), PR #43.
-pub fn set_autostart(enable: bool) -> Result<()> {
-    #[cfg(windows)]
-    {
-        os::set_autostart(enable)
+/// How the program starts at login (Windows, issue #39).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Autostart {
+    /// It does not.
+    Off,
+    /// The user's `HKCU\…\Run` entry: without administrator rights.
+    User,
+    /// A Task Scheduler task at this user's logon with the highest rights, so
+    /// TUN mode can connect: no UAC prompt at login.
+    Admin,
+}
+
+impl Autostart {
+    /// From the two settings switches.
+    pub fn new(on: bool, admin: bool) -> Autostart {
+        match (on, admin) {
+            (false, _) => Autostart::Off,
+            (true, false) => Autostart::User,
+            (true, true) => Autostart::Admin,
+        }
     }
-    #[cfg(not(windows))]
-    {
-        let _ = enable;
-        Err(ClientError::platform("автозапуск есть только в Windows"))
+
+    /// Whether switching to `to` creates or deletes the task, which only an
+    /// administrator may.
+    pub fn switch_needs_admin(self, to: Autostart) -> bool {
+        self != to && (self == Autostart::Admin || to == Autostart::Admin)
     }
 }
 
-/// Whether the program starts at login: our `Run` entry exists and is not
-/// switched off in the Task Manager. Always false outside Windows.
-pub fn is_autostart_enabled() -> bool {
+/// Windows: makes the program start at login as `want` says and removes the
+/// other way, so switching leaves nothing behind. [`Autostart::Admin`], and
+/// leaving it, need administrator rights. Other systems: not supported.
+// By Finorion (github.com/Finorion), PR #43.
+pub fn set_autostart(want: Autostart) -> Result<()> {
     #[cfg(windows)]
     {
-        os::is_autostart_enabled()
+        os::set_autostart(want)
     }
     #[cfg(not(windows))]
     {
-        false
+        match want {
+            Autostart::Off => Ok(()),
+            _ => Err(ClientError::platform("автозапуск есть только в Windows")),
+        }
+    }
+}
+
+/// How the program starts at login: our task, else our `Run` entry unless it
+/// is switched off in the Task Manager. Always off outside Windows.
+pub fn autostart() -> Autostart {
+    #[cfg(windows)]
+    {
+        os::autostart()
+    }
+    #[cfg(not(windows))]
+    {
+        Autostart::Off
     }
 }
 
@@ -235,6 +275,7 @@ const SYSTEM_PROGRAMS: &[&str] = &[
     "gsettings",
     "networksetup",
     "id",
+    "schtasks",
 ];
 
 /// Absolute path of an allowed system tool. Never searched in `PATH` or next to
@@ -767,6 +808,21 @@ pub fn recover(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autostart_switches() {
+        use Autostart::*;
+        assert_eq!(Autostart::new(false, true), Off);
+        assert_eq!(Autostart::new(true, false), User);
+        assert_eq!(Autostart::new(true, true), Admin);
+        // The task is created or deleted only on the way to or from Admin.
+        assert!(Off.switch_needs_admin(Admin));
+        assert!(Admin.switch_needs_admin(Off));
+        assert!(Admin.switch_needs_admin(User));
+        assert!(!User.switch_needs_admin(Off));
+        assert!(!Off.switch_needs_admin(User));
+        assert!(!Admin.switch_needs_admin(Admin));
+    }
 
     fn samples() -> Vec<Undo> {
         vec![

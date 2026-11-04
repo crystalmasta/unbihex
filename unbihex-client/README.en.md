@@ -48,6 +48,9 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   The console client: `connect --adblock`.
   IPv6 also goes into the tunnel in TUN mode, and on Windows an NRPT rule sends all DNS queries to the tunnel's DNS only.
 - Speed and traffic statistics, a log, a tray icon, auto-connect.
+- Start at Windows login: a plain one through the user's `Run` entry; one with administrator rights (TUN needs them)
+  through a Task Scheduler task at this user's logon, with no password and no UAC prompt. Only Unbihex running as
+  administrator can switch that task on or off (the app offers a restart); the uninstaller removes it too.
 - Safe rollback: changes to routes, DNS and the system proxy are written to a journal first
   (`routes-journal.json`, `proxy-journal.json` in the data folder). If the program crashes,
   everything is restored on the next start.

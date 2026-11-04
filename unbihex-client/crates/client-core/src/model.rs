@@ -217,8 +217,12 @@ pub struct Settings {
     /// Connect to the last server when the app starts.
     pub auto_connect: bool,
     /// Windows: start the app at login. The registry is what counts (the user
-    /// may switch it off in the Task Manager): see `platform::is_autostart_enabled`.
+    /// may switch it off in the Task Manager): see `platform::autostart`.
     pub auto_start: bool,
+    /// Windows: start at login with administrator rights, as TUN mode needs
+    /// them: a Task Scheduler task instead of the `Run` entry. The system is
+    /// what counts here too; while autostart is off the UI offers it for TUN.
+    pub auto_start_admin: bool,
     /// Android: show a "VPN is on" notification. It keeps the VPN running in the
     /// foreground, so swiping the app away does not drop it.
     pub android_notification: bool,
@@ -275,6 +279,7 @@ impl Default for Settings {
             hwid: Uuid::new_v4().simple().to_string(),
             auto_connect: false,
             auto_start: false,
+            auto_start_admin: false,
             android_notification: true,
             log_level: "info".into(),
             geosite_url: crate::geo::DEFAULT_GEOSITE_URL.into(),

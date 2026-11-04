@@ -298,10 +298,17 @@ async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
     let is_admin = true;
     #[cfg_attr(mobile, allow(unused_mut))]
     let mut data = state.client.snapshot();
-    // The registry, not state.json: the user may switch it off in the Task Manager.
+    // The system, not state.json: the user may switch it off in the Task Manager.
     #[cfg(desktop)]
     {
-        data.settings.auto_start = unbihex_client_core::platform::is_autostart_enabled();
+        use unbihex_client_core::platform::{Autostart, autostart};
+        let now = autostart();
+        data.settings.auto_start = now != Autostart::Off;
+        // While off, rights are offered for TUN mode: it cannot connect without them.
+        data.settings.auto_start_admin = match now {
+            Autostart::Off => data.settings.mode == unbihex_client_core::ProxyMode::Tun,
+            now => now == Autostart::Admin,
+        };
     }
     Ok(StateView {
         data,
@@ -402,20 +409,29 @@ async fn save_settings(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Option<ConnectionInfo>, String> {
-    // Windows: the registry is written only when the switch changes, so saving
-    // other settings neither rewrites the entry nor undoes a switch-off made in
-    // the Task Manager.
+    // Windows: autostart is touched only when the switches change, so saving
+    // other settings neither rewrites it nor undoes a switch-off made in the
+    // Task Manager.
     #[cfg(windows)]
-    let autostart = (settings.auto_start != unbihex_client_core::platform::is_autostart_enabled())
-        .then_some(settings.auto_start);
+    let autostart = {
+        use unbihex_client_core::platform::{Autostart, autostart};
+        let (now, want) = (autostart(), Autostart::new(settings.auto_start, settings.auto_start_admin));
+        (now != want).then_some((now, want))
+    };
     logs::set_level(&state.level, &settings.log_level);
     state.client.set_settings(settings).map_err(err)?;
     #[cfg(windows)]
-    if let Some(on) = autostart
-        && let Err(e) = unbihex_client_core::platform::set_autostart(on)
-    {
-        tracing::warn!("autostart: {e}");
-        let _ = app.emit("toast", e.to_string());
+    if let Some((now, want)) = autostart {
+        use unbihex_client_core::platform;
+        if now.switch_needs_admin(want) && !platform::is_elevated() {
+            // The task is created and deleted only by an administrator. The
+            // choice is saved: the UI offers a restart as administrator, and
+            // that copy applies it (`--apply-autostart`).
+            let _ = app.emit("autostart-admin", ());
+        } else if let Err(e) = platform::set_autostart(want) {
+            tracing::warn!("autostart: {e}");
+            let _ = app.emit("toast", e.to_string());
+        }
     }
     notify(&app);
     // Ad blocking just turned on or other lists picked: download them meanwhile.
@@ -500,19 +516,49 @@ fn clear_logs(state: State<'_, AppState>) {
     state.logs.clear();
 }
 
+/// `autostart`: the new copy applies the saved autostart choice (Windows).
 #[tauri::command]
-async fn relaunch_admin(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+async fn relaunch_admin(app: AppHandle, state: State<'_, AppState>, autostart: Option<bool>) -> Result<(), String> {
     #[cfg(desktop)]
     {
         do_disconnect(&app, &state.client).await;
-        unbihex_client_core::platform::relaunch_elevated().map_err(err)?;
+        #[cfg(windows)]
+        let r = if autostart == Some(true) {
+            unbihex_client_core::platform::relaunch_elevated_for_autostart()
+        } else {
+            unbihex_client_core::platform::relaunch_elevated()
+        };
+        #[cfg(not(windows))]
+        let r = {
+            let _ = autostart;
+            unbihex_client_core::platform::relaunch_elevated()
+        };
+        r.map_err(err)?;
         app.exit(0);
         Ok(())
     }
     #[cfg(mobile)]
     {
-        let _ = (&app, &state);
+        let _ = (&app, &state, autostart);
         Err("не нужно на мобильных".into())
+    }
+}
+
+/// Restarted as administrator to switch autostart with rights on or off (see
+/// `save_settings`): applies the saved choice. Returns what to tell the user.
+#[cfg(windows)]
+fn apply_saved_autostart(client: &Client) -> Option<String> {
+    use unbihex_client_core::platform::{self, Autostart};
+    if !std::env::args().any(|a| a == "--apply-autostart") || !platform::is_elevated() {
+        return None;
+    }
+    let s = client.settings();
+    match platform::set_autostart(Autostart::new(s.auto_start, s.auto_start_admin)) {
+        Ok(()) => None,
+        Err(e) => {
+            tracing::warn!("autostart: {e}");
+            Some(format!("Автозапуск не изменён: {e}"))
+        }
     }
 }
 
@@ -788,19 +834,23 @@ pub fn run() {
                 unbihex_client_core::ENGINE_VERSION,
                 platform_name()
             );
+            #[cfg(windows)]
+            let notice = apply_saved_autostart(&client);
+            #[cfg(not(windows))]
+            let notice = None;
             app.manage(AppState {
                 client,
                 logs: log_buffer.clone(),
                 level: level.clone(),
                 op: tokio::sync::Mutex::new(()),
-                notice: parking_lot::Mutex::new(None),
+                notice: parking_lot::Mutex::new(notice),
             });
             #[cfg(desktop)]
             if let Err(e) = setup_tray(app) {
                 tracing::warn!("tray: {e}");
             }
             // Desktop windows are created here, not from the config: started at
-            // login (`--autostart`, the Windows `Run` entry) the app stays in the
+            // login (`--autostart`: the Windows `Run` entry or task) the app stays in the
             // tray without flashing a window or loading WebView2 for nothing.
             // Without a tray there would be no way in, so the window opens anyway.
             #[cfg(desktop)]
