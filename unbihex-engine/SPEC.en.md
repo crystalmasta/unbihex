@@ -399,7 +399,9 @@ impl Dispatcher {
   4. AAAA, HTTPS, SVCB (28/65/64) → NOERROR with no answers: no IPv6 and no ECH/IP hints that bypass the fake IPs.
      PTR of a fake address (`…in-addr.arpa` inside the pool) → the name it maps to, or NXDOMAIN; it never goes upstream.
      When every upstream is a public address (not LAN, loopback, link-local or 100.64/10), names only the local network
-     knows get NXDOMAIN at once: single labels (except `localhost`), `local` and `home.arpa` with subdomains, PTR in the
+     knows get NXDOMAIN at once: single labels (except `localhost` and questions about a zone, NS, SOA, DS, DNSKEY,
+     RRSIG, NSEC, NSEC3, NSEC3PARAM, CDS, CDNSKEY: that is how a TLD such as `com.` is asked about, and DNSSEC validation
+     needs the real answer), `local` and `home.arpa` with subdomains, PTR in the
      reverse zones of private, loopback, link-local and 100.64/10 addresses (RFC 6303), `fc00::/7`, `fe80::/10`, `::1`.
   5. Other types (MX, TXT, other PTR …) and single-label names are forwarded to the upstream as a UDP session through the
      Dispatcher (the inbound is the TUN tag): with a proxy as `final` the query goes through the proxy, not in the

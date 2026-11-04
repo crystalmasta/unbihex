@@ -138,6 +138,25 @@ SectionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "Ярлык для запуска с рабочего стола."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
+; Выгружает HKU\${APPNAME}Uninstall. Реестр может держать куст ещё мгновение после
+; чтения, поэтому до 10 попыток с паузой 300 мс. $R9 — код последней попытки (0 — выгружен).
+; Портит $R2.
+Function un.UnloadHive
+  StrCpy $R2 0
+  ${Do}
+    nsExec::Exec '"$SYSDIR\reg.exe" unload "HKU\${APPNAME}Uninstall"'
+    Pop $R9
+    ${If} $R9 == 0
+      ${ExitDo}
+    ${EndIf}
+    IntOp $R2 $R2 + 1
+    ${If} $R2 >= 10
+      ${ExitDo}
+    ${EndIf}
+    Sleep 300
+  ${Loop}
+FunctionEnd
+
 ; Убирает автозапуск из ветки HKU\$R1, если запись ведёт в $INSTDIR. Портит $R2–$R6.
 Function un.ClearRun
   StrLen $R2 "$INSTDIR"
@@ -187,6 +206,9 @@ Section "Uninstall"
   ; У тех, кто сейчас не в системе, ветка не загружена, и запись осталась бы вести в
   ; удалённую папку: если $INSTDIR был вне Program Files, любой пользователь мог бы
   ; положить туда свой Unbihex.exe. Их NTUSER.DAT загружается на время очистки.
+  ; Куст, оставшийся от прерванного удаления, выгружается сначала (ошибка — не наш случай).
+  nsExec::Exec '"$SYSDIR\reg.exe" unload "HKU\${APPNAME}Uninstall"'
+  Pop $R9
   StrCpy $R0 0
   ${Do}
     EnumRegKey $R7 HKLM "Software\Microsoft\Windows NT\CurrentVersion\ProfileList" $R0
@@ -210,8 +232,13 @@ Section "Uninstall"
     ${If} $R9 == 0
       StrCpy $R1 "${APPNAME}Uninstall"
       Call un.ClearRun
-      nsExec::Exec '"$SYSDIR\reg.exe" unload "HKU\${APPNAME}Uninstall"'
-      Pop $R9
+      Call un.UnloadHive
+      ${If} $R9 != 0
+        ; Так и не выгрузился: следующий профиль на его место не загрузится. Чистка
+        ; остальных профилей пропускается, само удаление продолжается.
+        DetailPrint "Не удалось выгрузить $R8\NTUSER.DAT (reg unload: $R9)"
+        ${ExitDo}
+      ${EndIf}
     ${EndIf}
   ${Loop}
 

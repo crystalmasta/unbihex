@@ -135,8 +135,13 @@ impl DnsServer {
         // Names only this network can answer (single labels, `local`, `home.arpa`,
         // reverse zones of private addresses) do not exist for a public resolver, and
         // asking one tells it, and the path to it, about the LAN. They get NXDOMAIN
-        // here unless an upstream is itself on the LAN or this host.
-        if is_local_only(&domain) && self.upstream_is_public() {
+        // here unless an upstream is itself on the LAN or this host. A single label
+        // asked about as a zone (NS, SOA, DNSSEC records) is a TLD such as `com.`:
+        // a validating resolver needs the real answer, so it goes upstream.
+        if is_local_only(&domain)
+            && !(local && is_zone_query(qtype))
+            && self.upstream_is_public()
+        {
             return error(&msg, ResponseCode::NXDomain);
         }
         // Names a rule blocks outright (ad-blocking lists) do not exist: apps give
@@ -318,6 +323,24 @@ fn response(query: &Message) -> Message {
     resp.metadata.recursion_available = true;
     resp.add_queries(query.queries.iter().cloned());
     resp
+}
+
+/// A question about a zone itself: its servers, its SOA, its DNSSEC keys,
+/// signatures and denial proofs.
+fn is_zone_query(t: RecordType) -> bool {
+    matches!(
+        t,
+        RecordType::NS
+            | RecordType::SOA
+            | RecordType::DS
+            | RecordType::DNSKEY
+            | RecordType::RRSIG
+            | RecordType::NSEC
+            | RecordType::NSEC3
+            | RecordType::NSEC3PARAM
+            | RecordType::CDS
+            | RecordType::CDNSKEY
+    )
 }
 
 /// The IPv4 address of an `in-addr.arpa` name (`4.3.2.1.in-addr.arpa` is 1.2.3.4).
@@ -579,6 +602,29 @@ mod tests {
             ("::ffff:10.0.0.1", false),
         ] {
             assert_eq!(is_public(ip.parse().unwrap()), public, "{ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tlds_asked_as_zones_go_upstream() {
+        // A public upstream behind `block`: a forwarded query gets SERVFAIL at once,
+        // one answered here gets NXDOMAIN.
+        let s = routed_server("192.0.2.53:53".parse().unwrap(), "block").await;
+        for t in [RecordType::DS, RecordType::DNSKEY, RecordType::SOA, RecordType::NS] {
+            assert_eq!(code(&s, "com.", t).await.0, ResponseCode::ServFail, "com. {t}");
+            assert_eq!(code(&s, "org.", t).await.0, ResponseCode::ServFail, "org. {t}");
+        }
+        // The root was never local.
+        assert_eq!(code(&s, ".", RecordType::DNSKEY).await.0, ResponseCode::ServFail);
+        // Hosts on the LAN stay local, and so do zone questions below a local zone.
+        for (name, t) in [
+            ("wpad.", RecordType::A),
+            ("nas.", RecordType::TXT),
+            ("com.", RecordType::A),
+            ("printer.local.", RecordType::SOA),
+            ("168.192.in-addr.arpa.", RecordType::SOA),
+        ] {
+            assert_eq!(code(&s, name, t).await, (ResponseCode::NXDomain, 0), "{name} {t}");
         }
     }
 

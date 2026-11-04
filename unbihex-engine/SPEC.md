@@ -395,7 +395,9 @@ impl Dispatcher {
   4. AAAA, HTTPS, SVCB (28/65/64) → NOERROR без ответов: IPv6 и ECH/IP-hints в обход fake-IP не появляются.
      PTR адреса fake-IP (`…in-addr.arpa` из пула) → имя, на которое он выдан, или NXDOMAIN; в upstream не уходит.
      Если все upstream — публичные адреса (не LAN, не loopback, не link-local, не 100.64/10), имена, известные только
-     локальной сети, получают NXDOMAIN сразу: однословные (кроме `localhost`), `local` и `home.arpa` с поддоменами,
+     локальной сети, получают NXDOMAIN сразу: однословные (кроме `localhost` и вопросов о зоне — NS, SOA, DS, DNSKEY,
+     RRSIG, NSEC, NSEC3, NSEC3PARAM, CDS, CDNSKEY: так спрашивают о TLD вроде `com.`, и проверке DNSSEC нужен
+     настоящий ответ), `local` и `home.arpa` с поддоменами,
      PTR обратных зон частных, loopback-, link-local- и 100.64/10-адресов (RFC 6303), `fc00::/7`, `fe80::/10`, `::1`.
   5. Остальные типы (MX, TXT, прочие PTR …) и однословные имена пересылаются в upstream как UDP-сессия через Dispatcher (inbound
      — тег TUN): при `final` = прокси запрос уходит через прокси, а не открытым текстом. Outbound без UDP (SOCKS5) —
