@@ -21,6 +21,7 @@ use hickory_proto::rr::{Name, RData, Record, RecordType};
 
 use super::client::{DnsClient, exchange_tcp, is_answer, is_truncated, race, with_id};
 use super::fakeip::FakeIpPool;
+use super::secure::SecureUpstream;
 use crate::address::normalize_domain;
 use crate::dispatcher::Dispatcher;
 use crate::error::{Error, Result};
@@ -44,6 +45,8 @@ pub struct DnsServer {
     exclude: HashSet<String>,
     /// The upstream server that answered a routed query last; queries start with it.
     preferred: AtomicUsize,
+    /// Connections to DoT/DoH upstream servers for routed queries; `None` for plain ones.
+    secure: Vec<Option<SecureUpstream>>,
 }
 
 impl DnsServer {
@@ -51,6 +54,7 @@ impl DnsServer {
     pub fn new(fakeip: Arc<FakeIpPool>, upstream: Arc<DnsClient>, ttl: u32) -> DnsServer {
         DnsServer {
             fakeip,
+            secure: upstream.secure_for_routing(),
             upstream,
             ttl,
             via: None,
@@ -177,10 +181,11 @@ impl DnsServer {
         }
     }
 
-    /// Whether every upstream server is a public address.
+    /// Whether every upstream server is a public address (DoT/DoH servers
+    /// given by name count as public).
     fn upstream_is_public(&self) -> bool {
         let servers = self.upstream.upstream();
-        !servers.is_empty() && servers.iter().all(|a| is_public(a.ip()))
+        !servers.is_empty() && servers.iter().all(|u| u.host_ip().is_none_or(is_public))
     }
 
     async fn forward(&self, msg: &Message, packet: &[u8]) -> Option<Vec<u8>> {
@@ -212,15 +217,22 @@ impl DnsServer {
             self.preferred.load(Ordering::Relaxed),
             ROUTED_STAGGER,
             |i| {
-                let server = servers[i];
+                let server = &servers[i];
                 let sess = Session {
                     network: Network::Udp,
                     source: None,
-                    target: server.into(),
+                    target: server.target(),
                     inbound_tag: tag.to_string(),
                     sniffed: None,
                 };
-                let one = routed_exchange(d, sess, msg, &wire);
+                let secure = self.secure.get(i).and_then(Option::as_ref);
+                let wire = &wire;
+                let one = async move {
+                    match secure {
+                        Some(s) => secure_routed_exchange(d, s, sess, msg, wire).await,
+                        None => routed_exchange(d, sess, msg, wire).await,
+                    }
+                };
                 async move {
                     tokio::time::timeout(ROUTED_TIMEOUT, one)
                         .await
@@ -232,6 +244,28 @@ impl DnsServer {
         self.preferred.store(i, Ordering::Relaxed);
         Ok(with_id(&r, msg.metadata.id))
     }
+}
+
+/// One query to DoT/DoH server `sess.target` over a TCP flow through the routed
+/// outbound. A name goes to the outbound as is: a proxy resolves it on its side.
+async fn secure_routed_exchange(
+    d: &Dispatcher,
+    s: &SecureUpstream,
+    mut sess: Session,
+    msg: &Message,
+    wire: &[u8],
+) -> Result<Vec<u8>> {
+    sess.network = Network::Tcp;
+    let sess = &sess;
+    s.exchange(
+        move || async move {
+            let (permit, flow) = d.open_tcp_flow(sess).await?;
+            Ok((Some(permit), flow))
+        },
+        msg,
+        wire,
+    )
+    .await
 }
 
 /// One query to `sess.target` through the routed outbound: UDP first, TCP when the
@@ -583,6 +617,10 @@ mod tests {
     }
 
     async fn routed_server(upstream: std::net::SocketAddr, final_tag: &str) -> DnsServer {
+        routed_server_with(Arc::new(DnsClient::new(vec![upstream], Arc::default())), final_tag).await
+    }
+
+    async fn routed_server_with(client: Arc<DnsClient>, final_tag: &str) -> DnsServer {
         let cfg = crate::config::Config::from_json(&format!(
             r#"{{"outbounds":[{{"type":"direct","tag":"direct"}},{{"type":"block","tag":"block"}}],
                  "route":{{"rules":[{{"domain":["ads.example"],"outbound":"block"}}],
@@ -609,8 +647,36 @@ mod tests {
             Arc::default(),
         ));
         let pool = Arc::new(FakeIpPool::new("198.18.0.0/15".parse().unwrap()));
-        let client = Arc::new(DnsClient::new(vec![upstream], sockets));
         DnsServer::new(pool, client, 10).with_dispatcher(dispatcher, "tun-in".into())
+    }
+
+    #[tokio::test]
+    async fn encrypted_upstreams_follow_routing() {
+        use crate::dns::secure::stub;
+        use std::sync::atomic::Ordering::SeqCst;
+        let (root, dot_cfg, doh_cfg) = stub::cert(&["127.0.0.1"]);
+        let (dot, (dot_conns, dot_queries)) = stub::dot(dot_cfg, false).await;
+        let (doh, (_, doh_queries)) = stub::doh(doh_cfg, false).await;
+        for (upstream, queries) in [(format!("tls://{dot}"), &dot_queries), (format!("https://{doh}"), &doh_queries)] {
+            let client = |root: &rustls::pki_types::CertificateDer<'static>| {
+                let up = vec![upstream.parse().unwrap()];
+                Arc::new(DnsClient::with_roots(up, &[], Arc::default(), std::slice::from_ref(root)).unwrap())
+            };
+            let s = routed_server_with(client(&root), "direct").await;
+            for _ in 0..2 {
+                let r = Message::from_vec(&s.handle(&query("example.com.", RecordType::MX)).await.unwrap()).unwrap();
+                assert_eq!(r.metadata.id, 0x1234, "{upstream}: the client's ID is restored");
+                assert_eq!(r.metadata.response_code, ResponseCode::NoError, "{upstream}");
+            }
+            assert_eq!(queries.load(SeqCst), 2, "{upstream}");
+
+            // Routed into `block`, the query never reaches the server.
+            let s = routed_server_with(client(&root), "block").await;
+            let r = Message::from_vec(&s.handle(&query("example.com.", RecordType::TXT)).await.unwrap()).unwrap();
+            assert_eq!(r.metadata.response_code, ResponseCode::ServFail, "{upstream}");
+            assert_eq!(queries.load(SeqCst), 2, "{upstream}");
+        }
+        assert_eq!(dot_conns.load(SeqCst), 1, "routed DoT queries share a connection");
     }
 
     #[tokio::test]

@@ -710,6 +710,10 @@ function bind() {
     }
   });
 
+  $("#dns-preset").addEventListener("change", (e) => {
+    if (e.target.value) $("#settings-form").dns_upstream.value = e.target.value;
+    e.target.value = "";
+  });
   $("#settings-form").auto_start.addEventListener("change", (e) => {
     $("#settings-form").auto_start_admin.disabled = !e.target.checked;
   });

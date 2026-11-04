@@ -216,7 +216,7 @@ impl Controller {
                 if dropped.contains(&settings.http_port) {
                     info.http_port = None;
                 }
-                let upstream = config.dns.upstream.clone();
+                let own_dns = config.dns.clone();
                 let hooks = PlatformHooks {
                     bind_interface: uplink.as_ref().map(|u| u.binding.clone()),
                     ..Default::default()
@@ -242,7 +242,7 @@ impl Controller {
                 self.set_ping_env(PingEnv {
                     binding: uplink.map(|u| u.binding),
                     protect: None,
-                    own_dns: Some(upstream),
+                    own_dns: Some(own_dns),
                 });
                 Running {
                     counters: Some(instance.counters()),

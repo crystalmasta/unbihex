@@ -1,10 +1,11 @@
 //! Builds the engine config (SPEC §5) for a server, the settings and the platform.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 
 use ipnet::IpNet;
 use serde_json::{Value, json};
 use unbihex_engine::Config;
+use unbihex_engine::config::DnsUpstream;
 
 use crate::error::{ClientError, Result};
 use crate::geo::Geo;
@@ -171,11 +172,8 @@ fn clean_domain(d: &str) -> String {
 }
 
 /// `1.1.1.1` or `1.1.1.1:53` or `[2606:4700::1111]:53` → socket address.
-pub fn parse_dns(s: &str) -> Option<SocketAddr> {
-    let s = s.trim();
-    s.parse::<SocketAddr>()
-        .ok()
-        .or_else(|| s.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 53)))
+pub fn parse_dns(s: &str) -> Option<DnsUpstream> {
+    s.trim().parse().ok()
 }
 
 fn push_list<'a>(
@@ -507,12 +505,19 @@ mod tests {
     fn lan_and_dns_settings() {
         let s = Settings {
             allow_lan: true,
-            dns_upstream: vec!["9.9.9.9".into(), "bad".into(), "[2606:4700::1111]:53".into()],
+            dns_upstream: vec![
+                "9.9.9.9".into(),
+                "bad".into(),
+                "[2606:4700::1111]:53".into(),
+                "https://dns.google/dns-query".into(),
+                "tls://1.1.1.1".into(),
+            ],
             ..Default::default()
         };
         let cfg = build_config(&server(), &s, &Geo::default(), Target::DesktopProxy).unwrap();
         assert!(matches!(&cfg.inbounds[0], InboundConfig::Mixed(h) if h.listen.ip().is_unspecified()));
-        assert_eq!(cfg.dns.upstream.len(), 2);
+        assert_eq!(cfg.dns.upstream.len(), 4);
+        assert_eq!(cfg.dns.upstream[2].to_string(), "https://dns.google:443/dns-query");
         for i in &cfg.inbounds {
             let (InboundConfig::Mixed(p) | InboundConfig::Http(p)) = i else {
                 panic!("unexpected inbound {i:?}");

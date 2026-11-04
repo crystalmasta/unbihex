@@ -128,7 +128,11 @@ impl Instance {
                 "tun_fd was given but the config has no tun inbound",
             ));
         }
-        let dns_client = Arc::new(DnsClient::new(config.dns.upstream.clone(), sockets.clone()));
+        let dns_client = Arc::new(DnsClient::with_upstreams(
+            config.dns.upstream.clone(),
+            &config.dns.bootstrap,
+            sockets.clone(),
+        )?);
         let upstream = Arc::new(if hooks.system_dns_bypasses_tun {
             // Works where the network blocks the upstream servers (issue #14).
             Resolver::SystemThenUpstream(dns_client.clone())
@@ -140,10 +144,10 @@ impl Instance {
         let server_resolver = if mobile && !hooks.bootstrap_dns.is_empty() {
             Arc::new(dns::bootstrap_resolver(
                 &hooks.bootstrap_dns,
-                &config.dns.upstream,
+                &config.dns,
                 sockets.clone(),
                 hooks.system_dns_bypasses_tun,
-            ))
+            )?)
         } else if mobile {
             upstream.clone()
         } else {

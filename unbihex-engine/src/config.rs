@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use serde::Deserialize;
@@ -1094,9 +1094,15 @@ pub struct DnsConfig {
     /// Pool for fake IPv4 answers.
     #[serde(default = "default_fakeip_range")]
     pub fakeip_range: Ipv4Net,
-    /// Upstream resolvers used by the engine itself (they bypass the TUN).
+    /// Upstream resolvers used by the engine itself (they bypass the TUN): plain,
+    /// DNS over TLS or DNS over HTTPS (see [`DnsUpstream`]).
     #[serde(default = "default_upstream")]
-    pub upstream: Vec<SocketAddr>,
+    pub upstream: Vec<DnsUpstream>,
+    /// Servers that resolve the names of DoT/DoH servers in `upstream`. Empty:
+    /// the servers of `upstream` given by IP address, or, without any,
+    /// [`DEFAULT_BOOTSTRAP`]. Only servers given by IP address.
+    #[serde(default)]
+    pub bootstrap: Vec<DnsUpstream>,
     /// TTL of fake answers, in seconds.
     #[serde(default = "default_dns_ttl")]
     pub ttl: u32,
@@ -1112,7 +1118,146 @@ pub struct DnsConfig {
     pub allow_private_answers: Vec<String>,
 }
 
+/// Resolves the names of DoT/DoH servers when `dns` gives nothing better: DNS
+/// over HTTPS by IP address, so the names do not leave in the clear either.
+pub const DEFAULT_BOOTSTRAP: [&str; 2] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
+
+/// One upstream DNS server (SPEC §8.3), written as a string:
+/// `ip` / `ip:port` (port 53), `tls://host[:853]`, `https://host[:443][/path]`
+/// (path `/dns-query` by default).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DnsUpstream {
+    /// Plain DNS: UDP, TCP when the answer is truncated.
+    Plain(SocketAddr),
+    /// DNS over TLS (RFC 7858).
+    Tls {
+        /// IP literal (no brackets) or normalized domain.
+        host: String,
+        /// Port, 853 by default.
+        port: u16,
+    },
+    /// DNS over HTTPS (RFC 8484) over HTTP/2.
+    Https {
+        /// IP literal (no brackets) or normalized domain.
+        host: String,
+        /// Port, 443 by default.
+        port: u16,
+        /// Path with the query string, if any.
+        path: String,
+    },
+}
+
+impl DnsUpstream {
+    /// The server's IP address, when it is given by one.
+    pub fn host_ip(&self) -> Option<IpAddr> {
+        match self {
+            DnsUpstream::Plain(a) => Some(a.ip()),
+            DnsUpstream::Tls { host, .. } | DnsUpstream::Https { host, .. } => host.parse().ok(),
+        }
+    }
+
+    /// A DoT/DoH server given by name: its address comes from `dns.bootstrap`.
+    pub fn needs_bootstrap(&self) -> bool {
+        self.host_ip().is_none()
+    }
+
+    /// Host and port, as a routing target.
+    pub fn target(&self) -> crate::address::TargetAddr {
+        match self {
+            DnsUpstream::Plain(a) => (*a).into(),
+            DnsUpstream::Tls { host, port } | DnsUpstream::Https { host, port, .. } => {
+                let addr = match host.parse() {
+                    Ok(ip) => crate::address::Address::Ip(ip),
+                    Err(_) => crate::address::Address::Domain(host.clone()),
+                };
+                crate::address::TargetAddr { addr, port: *port }
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for DnsUpstream {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<DnsUpstream> {
+        let s = s.trim();
+        let bad = |why: &str| Error::config(format!("dns server {s:?}: {why}"));
+        let Some((scheme, _)) = s.split_once("://") else {
+            if let Ok(a) = s.parse::<SocketAddr>() {
+                return Ok(DnsUpstream::Plain(a));
+            }
+            let ip = s.trim_start_matches('[').trim_end_matches(']');
+            return ip
+                .parse::<IpAddr>()
+                .map(|ip| DnsUpstream::Plain(SocketAddr::new(ip, 53)))
+                .map_err(|_| bad("expected ip, ip:port, tls://host or https://host/path"));
+        };
+        let url = url::Url::parse(s).map_err(|e| bad(&e.to_string()))?;
+        if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+            return Err(bad("no user name, password or #fragment"));
+        }
+        let host = match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.to_string(),
+            Some(url::Host::Ipv6(ip)) => ip.to_string(),
+            Some(url::Host::Domain(d)) => {
+                let d = d.trim_start_matches('[').trim_end_matches(']');
+                match d.parse::<IpAddr>() {
+                    Ok(ip) => ip.to_string(),
+                    Err(_) => normalize_domain(d).map_err(|e| bad(&e.to_string()))?,
+                }
+            }
+            None => return Err(bad("no host")),
+        };
+        match scheme.to_ascii_lowercase().as_str() {
+            "tls" => {
+                if !matches!(url.path(), "" | "/") || url.query().is_some() {
+                    return Err(bad("tls:// takes no path"));
+                }
+                Ok(DnsUpstream::Tls { host, port: url.port().unwrap_or(853) })
+            }
+            "https" => {
+                let mut path = match url.path() {
+                    "" | "/" => "/dns-query".to_string(),
+                    p => p.to_string(),
+                };
+                if let Some(q) = url.query() {
+                    path = format!("{path}?{q}");
+                }
+                Ok(DnsUpstream::Https { host, port: url.port_or_known_default().unwrap_or(443), path })
+            }
+            _ => Err(bad("supported: plain ip[:port], tls:// (DoT) and https:// (DoH)")),
+        }
+    }
+}
+
+impl fmt::Display for DnsUpstream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let host = |h: &str| match h.parse::<std::net::Ipv6Addr>() {
+            Ok(_) => format!("[{h}]"),
+            Err(_) => h.to_string(),
+        };
+        match self {
+            DnsUpstream::Plain(a) => write!(f, "{a}"),
+            DnsUpstream::Tls { host: h, port } => write!(f, "tls://{}:{port}", host(h)),
+            DnsUpstream::Https { host: h, port, path } => write!(f, "https://{}:{port}{path}", host(h)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DnsUpstream {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 impl DnsConfig {
+    /// The servers that resolve the names of DoT/DoH servers in `upstream`
+    /// (see [`DnsConfig::bootstrap`]); empty when no server needs one.
+    pub fn bootstrap_servers(&self) -> Vec<DnsUpstream> {
+        bootstrap_servers(&self.upstream, &self.bootstrap)
+    }
+
     /// Normalized `fakeip_exclude` suffixes; a leading `.` or `*.` is ignored.
     pub fn fakeip_exclude_suffixes(&self) -> Result<HashSet<String>> {
         self.fakeip_exclude
@@ -1146,11 +1291,27 @@ impl DnsConfig {
     }
 }
 
+/// See [`DnsConfig::bootstrap_servers`].
+pub(crate) fn bootstrap_servers(upstream: &[DnsUpstream], bootstrap: &[DnsUpstream]) -> Vec<DnsUpstream> {
+    if !upstream.iter().any(DnsUpstream::needs_bootstrap) {
+        return Vec::new();
+    }
+    if !bootstrap.is_empty() {
+        return bootstrap.to_vec();
+    }
+    let by_ip: Vec<DnsUpstream> = upstream.iter().filter(|u| !u.needs_bootstrap()).cloned().collect();
+    if !by_ip.is_empty() {
+        return by_ip;
+    }
+    DEFAULT_BOOTSTRAP.iter().filter_map(|s| s.parse().ok()).collect()
+}
+
 impl Default for DnsConfig {
     fn default() -> Self {
         DnsConfig {
             fakeip_range: default_fakeip_range(),
             upstream: default_upstream(),
+            bootstrap: Vec::new(),
             ttl: default_dns_ttl(),
             fakeip_exclude: default_fakeip_exclude(),
             allow_private_answers: Vec::new(),
@@ -1162,10 +1323,10 @@ fn default_fakeip_range() -> Ipv4Net {
     Ipv4Net::new_assert(Ipv4Addr::new(198, 18, 0, 0), 15)
 }
 
-fn default_upstream() -> Vec<SocketAddr> {
+fn default_upstream() -> Vec<DnsUpstream> {
     vec![
-        SocketAddr::from(([1, 1, 1, 1], 53)),
-        SocketAddr::from(([8, 8, 8, 8], 53)),
+        DnsUpstream::Plain(SocketAddr::from(([1, 1, 1, 1], 53))),
+        DnsUpstream::Plain(SocketAddr::from(([8, 8, 8, 8], 53))),
     ]
 }
 
@@ -1443,6 +1604,11 @@ impl Config {
         if self.dns.upstream.is_empty() {
             return Err(Error::config("dns.upstream must not be empty"));
         }
+        if let Some(b) = self.dns.bootstrap.iter().find(|b| b.needs_bootstrap()) {
+            return Err(Error::config(format!(
+                "dns.bootstrap: {b} must be given by IP address"
+            )));
+        }
         if self.dns.fakeip_range.prefix_len() > 24 {
             return Err(Error::config("dns.fakeip_range must be /24 or larger"));
         }
@@ -1468,6 +1634,49 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dns_upstream_forms() {
+        let p = |s: &str| s.parse::<DnsUpstream>();
+        assert_eq!(p("9.9.9.9").unwrap(), DnsUpstream::Plain("9.9.9.9:53".parse().unwrap()));
+        assert_eq!(p("[2606:4700::1111]").unwrap().to_string(), "[2606:4700::1111]:53");
+        assert_eq!(p("1.1.1.1:5353").unwrap().to_string(), "1.1.1.1:5353");
+        assert_eq!(
+            p("tls://Dns.Google").unwrap(),
+            DnsUpstream::Tls { host: "dns.google".into(), port: 853 }
+        );
+        assert_eq!(p("tls://1.1.1.1:8853").unwrap().to_string(), "tls://1.1.1.1:8853");
+        assert_eq!(
+            p("https://1.1.1.1").unwrap(),
+            DnsUpstream::Https { host: "1.1.1.1".into(), port: 443, path: "/dns-query".into() }
+        );
+        assert_eq!(
+            p("https://[2620:fe::fe]:8443/x?a=1").unwrap().to_string(),
+            "https://[2620:fe::fe]:8443/x?a=1"
+        );
+        assert_eq!(p("https://[2620:fe::fe]/").unwrap().host_ip(), Some("2620:fe::fe".parse().unwrap()));
+        assert!(p("https://dns.google/dns-query").unwrap().needs_bootstrap());
+        assert!(!p("tls://9.9.9.9").unwrap().needs_bootstrap());
+        for bad in ["dns.google", "quic://dns.adguard.com", "tls://a.b/path", "https://u:p@a.b/", "https://"] {
+            assert!(p(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn dns_bootstrap() {
+        let up = |list: &[&str]| -> Vec<DnsUpstream> { list.iter().map(|s| s.parse().unwrap()).collect() };
+        let names = up(&["https://dns.google/dns-query", "tls://one.one.one.one"]);
+        // Nothing to resolve: no bootstrap.
+        assert!(bootstrap_servers(&up(&["1.1.1.1", "https://9.9.9.9"]), &[]).is_empty());
+        // Given ones first, then the servers given by address, then the default.
+        assert_eq!(bootstrap_servers(&names, &up(&["8.8.4.4"])), up(&["8.8.4.4"]));
+        let mixed = up(&["https://dns.google/dns-query", "https://9.9.9.9", "1.1.1.1"]);
+        assert_eq!(bootstrap_servers(&mixed, &[]), up(&["https://9.9.9.9", "1.1.1.1"]));
+        assert_eq!(bootstrap_servers(&names, &[]), up(&DEFAULT_BOOTSTRAP));
+        let c = Config::from_json(r#"{"outbounds":[{"type":"direct","tag":"d"}],
+            "dns":{"upstream":["https://dns.google/dns-query"],"bootstrap":["tls://one.one.one.one"]}}"#);
+        assert!(c.is_err_and(|e| e.to_string().contains("dns.bootstrap")));
+    }
 
     #[test]
     fn open_proxy_only_on_loopback() {

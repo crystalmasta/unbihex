@@ -232,6 +232,8 @@ Outbound fields are described in §11, rules in §6, DNS in §8.
 - At most one tun inbound; `ipv4` is /30 or shorter; `mtu` ≥ 576. Mobile (`tun_fd`): `name`, `auto_route` and the
   addresses are ignored, the OS manages them; `tun_fd` without a tun inbound is an error.
 - `route.default_interface` is not empty; `route.default_mark` is not 0 and Linux only.
+- `dns.upstream` is not empty; an entry is `ip`, `ip:port`, `tls://host[:port]` or `https://host[:port][/path]` (§8.3),
+  anything else is an error. `dns.bootstrap` holds only servers given by IP address.
 - `limits.socket_buffer` is 0 (the OS tunes the buffers: on Linux an explicit size turns autotuning off; on a 50 ms
   path with MTU 1500 autotuning gave 64 MB/s against 55, without the drops to 1 MB/s seen with 4 MiB) or
   65,536…16,777,216 bytes; it is a ceiling for `SO_RCVBUF`/`SO_SNDBUF`, and the OS caps it by `net.core.{r,w}mem_max`.
@@ -401,26 +403,42 @@ impl Dispatcher {
      reverse zones of private, loopback, link-local and 100.64/10 addresses (RFC 6303), `fc00::/7`, `fe80::/10`, `::1`.
   5. Other types (MX, TXT, other PTR …) and single-label names are forwarded to the upstream as a UDP session through the
      Dispatcher (the inbound is the TUN tag): with a proxy as `final` the query goes through the proxy, not in the
-     clear. For an outbound without UDP (SOCKS5) the query goes over TCP. The ID is replaced with a random one and
-     restored in the answer; only an answer with the same ID, the QR flag and the same question is accepted.
+     clear. For an outbound without UDP (SOCKS5) the query goes over TCP. A DoT/DoH server (§8.3) gets a TCP session to
+     its name or address and port: the name goes to the outbound as is (a proxy resolves it on its side, direct through
+     the bootstrap), and rules see it as any domain. The ID is replaced with a random one and restored in the answer;
+     only an answer with the same ID, the QR flag and the same question is accepted.
   6. A malformed packet → FORMERR if the ID can be read, otherwise the packet is dropped.
 - When a TCP or UDP session from the TUN arrives at a fake IP, `Session.target` becomes `Domain(lookup_ip)` with the
   same port. Without a mapping (it expired) TCP is reset and the UDP packet dropped, with a `debug` line.
 
 ### 8.3 Upstream DNS client and resolvers
 
-- The client: a UDP socket **from the SocketFactory** (§9), a random ID, the ID and question checked in the answer.
-- 2 s timeout per server. The server that answered last is asked first; while there is no answer, the next one joins
-  in parallel every 300 ms (at once when all running attempts already failed), and the first answer wins. Without an
-  answer the query is resent to the same server every 700 ms. A truncated answer (TC) is retried over TCP (u16 length
-  prefix, RFC 1035 §4.2.2).
+- The client: sockets **from the SocketFactory** (§9), a random ID, the ID and question checked in the answer. Servers
+  of `dns.upstream`:
+  - `ip` / `ip:port` (port 53): plain DNS over UDP;
+  - `tls://host[:853]`: DNS over TLS (RFC 7858), messages with a u16 length prefix over TLS;
+  - `https://host[:443][/path]`: DNS over HTTPS (RFC 8484) over HTTP/2 (ALPN `h2`): `POST` to `path` (`/dns-query` by
+    default), `content-type`/`accept: application/dns-message`, the answer is a 200 with a DNS message of up to 64 KiB.
+  DoT/DoH certificates are always checked (WebPKI roots), against the name, or against the IP address (SAN) when the
+  server is given by address; the ClientHello is rustls's own (a browser one would offer ALPN a DoT server may reject).
+  Connections are kept: DoT up to 4 idle ones per server, for at most 10 s; DoH one HTTP/2 connection for all queries,
+  closed after 60 s without queries. A connection the server closed is replaced within the same query, with no error.
+- The name of a DoT/DoH server is resolved through the bootstrap: `dns.bootstrap` when set, else the servers of
+  `dns.upstream` given by IP address, and without any, `https://1.1.1.1/dns-query`, `https://8.8.8.8/dns-query` (the
+  name does not leave in the clear). The bootstrap is the same client with all the rules below; answers are cached by TTL.
+- 2 s timeout per server (DoT/DoH 5 s: the TCP and TLS handshakes come first). The server that answered last is asked
+  first; while there is no answer, the next one joins in parallel every 300 ms (at once when all running attempts
+  already failed), and the first answer wins. Without an answer a UDP query is resent to the same server every 700 ms.
+  A truncated answer (TC) is retried over TCP (u16 length prefix, RFC 1035 §4.2.2).
 - Queries forwarded from the TUN through the Dispatcher (§8.2) race the servers the same way, with a 5 s timeout, a
   1 s stagger and a resend after 1 s (a flow through a proxy takes a few RTTs to open). The resend runs alongside the
-  receive loop, never by cancelling it: UDP over TCP (VLESS) must not lose a half-read packet.
+  receive loop, never by cancelling it: UDP over TCP (VLESS) must not lose a half-read packet. This path has its own
+  DoT/DoH connections, apart from the direct ones and kept the same way; a flow through the Dispatcher counts against
+  `max_connections` while the connection lives.
 - A TTL-aware cache: up to 4096 entries, TTL from 5 s to 1 h. `resolve(domain)` asks for A.
 - On Android, capture the active physical network's DNS before establishing the VPN (never another VPN's DNS).
   Proxy-server names at startup and hot reload retain the system resolver for up to 3 s (including Android
-  Private DNS/DoT), falling back to a separate client: `bootstrap_dns` first, then `dns.upstream`,
+  Private DNS/DoT), falling back to a separate client: `bootstrap_dns` first, then `dns.upstream` (DoT/DoH too),
   deduplicated, with the usual staggered fallback. IPv6 DNS retains its numeric scope ID. This does not change
   user-traffic DNS, saved configuration or TLS SNI. An empty list preserves the previous resolver selection.
   After a physical-network change, reconnect the VPN to refresh the list.

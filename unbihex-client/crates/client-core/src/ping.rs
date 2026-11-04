@@ -36,7 +36,7 @@ pub struct PingEnv {
     /// Android `protect`.
     pub protect: Option<ProtectFn>,
     /// Use our own DNS client instead of the OS (needed while the TUN answers with fake IPs).
-    pub own_dns: Option<Vec<std::net::SocketAddr>>,
+    pub own_dns: Option<unbihex_engine::config::DnsConfig>,
 }
 
 /// Measures the delay to `server` with `method`, in milliseconds.
@@ -64,7 +64,13 @@ pub async fn measure(server: &Server, method: PingMethod, env: &PingEnv) -> Resu
 fn test_net(env: &PingEnv) -> (Arc<SocketFactory>, Arc<Resolver>) {
     let sockets = Arc::new(SocketFactory::new(env.binding.clone(), env.protect.clone()));
     let resolver = Arc::new(match &env.own_dns {
-        Some(up) => Resolver::Upstream(Arc::new(DnsClient::new(up.clone(), sockets.clone()))),
+        Some(dns) => match DnsClient::with_upstreams(dns.upstream.clone(), &dns.bootstrap, sockets.clone()) {
+            Ok(c) => Resolver::Upstream(Arc::new(c)),
+            Err(e) => {
+                tracing::warn!("ping: own DNS: {e}");
+                Resolver::System
+            }
+        },
         None => Resolver::System,
     });
     (sockets, resolver)

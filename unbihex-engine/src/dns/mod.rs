@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod fakeip;
+mod secure;
 pub mod server;
 
 use std::future::Future;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::address::Address;
+use crate::config::{DnsConfig, DnsUpstream};
 use crate::error::{Error, Result};
 
 pub use client::DnsClient;
@@ -34,23 +36,24 @@ const SYSTEM_TIMEOUT: Duration = Duration::from_secs(3);
 /// configured upstreams retained as fallbacks. Never use the VPN's fake DNS.
 pub(crate) fn bootstrap_resolver(
     network_dns: &[SocketAddr],
-    configured: &[SocketAddr],
+    dns: &DnsConfig,
     sockets: Arc<crate::net::SocketFactory>,
     system_bypasses_tun: bool,
-) -> Resolver {
+) -> Result<Resolver> {
     let mut servers = Vec::new();
-    for &server in network_dns.iter().chain(configured) {
+    let network = network_dns.iter().map(|&a| DnsUpstream::Plain(a));
+    for server in network.chain(dns.upstream.iter().cloned()) {
         if !servers.contains(&server) {
             servers.push(server);
         }
     }
-    let client = Arc::new(DnsClient::new(servers, sockets));
-    if system_bypasses_tun {
+    let client = Arc::new(DnsClient::with_upstreams(servers, &dns.bootstrap, sockets)?);
+    Ok(if system_bypasses_tun {
         // Keep Android Private DNS / DoT working when raw port 53 is blocked.
         Resolver::SystemThenUpstream(client)
     } else {
         Resolver::Upstream(client)
-    }
+    })
 }
 
 impl Resolver {
@@ -131,18 +134,23 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let resolver = bootstrap_resolver(
-            &[network_addr, network_addr],
-            &[silent.local_addr().unwrap(), network_addr],
-            Default::default(),
-            false,
-        );
+        let dns = DnsConfig {
+            upstream: vec![
+                DnsUpstream::Plain(silent.local_addr().unwrap()),
+                DnsUpstream::Plain(network_addr),
+            ],
+            ..Default::default()
+        };
+        let resolver = bootstrap_resolver(&[network_addr, network_addr], &dns, Default::default(), false).unwrap();
         let Resolver::Upstream(client) = &resolver else {
             panic!("expected bypass DNS")
         };
         assert_eq!(
             client.upstream(),
-            &[network_addr, silent.local_addr().unwrap()]
+            &[
+                DnsUpstream::Plain(network_addr),
+                DnsUpstream::Plain(silent.local_addr().unwrap())
+            ]
         );
         let ips = tokio::time::timeout(Duration::from_secs(1), resolver.resolve("cdn.example"))
             .await
@@ -155,12 +163,11 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_keeps_system_dns_when_raw_dns_is_unavailable() {
         let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let resolver = bootstrap_resolver(
-            &[silent.local_addr().unwrap()],
-            &[],
-            Default::default(),
-            true,
-        );
+        let dns = DnsConfig {
+            upstream: Vec::new(),
+            ..Default::default()
+        };
+        let resolver = bootstrap_resolver(&[silent.local_addr().unwrap()], &dns, Default::default(), true).unwrap();
         assert!(matches!(resolver, Resolver::SystemThenUpstream(_)));
         let ips = resolver.resolve("localhost").await.unwrap();
         assert!(!ips.is_empty() && ips.iter().all(IpAddr::is_loopback));

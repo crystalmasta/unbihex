@@ -1,5 +1,6 @@
-//! Minimal upstream DNS client (SPEC §8.3). Sockets come from the
-//! SocketFactory, so lookups never loop back into our own TUN.
+//! Minimal upstream DNS client (SPEC §8.3): plain DNS, DNS over TLS and DNS
+//! over HTTPS. Sockets come from the SocketFactory, so lookups never loop back
+//! into our own TUN.
 
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -14,13 +15,19 @@ use hickory_proto::op::{Message, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use lru::LruCache;
 use parking_lot::Mutex;
+use rustls::pki_types::CertificateDer;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 
+use super::secure::{SecureUpstream, Transport};
+use crate::address::Address;
+use crate::config::DnsUpstream;
 use crate::error::{Error, Result};
 use crate::net::SocketFactory;
 
 const SERVER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Per-server limit for DoT/DoH: the TCP and TLS handshakes come first.
+const SECURE_TIMEOUT: Duration = Duration::from_secs(5);
 /// With no answer yet, the next server is asked in parallel after this long.
 const STAGGER: Duration = Duration::from_millis(300);
 /// The query is sent to the same server again after this long without an answer
@@ -32,7 +39,11 @@ const MAX_TTL: u32 = 3600;
 
 /// A minimal DNS client for the configured upstream servers.
 pub struct DnsClient {
-    upstream: Vec<SocketAddr>,
+    upstream: Vec<DnsUpstream>,
+    /// DoT/DoH state of each server of `upstream`; `None` for plain ones.
+    secure: Vec<Option<SecureUpstream>>,
+    /// Resolves the names of DoT/DoH servers (`dns.bootstrap`).
+    bootstrap: Option<Arc<DnsClient>>,
     sockets: Arc<SocketFactory>,
     cache: Mutex<LruCache<String, (Vec<IpAddr>, Instant)>>,
     /// The server that answered last; queries start with it.
@@ -40,16 +51,79 @@ pub struct DnsClient {
 }
 
 impl DnsClient {
-    /// Creates a client; sockets come from `sockets` so they bypass the TUN.
+    /// Creates a client for plain servers; sockets come from `sockets` so they
+    /// bypass the TUN.
     pub fn new(upstream: Vec<SocketAddr>, sockets: Arc<SocketFactory>) -> DnsClient {
+        let upstream: Vec<DnsUpstream> = upstream.into_iter().map(DnsUpstream::Plain).collect();
         DnsClient {
+            secure: upstream.iter().map(|_| None).collect(),
             upstream,
+            bootstrap: None,
             sockets,
-            cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(CACHE_SIZE).unwrap_or(NonZeroUsize::MIN),
-            )),
+            cache: new_cache(),
             preferred: AtomicUsize::new(0),
         }
+    }
+
+    /// Creates a client for plain, DoT and DoH servers. The names of DoT/DoH
+    /// servers are resolved through `bootstrap` (see `DnsConfig::bootstrap`).
+    pub fn with_upstreams(
+        upstream: Vec<DnsUpstream>,
+        bootstrap: &[DnsUpstream],
+        sockets: Arc<SocketFactory>,
+    ) -> Result<DnsClient> {
+        Self::with_roots(upstream, bootstrap, sockets, &[])
+    }
+
+    /// [`DnsClient::with_upstreams`] that trusts only `roots` for DoT/DoH when
+    /// there are any (tests).
+    pub(crate) fn with_roots(
+        upstream: Vec<DnsUpstream>,
+        bootstrap: &[DnsUpstream],
+        sockets: Arc<SocketFactory>,
+        roots: &[CertificateDer<'static>],
+    ) -> Result<DnsClient> {
+        let secure = upstream
+            .iter()
+            .map(|u| SecureUpstream::new(u, roots))
+            .collect::<Result<Vec<_>>>()?;
+        let boot = crate::config::bootstrap_servers(&upstream, bootstrap);
+        if let Some(b) = boot.iter().find(|b| b.needs_bootstrap()) {
+            return Err(Error::config(format!(
+                "dns.bootstrap: {b} must be given by IP address"
+            )));
+        }
+        let bootstrap = if boot.is_empty() {
+            None
+        } else {
+            Some(Arc::new(DnsClient::with_roots(boot, &[], sockets.clone(), roots)?))
+        };
+        Ok(DnsClient {
+            upstream,
+            secure,
+            bootstrap,
+            sockets,
+            cache: new_cache(),
+            preferred: AtomicUsize::new(0),
+        })
+    }
+
+    /// The same DoT/DoH servers without connections, for queries that take
+    /// another path (forwarded from the TUN through routing).
+    pub(crate) fn secure_for_routing(&self) -> Vec<Option<SecureUpstream>> {
+        self.secure
+            .iter()
+            .map(|s| s.as_ref().map(SecureUpstream::fresh))
+            .collect()
+    }
+
+    /// [`DnsClient::resolve`] behind a pointer: a DoT/DoH lookup may need the
+    /// bootstrap client, itself a `DnsClient`.
+    fn resolve_boxed<'a>(
+        &'a self,
+        domain: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<IpAddr>>> + Send + 'a>> {
+        Box::pin(self.resolve(domain))
     }
 
     /// Resolves IPv4 addresses for `domain`.
@@ -100,7 +174,7 @@ impl DnsClient {
     }
 
     /// The upstream servers, in order.
-    pub fn upstream(&self) -> &[SocketAddr] {
+    pub fn upstream(&self) -> &[DnsUpstream] {
         &self.upstream
     }
 
@@ -116,10 +190,15 @@ impl DnsClient {
             self.preferred.load(Ordering::Relaxed),
             STAGGER,
             |i| {
-                let server = self.upstream[i];
-                let one = self.exchange_one(server, &parsed, &wire);
+                let server = &self.upstream[i];
+                let limit = if self.secure[i].is_some() {
+                    SECURE_TIMEOUT
+                } else {
+                    SERVER_TIMEOUT
+                };
+                let one = self.exchange_one(i, &parsed, &wire);
                 async move {
-                    tokio::time::timeout(SERVER_TIMEOUT, one)
+                    tokio::time::timeout(limit, one)
                         .await
                         .unwrap_or_else(|_| Err(Error::Dns(format!("{server}: timed out"))))
                 }
@@ -130,12 +209,12 @@ impl DnsClient {
         Ok(with_id(&r, parsed.metadata.id))
     }
 
-    async fn exchange_one(
-        &self,
-        server: SocketAddr,
-        parsed: &Message,
-        query: &[u8],
-    ) -> Result<Vec<u8>> {
+    async fn exchange_one(&self, i: usize, parsed: &Message, query: &[u8]) -> Result<Vec<u8>> {
+        let server = match (&self.upstream[i], &self.secure[i]) {
+            (_, Some(s)) => return s.exchange(move || self.connect_secure(i), parsed, query).await,
+            (DnsUpstream::Plain(a), None) => *a,
+            (u, None) => return Err(Error::Dns(format!("{u}: no TLS client"))),
+        };
         let sock = self.sockets.udp_bind(server.is_ipv6()).await?;
         sock.connect(server).await?;
         sock.send(query).await?;
@@ -165,6 +244,40 @@ impl DnsClient {
         let mut tcp = self.sockets.tcp_connect(server).await?;
         exchange_tcp(&mut tcp, parsed, query).await
     }
+
+    /// A direct TCP connection to DoT/DoH server `i`; a name is resolved
+    /// through the bootstrap servers.
+    async fn connect_secure(&self, i: usize) -> Result<Transport> {
+        let u = &self.upstream[i];
+        let target = u.target();
+        let ip = match &target.addr {
+            Address::Ip(ip) => *ip,
+            Address::Domain(host) => {
+                let boot = self
+                    .bootstrap
+                    .as_ref()
+                    .ok_or_else(|| Error::Dns(format!("{u}: no bootstrap server")))?;
+                let ips = boot
+                    .resolve_boxed(host)
+                    .await
+                    .map_err(|e| Error::Dns(format!("{u}: {e}")))?;
+                ips.into_iter()
+                    .next()
+                    .ok_or_else(|| Error::Dns(format!("{u}: no address")))?
+            }
+        };
+        let tcp = self
+            .sockets
+            .tcp_connect(SocketAddr::new(ip, target.port))
+            .await?;
+        Ok((None, Box::new(tcp)))
+    }
+}
+
+fn new_cache() -> Mutex<LruCache<String, (Vec<IpAddr>, Instant)>> {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(CACHE_SIZE).unwrap_or(NonZeroUsize::MIN),
+    ))
 }
 
 type Attempt<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
