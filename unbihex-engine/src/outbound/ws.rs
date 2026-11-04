@@ -148,9 +148,17 @@ where
     let mut nonce = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut nonce);
     let key = base64::engine::general_purpose::STANDARD.encode(nonce);
+    // HTTPUpgrade sends no Sec-WebSocket-* headers, as sing-box's client: a
+    // sing-box server refuses a request with a key as a real WebSocket (404),
+    // and Xray accepts both.
+    let ws_headers = if cfg.httpupgrade {
+        String::new()
+    } else {
+        format!("Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n")
+    };
     let head = format!(
         "GET {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {}\r\nConnection: Upgrade\r\n\
-         Upgrade: websocket\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n",
+         Upgrade: websocket\r\n{ws_headers}\r\n",
         cfg.request_path(),
         super::xhttp::chrome_user_agent(),
     );
@@ -497,18 +505,19 @@ mod tests {
             head.push(s.read_u8().await.unwrap());
         }
         let head = String::from_utf8(head).unwrap();
-        let key = head
-            .lines()
-            .find_map(|l| l.strip_prefix("Sec-WebSocket-Key: "))
-            .unwrap()
-            .to_string();
-        let mut h = Sha1::new();
-        h.update(key.as_bytes());
-        h.update(ACCEPT_GUID);
-        let accept = base64::engine::general_purpose::STANDARD.encode(h.finalize());
+        // HTTPUpgrade: no key, so no Sec-WebSocket-Accept either (as sing-box answers).
+        let accept = match head.lines().find_map(|l| l.strip_prefix("Sec-WebSocket-Key: ")) {
+            Some(key) => {
+                let mut h = Sha1::new();
+                h.update(key.as_bytes());
+                h.update(ACCEPT_GUID);
+                let accept = base64::engine::general_purpose::STANDARD.encode(h.finalize());
+                format!("Sec-WebSocket-Accept: {accept}\r\n")
+            }
+            None => String::new(),
+        };
         let mut resp = format!(
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-             Sec-WebSocket-Accept: {accept}\r\n\r\n"
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n{accept}\r\n"
         )
         .into_bytes();
         resp.extend_from_slice(extra);
@@ -604,6 +613,8 @@ mod tests {
         let srv = tokio::spawn(async move {
             let head = serve_upgrade(&mut server, b"raw").await;
             assert!(head.contains("Host: tls.example\r\n"), "{head}");
+            assert!(head.contains("Upgrade: websocket\r\n"), "{head}");
+            assert!(!head.to_ascii_lowercase().contains("sec-websocket"), "{head}");
             let mut b = [0u8; 4];
             server.read_exact(&mut b).await.unwrap();
             assert_eq!(&b, b"ping");

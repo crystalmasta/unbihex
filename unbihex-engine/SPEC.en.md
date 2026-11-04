@@ -786,8 +786,10 @@ User-Agent, `Upgrade: websocket`, a random `Sec-WebSocket-Key`; only a `101` wit
 accepted; a ping gets a pong (while under 20 KiB is unsent; past that the ping goes unanswered, so a server that pings
 and never reads cannot grow the queue), a close gets a close back and ends the stream; text frames and extensions are errors.
 `?ed=` (Xray's early data in the handshake) is dropped from the path; early data is not used. With
-`httpupgrade: true` the stream carries data as is after the `101`, without frames (Xray's HTTPUpgrade transport).
-With TLS the ALPN is always `http/1.1`.
+`httpupgrade: true` the stream carries data as is after the `101`, without frames (the HTTPUpgrade transport of Xray
+and sing-box); the request has no `Sec-WebSocket-Key` or `Sec-WebSocket-Version`, and no `Sec-WebSocket-Accept` is
+needed in the answer: a sing-box server takes a request with a key for a real WebSocket and answers 404, Xray takes
+both. With TLS the ALPN is always `http/1.1`.
 
 ### 11.11 TrustTunnel
 
