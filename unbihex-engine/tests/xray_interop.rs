@@ -3,8 +3,9 @@
 //! Runs only when `XRAY_BIN` points to an `xray` binary, e.g.
 //! `XRAY_BIN=/path/to/xray cargo test --test xray_interop`.
 //! Covers VLESS + TLS + Vision and VLESS + REALITY + Vision with plain TCP and with
-//! inner TLS 1.3 (which makes the server switch to direct copy), XHTTP, and VMess over
-//! TCP, WebSocket and HTTPUpgrade with and without TLS.
+//! inner TLS 1.3 (which makes the server switch to direct copy), XHTTP, VLESS over
+//! WebSocket and HTTPUpgrade, VMess over TCP, WebSocket and HTTPUpgrade with and
+//! without TLS, and Trojan over TLS (TCP, WebSocket, HTTPUpgrade) and REALITY.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -875,6 +876,224 @@ async fn vmess_against_xray() {
                     vmess_wrap_and_close(&ob, echo).await;
                 }
             }
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// TLS settings for a test server whose self-signed certificate names `sni`.
+fn test_tls(sni: &str) -> unbihex_engine::config::TlsConfig {
+    unbihex_engine::config::TlsConfig {
+        enabled: true,
+        sni: Some(sni.into()),
+        alpn: Vec::new(),
+        pinned_sha256: Vec::new(),
+        fingerprint: None,
+    }
+}
+
+/// `streamSettings` of an Xray inbound: `network` with path `/p`, TLS with `dir`'s
+/// certificate when `tls` is set.
+fn stream_settings(network: &str, tls: bool, dir: &std::path::Path) -> serde_json::Value {
+    let mut stream = serde_json::json!({ "network": network });
+    if network != "tcp" {
+        stream[format!("{network}Settings")] = serde_json::json!({ "path": "/p" });
+    }
+    if tls {
+        stream["security"] = "tls".into();
+        stream["tlsSettings"] = serde_json::json!({ "certificates": [{
+            "certificateFile": dir.join("cert.pem"), "keyFile": dir.join("key.pem")
+        }]});
+    }
+    stream
+}
+
+/// VLESS over WebSocket and HTTPUpgrade against Xray's VLESS inbound, with and
+/// without TLS; TCP and UDP echo through each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vless_websocket_against_xray() {
+    use unbihex_engine::config::{Secret, VlessConfig};
+    use unbihex_engine::outbound::ws::WsConfig;
+
+    let Some(bin) = xray_bin() else {
+        eprintln!("XRAY_BIN is not set: skipping the VLESS WebSocket interop test");
+        return;
+    };
+    init_tracing();
+    let pem = cert("vless-ws.test");
+    let echo = tcp_echo().await;
+    let uecho = udp_echo().await;
+    let dir = std::env::temp_dir().join(format!("unbihex-pem-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("cert.pem"), &pem.cert_pem).unwrap();
+    std::fs::write(dir.join("key.pem"), &pem.key_pem).unwrap();
+
+    for network in ["ws", "httpupgrade"] {
+        for tls in [true, false] {
+            let port = free_port();
+            let config = serde_json::json!({
+                "log": { "loglevel": "debug" },
+                "inbounds": [{
+                    "listen": "127.0.0.1", "port": port, "protocol": "vless",
+                    "settings": { "clients": [{ "id": UUID }], "decryption": "none" },
+                    "streamSettings": stream_settings(network, tls, &dir)
+                }],
+                "outbounds": [loopback_freedom()]
+            });
+            let _xray = start_xray(&bin, config).await;
+            let cfg = VlessConfig {
+                tag: "vless-ws".into(),
+                server: "127.0.0.1".into(),
+                port,
+                uuid: Secret(UUID.into()),
+                tls: tls.then(|| test_tls("vless-ws.test")),
+                allow_plaintext: !tls,
+                flow: None,
+                reality: None,
+                fragment: None,
+                xhttp: None,
+                ws: Some(WsConfig {
+                    path: "/p?ed=2048".into(),
+                    host: Some("cdn.test".into()),
+                    httpupgrade: network == "httpupgrade",
+                }),
+            };
+            let build = |cfg: &VlessConfig| {
+                VlessOutbound::new(cfg, endpoint(port), Arc::new(SocketFactory::default()))
+                    .unwrap()
+                    .with_extra_roots(cfg, vec![pem.cert_der.clone()])
+                    .unwrap()
+            };
+            eprintln!("vless {network} tls={tls}");
+            let ob = build(&cfg);
+            plain_roundtrip(&ob, echo).await;
+            udp_roundtrip(&ob, uecho).await;
+            // A wrong path is refused at the Upgrade.
+            let mut wrong = cfg.clone();
+            wrong.ws.as_mut().unwrap().path = "/other".into();
+            let r = build(&wrong).connect_tcp(&session(echo)).await;
+            assert!(r.is_err(), "wrong path must fail");
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Trojan against Xray's Trojan inbound: TLS over TCP, WebSocket and HTTPUpgrade,
+/// and REALITY; TCP and UDP echo through each, and a wrong password gets nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trojan_against_xray() {
+    use unbihex_engine::config::{Secret, TrojanConfig};
+    use unbihex_engine::outbound::trojan::TrojanOutbound;
+    use unbihex_engine::outbound::ws::WsConfig;
+
+    let Some(bin) = xray_bin() else {
+        eprintln!("XRAY_BIN is not set: skipping the Trojan interop test");
+        return;
+    };
+    init_tracing();
+    let pem = cert("trojan.test");
+    let site = cert("reality.test");
+    let echo = tcp_echo().await;
+    let uecho = udp_echo().await;
+    let dir = std::env::temp_dir().join(format!("unbihex-pem-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("cert.pem"), &pem.cert_pem).unwrap();
+    std::fs::write(dir.join("key.pem"), &pem.key_pem).unwrap();
+    let password = "p@ss:word/\u{43f}\u{430}\u{440}\u{43e}\u{43b}\u{44c}";
+    let clients = serde_json::json!([{ "password": password }]);
+
+    for network in ["tcp", "ws", "httpupgrade", "reality"] {
+        let port = free_port();
+        let mut inbounds = Vec::new();
+        let mut reality = None;
+        let stream = if network == "reality" {
+            let (private_key, public_key) = x25519_keys(&bin);
+            let (dest, site_inbound) = site_inbound(&site, &dir);
+            inbounds.push(site_inbound);
+            reality = Some(RealityConfig {
+                server_name: "reality.test".into(),
+                public_key,
+                short_id: "0123abcd".into(),
+                alpn: Vec::new(),
+                fingerprint: Some("chrome".into()),
+            });
+            serde_json::json!({ "network": "tcp", "security": "reality",
+                "realitySettings": {
+                    "dest": dest.to_string(), "serverNames": ["reality.test"],
+                    "privateKey": private_key, "shortIds": ["0123abcd"]
+                }})
+        } else {
+            stream_settings(network, true, &dir)
+        };
+        inbounds.insert(
+            0,
+            serde_json::json!({
+                "listen": "127.0.0.1", "port": port, "protocol": "trojan",
+                "settings": { "clients": clients }, "streamSettings": stream
+            }),
+        );
+        let _xray = start_xray(
+            &bin,
+            serde_json::json!({
+                "log": { "loglevel": "debug" }, "inbounds": inbounds,
+                "outbounds": [loopback_freedom()]
+            }),
+        )
+        .await;
+        let cfg = TrojanConfig {
+            tag: "trojan".into(),
+            server: "127.0.0.1".into(),
+            port,
+            password: Secret(password.into()),
+            tls: reality.is_none().then(|| test_tls("trojan.test")),
+            reality,
+            fragment: None,
+            ws: matches!(network, "ws" | "httpupgrade").then(|| WsConfig {
+                path: "/p".into(),
+                host: None,
+                httpupgrade: network == "httpupgrade",
+            }),
+        };
+        let build = |cfg: &TrojanConfig| {
+            TrojanOutbound::new(cfg, endpoint(port), Arc::new(SocketFactory::default()))
+                .unwrap()
+                .with_extra_roots(cfg, vec![pem.cert_der.clone()])
+                .unwrap()
+        };
+        eprintln!("trojan {network}");
+        let ob = build(&cfg);
+        plain_roundtrip(&ob, echo).await;
+        udp_roundtrip(&ob, uecho).await;
+        // Several connections in parallel.
+        let ob = Arc::new(ob);
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let ob = ob.clone();
+            tasks.push(tokio::spawn(async move { plain_roundtrip(ob.as_ref(), echo).await }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        // ClientHello fragmentation on top of TLS and REALITY.
+        if network == "tcp" || network == "reality" {
+            let mut frag = cfg.clone();
+            frag.fragment = Some(unbihex_engine::outbound::fragment::FragmentConfig {
+                length: "30-60".into(),
+                interval: "1-3".into(),
+            });
+            plain_roundtrip(&build(&frag), echo).await;
+        }
+        // A wrong password: Xray (no fallback) closes without relaying anything.
+        let mut wrong = cfg.clone();
+        wrong.password = Secret("wrong".into());
+        if let Ok(mut s) = build(&wrong).connect_tcp(&session(echo)).await {
+            let _ = s.write_all(b"ping").await;
+            let _ = s.flush().await;
+            let mut b = [0u8; 4];
+            let r = tokio::time::timeout(Duration::from_secs(10), s.read(&mut b))
+                .await
+                .expect("a wrong password must be cut off");
+            assert!(!matches!(r, Ok(n) if n > 0), "a wrong password must not be relayed");
         }
     }
     let _ = std::fs::remove_dir_all(dir);

@@ -13,7 +13,8 @@
 Unbihex — клиентское прокси-ядро. Оно принимает трафик (TUN со всем трафиком устройства, локальные SOCKS5/HTTP-порты),
 маршрутизирует соединения по правилам и отправляет их напрямую, блокирует или передаёт через прокси-сервер.
 
-Протоколы: VLESS (TLS, REALITY, XTLS Vision, XHTTP, XUDP), Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
+Протоколы: VLESS (TLS, REALITY, XTLS Vision, XHTTP, WebSocket, XUDP), VMess, Trojan,
+Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
 TLS и REALITY отправляют ClientHello как у Chrome. Правила понимают домены, адреса, порты, базы geosite/geoip и
 rule-set-ы sing-box. Маршрутизацию и outbound-ы можно сменить на лету, не разрывая открытые соединения.
 
@@ -43,7 +44,7 @@ unbihex-engine/
 │  ├─ address.rs     # Address, TargetAddr, адреса в формате SOCKS5
 │  ├─ session.rs     # Session, Network
 │  ├─ config.rs      # конфиг (§5) и проверки
-│  ├─ link.rs        # share-ссылки vless://, ss://, hy2:// (§5.4)
+│  ├─ link.rs        # share-ссылки vless://, vmess://, trojan://, ss://, hy2://, tt:// (§5.4)
 │  ├─ router.rs      # правила (§6)
 │  ├─ rules/         # geosite/geoip (geodata.rs), .srs (srs.rs), succinct-trie, наборы IP (§6.2)
 │  ├─ dispatcher.rs  # выбор outbound, проверки адресов, горячая замена таблицы (§7)
@@ -53,7 +54,7 @@ unbihex-engine/
 │  ├─ net/socket.rs  # SocketFactory (§9)
 │  ├─ dns/           # fake-IP (§8.1), DNS-сервер TUN (§8.2), клиент к upstream и резолверы (§8.3)
 │  ├─ inbound/       # socks, http, mixed, tun (§10); vless, reality, reality_shape, mux — только feature server (§16)
-│  └─ outbound/      # vless, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
+│  └─ outbound/      # vless, trojan, vmess, ws, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
 │                    # hysteria2/, shadowsocks, socks, direct, block (§11)
 └─ tests/            # integration.rs, xray_interop.rs, hysteria2_interop.rs (§15)
 ```
@@ -226,7 +227,8 @@ impl Instance {
 - В TLS **нет** опции отключения проверки сертификата.
 - SOCKS/HTTP/mixed-inbound без `users` разрешён только на loopback-адресе: иначе это открытый прокси.
 - VLESS без TLS и REALITY запрещён без `allow_plaintext: true` (§11.1). Vision требует TLS или REALITY и не работает
-  поверх XHTTP. `tls` и `reality` вместе — ошибка.
+  поверх XHTTP, WebSocket и HTTPUpgrade (REALITY у VLESS — тоже). `tls` и `reality` вместе — ошибка. Trojan требует
+  TLS или REALITY (§11.12).
 - Не больше одного tun-inbound-а; `ipv4` — /30 или короче; `mtu` ≥ 576. Mobile (`tun_fd`): `name`, `auto_route` и
   адреса игнорируются, ими управляет ОС; без tun-inbound-а `tun_fd` — ошибка.
 - `route.default_interface` не пустой; `route.default_mark` не 0 и только на Linux.
@@ -247,15 +249,17 @@ impl Instance {
 ### 5.4 Share-ссылки (`type: "link"`)
 
 Outbound `{"type": "link", "tag", "url", "allow_plaintext"?, "fragment"?}` разбирает ссылку при сборке outbound-а;
-`allow_plaintext` и `fragment` переносятся в VLESS, `fragment` — ещё в VMess с TLS и TrustTunnel без `anti_dpi`. Разбор (`link.rs`), все параметры percent-decoded, host может быть
+`allow_plaintext` и `fragment` переносятся в VLESS, `fragment` — ещё в Trojan, VMess с TLS и TrustTunnel без `anti_dpi`. Разбор (`link.rs`), все параметры percent-decoded, host может быть
 IPv6 в скобках:
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:
   - `security=tls|reality|none`; `sni` / `serverName` (по умолчанию host), `alpn`, `fp` / `fingerprint` (§11.2);
     для REALITY — `pbk` / `publicKey`, `sid` / `shortId`;
-  - `type=tcp|raw` (или нет) либо `type=xhttp|splithttp` с `path`, `host`, `mode`, `extra` (JSON настроек Xray, §11.5);
+  - `type=tcp|raw` (или нет) либо `type=xhttp|splithttp` с `path`, `host`, `mode`, `extra` (JSON настроек Xray, §11.5),
+    либо `type=ws|httpupgrade` с `path` и `host` (§11.10; `host` — первый из списка через запятую, без `sni` имя для
+    TLS берётся из него — как в v2rayN); Vision и REALITY поверх WebSocket — ошибка, как в Xray;
   - `flow=xtls-rprx-vision` (`-udp443` тоже);
-  - другие `type` (`ws`, `grpc`, …; WebSocket пока есть только у VMess), `flow`, `encryption`, `headerType`, а также `security` — понятная ошибка
+  - другие `type` (`grpc`, `h2`, …), `flow`, `encryption`, `headerType`, а также `security` — понятная ошибка
     `Unsupported("...")`.
 - `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002) и legacy `ss://<base64(method:password@host:port)>#name`;
   base64 с паддингом и без. Плагины (`?plugin=`) — ошибка.
@@ -270,6 +274,10 @@ IPv6 в скобках:
   `tcp`/`raw` без маскировки заголовка, `ws`, `httpupgrade` (§11.10); `host` — первый из списка через запятую; без
   `sni` имя для TLS берётся из `host`, затем сервера (как в v2rayN). Отклоняются: другие транспорты (`grpc`, `h2`,
   `xhttp`, …), `headerType` кроме `none`, `security` кроме `tls`, `allowInsecure=1`, шифры `none`/`zero`.
+- `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, по умолчанию `tls`; `sni` / `peer` /
+  `serverName`, `alpn`, `fp`, для REALITY — `pbk`, `sid`; `type=tcp|raw|ws|httpupgrade` с `path` и `host` (как у
+  VLESS, без `sni` имя для TLS у WebSocket — из `host`). Отклоняются: `security=none` и другие, другие транспорты,
+  `headerType` кроме `none`, `flow`, `allowInsecure=1`, пустой пароль.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, версии 0–2, §11.11): `hostname`, `addresses` (порт по умолчанию
   443), `custom_sni`, `has_ipv6`, логин и пароль, `certificate` (цепочка DER), `anti_dpi` → `fragment`, `name`.
   Отклоняются: версия новее 2, `skip_verification`, HTTP/3, `client_random_prefix` / `client_random_auth_key`,
@@ -381,7 +389,7 @@ impl Dispatcher {
      `msftconnecttest.com`, `msftncsi.com` (проверка подключения Windows сравнивает настоящие адреса, с fake-IP значок
      сети показывает «нет интернета»), `local`, `lan`, `localdomain`, `home.arpa`, `internal`, `localhost`. Пустой
      список отключает исключения.
-  3. A → fake-IP, TTL = `dns.ttl`, NOERROR — и для имён, ведущих в `direct`: direct резолвит настоящий адрес сам (§11.13).
+  3. A → fake-IP, TTL = `dns.ttl`, NOERROR — и для имён, ведущих в `direct`: direct резолвит настоящий адрес сам (§11.14).
   4. AAAA, HTTPS, SVCB (28/65/64) → NOERROR без ответов: IPv6 и ECH/IP-hints в обход fake-IP не появляются.
      PTR адреса fake-IP (`…in-addr.arpa` из пула) → имя, на которое он выдан, или NXDOMAIN; в upstream не уходит.
   5. Остальные типы (MX, TXT, прочие PTR …) и однословные имена пересылаются в upstream как UDP-сессия через Dispatcher (inbound
@@ -514,7 +522,8 @@ impl SocketFactory {
 ```json
 { "type": "vless", "tag": "proxy", "server": "example.com", "port": 443, "uuid": "<uuid>",
   "tls": { "sni": "example.com", "alpn": ["h2"], "fingerprint": "chrome", "pinned_sha256": [] },
-  "reality": null, "flow": "xtls-rprx-vision", "xhttp": null, "fragment": null, "allow_plaintext": false }
+  "reality": null, "flow": "xtls-rprx-vision", "xhttp": null, "ws": null, "fragment": null,
+  "allow_plaintext": false }
 ```
 
 Запрос клиента, один раз в начале потока:
@@ -535,7 +544,8 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = домен (1 B длина + байты), 0x0
 - UDP (command 0x02): каждый пакет в обе стороны — `length u16 BE | payload`; один VLESS-поток — один адрес назначения.
   С Vision UDP идёт как XUDP (§11.4).
 - Транспорт: TCP через SocketFactory, затем TLS (§11.2) или REALITY (§11.3); вместо прямого TCP может быть XHTTP
-  (§11.5). Без TLS и REALITY нужен `allow_plaintext: true` — иначе ошибка конфига: UUID и трафик шли бы открытым текстом.
+  (§11.5), а поверх TCP или TLS — WebSocket или HTTPUpgrade (§11.10; без Vision и REALITY, как в Xray). Без TLS и REALITY нужен
+  `allow_plaintext: true` — иначе ошибка конфига: UUID и трафик шли бы открытым текстом.
 - `uuid` разбирается из строкового вида, неверный — ошибка конфига.
 
 ### 11.2 TLS-клиент
@@ -731,7 +741,7 @@ VLESS внутри обычных на вид HTTP-запросов, совме�
 
 ### 11.10 WebSocket и HTTPUpgrade
 
-`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false}` (у VMess). Клиентская часть RFC 6455 поверх TCP или
+`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false}` (у VLESS, VMess и Trojan). Клиентская часть RFC 6455 поверх TCP или
 TLS: `GET <path>` с `Host` (из `host`, иначе TLS SNI, иначе сервер — как у Xray), User-Agent текущего Chrome,
 `Upgrade: websocket`, случайный `Sec-WebSocket-Key`; ответ — только `101` с `Upgrade: websocket` и верным
 `Sec-WebSocket-Accept`. Данные — бинарные кадры с маской (до 16 КиБ), принимаются кадры до 1 МиБ; ping получает pong
@@ -770,18 +780,41 @@ TLS: `GET <path>` с `Host` (из `host`, иначе TLS SNI, иначе сер�
   данных возвращают одну единицу этого лимита (подряд — по-прежнему не больше 100); включено только у TrustTunnel.
 - Не реализованы: HTTP/3, `client_random_prefix` / `client_random_auth_key`, ICMP (`_icmp`), проверка `_check`.
 
-### 11.12 SOCKS5-клиент
+### 11.12 Trojan
+
+Формат на проводе — как у Xray и sing-box (исходники Xray `proxy/trojan/protocol.go`):
+
+```json
+{ "type": "trojan", "tag": "tj", "server": "tj.example", "port": 443, "password": "…",
+  "tls": { "sni": "tj.example", "fingerprint": "chrome" }, "reality": null, "ws": null, "fragment": null }
+```
+
+```
+запрос:   hex(SHA-224(password)) (56 B) | CRLF | command (1 B) | atyp | address | port | CRLF | payload…
+command:  0x01 = TCP, 0x03 = UDP;  atyp/address/port — как в SOCKS5 (0x01 IPv4, 0x03 домен, 0x04 IPv6), port BE
+UDP-пакет (в обе стороны): atyp | address | port | length (2 B BE) | CRLF | payload
+```
+
+- Пароль — любая непустая строка; на провод уходят 56 строчных hex-цифр его SHA-224. Ответного заголовка нет: всё,
+  что пришло от сервера, — данные. Сервер без нужного пароля уводит соединение на свой fallback или закрывает его.
+- Заголовок уходит вместе с первыми данными клиента или один через 5 мс, как у VLESS (§11.1).
+- UDP (command 0x03): один поток на адрес назначения; заголовок — с первым пакетом. Данных в пакете до 8192 байт, как
+  у Xray (больший пакет — ошибка); адрес в ответных пакетах не сверяется (Xray пишет туда адрес, куда отправил).
+- Нужен TLS (§11.2, фрагментация §11.6) или REALITY (§11.3); без них, с обоими сразу и с пустым паролем — ошибка
+  конфига. Транспорты: TCP, WebSocket и HTTPUpgrade (§11.10) поверх TLS. REALITY — только поверх TCP, как в Xray.
+
+### 11.13 SOCKS5-клиент
 
 RFC 1928/1929: CONNECT, опционально логин и пароль. Домены передаются как ATYP 3, без локального резолвинга.
 `connect_udp` → `Error::Unsupported` (DNS через такой outbound идёт по TCP, §8.2).
 
-### 11.13 Direct
+### 11.14 Direct
 
 - TCP: домен резолвится (§8.3) и проверяется Dispatcher-ом (§6.1); адреса пробуются по очереди с таймаутом 5 с на
   адрес. UDP: `udp_bind` и `connect` на цель. Сокеты — только из SocketFactory.
 - Цель — fake-IP без отображения — ошибка (защита от петли).
 
-### 11.14 Block
+### 11.15 Block
 
 `connect_tcp` и `connect_udp` сразу возвращают `Error::Blocked`; входящее соединение закрывается (TCP RST, если стек
 позволяет). Имена, которые блокирует доменное правило, DNS-сервер TUN не резолвит (§8.2).
@@ -848,7 +881,7 @@ const char *unbihex_version(void);
 
 ## 14. Безопасность и надёжность
 
-- Каждая длина из сети проверяется до выделения памяти: домен ≤ 255, SS-чанк ≤ 0x3FFF, VLESS UDP ≤ 65 535,
+- Каждая длина из сети проверяется до выделения памяти: домен ≤ 255, SS-чанк ≤ 0x3FFF, VLESS UDP ≤ 65 535, Trojan UDP ≤ 8192,
   HTTP-заголовки ≤ 16 КБ, адрес Hysteria 2 ≤ 2048, сообщения и дополнение Hysteria 2 ≤ 2048 / 4096, кадр WebSocket
   ≤ 1 МиБ, заголовок ответа VMess ≤ 259, UDP-кадр TrustTunnel ≤ 65 571.
 - Каждое чтение рукопожатия идёт под таймаутом `handshake_timeout_secs`.
@@ -871,9 +904,10 @@ const char *unbihex_version(void);
   SOCKS5, Shadowsocks (KDF и шифрование), Vision, XUDP, REALITY, отпечаток Chrome, X25519MLKEM768, фрагментация,
   XHTTP (построитель запросов, дополнение, метаданные), Hysteria 2 (varint, кадры, сборка UDP, Salamander), VMess
   (ключ пользователя по вектору v2ray, KDF, раскладка заголовка, чанки с маской и дополнением, перенос счётчика,
-  поток и UDP против своего сервера), WebSocket / HTTPUpgrade, TrustTunnel (кадры UDP, мультиплексор, поток через
+  поток и UDP против своего сервера), Trojan (SHA-224 пароля, заголовок, UDP-пакеты по байту), WebSocket /
+  HTTPUpgrade, TrustTunnel (кадры UDP, мультиплексор, поток через
   настоящий TLS + HTTP/2 с собственным сертификатом и другим SNI, 407, чужое имя в сертификате, пустые DATA-кадры с
-  патчем h2 и без), ссылки `vmess://` и `tt://`, TUN (sniffing, окна, стек), SocketFactory.
+  патчем h2 и без), ссылки `vmess://`, `trojan://` и `tt://`, VLESS с `type=ws|httpupgrade`, TUN (sniffing, окна, стек), SocketFactory.
 - **Интеграционные** (`tests/integration.rs`, всё на `127.0.0.1` без интернета): SOCKS → direct → echo; HTTP CONNECT и
   обычный запрос; keep-alive не пускает к другому хосту; SOCKS → VLESS без TLS (TCP и UDP) и с TLS; Shadowsocks всеми
   методами (TCP и UDP); правило block; outbound `link` и аутентификация SOCKS; IP-правила для имён и запрет петель;
@@ -881,7 +915,9 @@ const char *unbihex_version(void);
   несуществующий `default_interface`.
 - **Против настоящих серверов**, если заданы `XRAY_BIN` / `HYSTERIA_BIN` (иначе тесты сразу выходят): `xray_interop.rs`
   — Vision и REALITY, XHTTP во всех режимах, CDN-формат XHTTP (GET packet-up, tokenish, свои session ID) по HTTP/2+TLS,
-  HTTP/1.1+TLS и HTTP/1.1 без TLS, VMess обоими шифрами поверх TCP, WebSocket и HTTPUpgrade с TLS и без (TCP и UDP);
+  HTTP/1.1+TLS и HTTP/1.1 без TLS, VLESS поверх WebSocket и HTTPUpgrade с TLS и без, VMess обоими шифрами поверх TCP,
+  WebSocket и HTTPUpgrade с TLS и без, Trojan поверх TLS (TCP, WebSocket, HTTPUpgrade) и REALITY с фрагментацией и
+  неверным паролем (везде TCP и UDP);
   `hysteria2_interop.rs` — Hysteria 2 (официальный сервер и Xray) с Salamander и без:
   параллельные TCP и UDP, фрагменты, отказы при неверных auth / корне / SNI / пине и при отказе protect.
 - Тестовый сервер — §16.3.

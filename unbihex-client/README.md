@@ -56,7 +56,9 @@ VPN-клиент для подписок на собственном ядре **
 Работает:
 
 - **VLESS** с TLS или REALITY, в том числе XTLS Vision (`flow=xtls-rprx-vision`) и UDP через XUDP;
-  транспорты TCP и XHTTP (режимы packet-up, stream-up и stream-one поверх HTTP/2; packet-up — и поверх HTTP/1.1).
+  транспорты TCP и XHTTP (режимы packet-up, stream-up и stream-one поверх HTTP/2; packet-up — и поверх HTTP/1.1),
+  WebSocket и HTTPUpgrade (без Vision и REALITY, как в Xray).
+- **Trojan** с TLS или REALITY, TCP и UDP; транспорты TCP, WebSocket и HTTPUpgrade.
 - **Shadowsocks** с AEAD-шифрами aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
 - **SOCKS5**.
 - **Hysteria2**: TCP и UDP поверх QUIC/TLS, в том числе Salamander; ссылки и JSON-подписки Xray/sing-box.
@@ -66,8 +68,8 @@ VPN-клиент для подписок на собственном ядре **
 
 Пока не поддерживается — такие серверы видны в списке, но серые:
 
-- протоколы VMess, Trojan, Hysteria 1, TUIC, WireGuard;
-- у VLESS — транспорты ws, grpc, httpupgrade, XHTTP поверх HTTP/3 и другие виды `flow`, кроме Vision;
+- протоколы Hysteria 1, TUIC, WireGuard;
+- у VLESS — транспорт grpc, XHTTP поверх HTTP/3 и другие виды `flow`, кроме Vision;
 - у Shadowsocks — Shadowsocks 2022 и плагины.
 
 VLESS без TLS и REALITY ядро отклоняет намеренно: UUID и трафик шли бы открытым текстом.

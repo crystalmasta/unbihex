@@ -607,7 +607,7 @@ mod tests {
         let c = Client::open(&dir);
         let r = c
             .add_input(&format!(
-                "vless://{UUID}@a.com:443?security=tls#A\ntrojan://p@b.com:443#B\nnonsense"
+                "vless://{UUID}@a.com:443?security=tls#A\nhysteria://p@b.com:443#B\nnonsense"
             ))
             .await
             .unwrap();

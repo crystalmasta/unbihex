@@ -375,13 +375,15 @@ pub enum OutboundConfig {
     Hysteria2(Hysteria2Config),
     /// VMess (AEAD header) over TCP, TLS, WebSocket or HTTPUpgrade.
     Vmess(VmessConfig),
+    /// Trojan over TLS or REALITY, optionally inside WebSocket or HTTPUpgrade.
+    Trojan(TrojanConfig),
     /// TrustTunnel: CONNECT over HTTP/2 and TLS.
     Trusttunnel(TrustTunnelConfig),
     /// Shadowsocks AEAD.
     Shadowsocks(ShadowsocksConfig),
     /// Upstream SOCKS5 proxy.
     Socks(SocksOutboundConfig),
-    /// A share link (`vless://`, `vmess://`, `ss://`, `hy2://`, `tt://`).
+    /// A share link (`vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, `tt://`).
     Link(LinkConfig),
     /// Connect directly.
     Direct(TagOnly),
@@ -396,6 +398,7 @@ impl OutboundConfig {
             OutboundConfig::Vless(c) => &c.tag,
             OutboundConfig::Hysteria2(c) => &c.tag,
             OutboundConfig::Vmess(c) => &c.tag,
+            OutboundConfig::Trojan(c) => &c.tag,
             OutboundConfig::Trusttunnel(c) => &c.tag,
             OutboundConfig::Shadowsocks(c) => &c.tag,
             OutboundConfig::Socks(c) => &c.tag,
@@ -410,6 +413,7 @@ impl OutboundConfig {
             OutboundConfig::Vless(c) => Some((&c.server, c.port)),
             OutboundConfig::Hysteria2(c) => Some((&c.server, c.port)),
             OutboundConfig::Vmess(c) => Some((&c.server, c.port)),
+            OutboundConfig::Trojan(c) => Some((&c.server, c.port)),
             OutboundConfig::Trusttunnel(c) => c.addresses.first().and_then(|a| split_host_port(a)),
             OutboundConfig::Shadowsocks(c) => Some((&c.server, c.port)),
             OutboundConfig::Socks(c) => Some((&c.server, c.port)),
@@ -461,6 +465,86 @@ impl VmessConfig {
             if !self.tls.as_ref().is_some_and(|t| t.enabled) {
                 return Err(Error::config("vmess: fragment needs tls"));
             }
+            f.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Trojan outbound settings (SPEC §11.12).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrojanConfig {
+    /// Outbound tag.
+    pub tag: String,
+    /// Server host name or IP.
+    pub server: String,
+    /// Server port.
+    pub port: u16,
+    /// Password; the server sees its hex SHA-224.
+    pub password: Secret,
+    /// TLS settings; Trojan needs TLS or REALITY.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    /// REALITY instead of ordinary TLS (raw TCP only, as in Xray).
+    #[serde(default)]
+    pub reality: Option<RealityConfig>,
+    /// Split the TLS ClientHello into small records (DPI evasion).
+    #[serde(default)]
+    pub fragment: Option<crate::outbound::fragment::FragmentConfig>,
+    /// WebSocket or HTTPUpgrade transport.
+    #[serde(default)]
+    pub ws: Option<crate::outbound::ws::WsConfig>,
+}
+
+impl TrojanConfig {
+    /// Checks the password, security and transport.
+    pub fn validate(&self) -> Result<()> {
+        if self.password.expose().is_empty() {
+            return Err(Error::config(format!("outbound {}: empty trojan password", self.tag)));
+        }
+        let tls = self.tls.as_ref().is_some_and(|t| t.enabled);
+        match (&self.reality, tls) {
+            (Some(_), true) => {
+                return Err(Error::config(format!(
+                    "outbound {}: use either tls or reality",
+                    self.tag
+                )));
+            }
+            (None, false) => {
+                return Err(Error::config(format!(
+                    "outbound {}: trojan needs tls or reality",
+                    self.tag
+                )));
+            }
+            _ => {}
+        }
+        if let Some(r) = &self.reality {
+            if self.ws.is_some() {
+                return Err(Error::config(format!(
+                    "outbound {}: reality works only over raw TCP, not WebSocket",
+                    self.tag
+                )));
+            }
+            if r.server_name.trim().is_empty() {
+                return Err(Error::config("reality: server_name is required"));
+            }
+            r.public_key_bytes()?;
+            r.short_id_bytes()?;
+        }
+        for fp in [
+            self.tls.as_ref().and_then(|t| t.fingerprint.as_deref()),
+            self.reality.as_ref().and_then(|r| r.fingerprint.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            crate::outbound::fingerprint::Fingerprint::from_name(Some(fp))?;
+        }
+        if let Some(ws) = &self.ws {
+            ws.validate()?;
+        }
+        if let Some(f) = &self.fragment {
             f.validate()?;
         }
         Ok(())
@@ -662,6 +746,9 @@ pub struct VlessConfig {
     /// Carry VLESS inside XHTTP requests instead of a raw TLS connection.
     #[serde(default)]
     pub xhttp: Option<crate::outbound::xhttp::XhttpConfig>,
+    /// WebSocket or HTTPUpgrade transport (TLS or none; not REALITY or Vision).
+    #[serde(default)]
+    pub ws: Option<crate::outbound::ws::WsConfig>,
 }
 
 /// The only flow the engine implements.
@@ -734,6 +821,29 @@ impl VlessConfig {
             if self.is_vision() {
                 return Err(Error::config(format!(
                     "outbound {}: {FLOW_VISION} works only over raw TCP, not XHTTP",
+                    self.tag
+                )));
+            }
+        }
+        if let Some(ws) = &self.ws {
+            ws.validate()?;
+            let what = if ws.httpupgrade { "HTTPUpgrade" } else { "WebSocket" };
+            // Xray refuses these too: Vision and REALITY need the raw TCP connection.
+            if self.is_vision() {
+                return Err(Error::config(format!(
+                    "outbound {}: {FLOW_VISION} works only over raw TCP, not {what}",
+                    self.tag
+                )));
+            }
+            if self.reality.is_some() {
+                return Err(Error::config(format!(
+                    "outbound {}: reality works only over raw TCP or XHTTP, not {what}",
+                    self.tag
+                )));
+            }
+            if self.xhttp.is_some() {
+                return Err(Error::config(format!(
+                    "outbound {}: use either xhttp or ws",
                     self.tag
                 )));
             }
@@ -844,8 +954,8 @@ pub struct LinkConfig {
     /// Allow a `vless://` link without TLS (see [`VlessConfig::allow_plaintext`]).
     #[serde(default)]
     pub allow_plaintext: bool,
-    /// ClientHello fragmentation for a `vless://` link, and a `vmess://` link with TLS or
-    /// a `tt://` one without its own anti-DPI (see [`VlessConfig::fragment`]).
+    /// ClientHello fragmentation for a `vless://` or `trojan://` link, and a `vmess://`
+    /// link with TLS or a `tt://` one without its own anti-DPI (see [`VlessConfig::fragment`]).
     #[serde(default)]
     pub fragment: Option<crate::outbound::fragment::FragmentConfig>,
 }
@@ -1246,6 +1356,9 @@ impl Config {
             }
             if let OutboundConfig::Vmess(v) = o {
                 v.validate()?;
+            }
+            if let OutboundConfig::Trojan(t) = o {
+                t.validate()?;
             }
             if let OutboundConfig::Trusttunnel(t) = o {
                 t.validate()?;

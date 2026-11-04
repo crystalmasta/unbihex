@@ -73,6 +73,67 @@ fn vless_link(
     )
 }
 
+/// Builds a `trojan://` link from parts.
+fn trojan_link(
+    password: &str,
+    host: &str,
+    port: u64,
+    network: &str,
+    security: &str,
+    params: &[(&str, String)],
+    name: &str,
+) -> String {
+    let mut q = vec![
+        format!("type={}", enc(if network.is_empty() { "tcp" } else { network })),
+        format!("security={}", enc(if security.is_empty() { "none" } else { security })),
+    ];
+    q.extend(params.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| format!("{k}={}", enc(v))));
+    format!("trojan://{}@{}?{}#{}", enc(password), host_port(host, port), q.join("&"), enc(name))
+}
+
+/// `sni`, `alpn`, `fp` (and the REALITY keys) of an Xray `streamSettings`.
+fn xray_security_params(stream: &Value) -> Vec<(&'static str, String)> {
+    let mut params = Vec::new();
+    match str_of(stream, "security") {
+        "tls" => {
+            let t = stream.get("tlsSettings").cloned().unwrap_or(Value::Null);
+            params.push(("sni", str_of(&t, "serverName").to_string()));
+            params.push(("alpn", join_alpn(t.get("alpn"))));
+            params.push(("fp", str_of(&t, "fingerprint").to_string()));
+        }
+        "reality" => {
+            let r = stream.get("realitySettings").cloned().unwrap_or(Value::Null);
+            params.push(("sni", str_of(&r, "serverName").to_string()));
+            params.push(("pbk", str_of(&r, "publicKey").to_string()));
+            params.push(("sid", str_of(&r, "shortId").to_string()));
+            params.push(("fp", str_of(&r, "fingerprint").to_string()));
+            params.push(("spx", str_of(&r, "spiderX").to_string()));
+        }
+        _ => {}
+    }
+    params
+}
+
+/// `path` and `host` of a WebSocket or HTTPUpgrade transport (Xray's `wsSettings` /
+/// `httpupgradeSettings`, sing-box's `transport`); older configs keep the host in
+/// `headers.Host`.
+fn ws_params(t: &Value) -> Vec<(&'static str, String)> {
+    let host = match str_of(t, "host") {
+        "" => t.pointer("/headers/Host").and_then(Value::as_str).unwrap_or(""),
+        h => h,
+    };
+    vec![("path", str_of(t, "path").to_string()), ("host", host.to_string())]
+}
+
+/// The WebSocket/HTTPUpgrade settings of an Xray `streamSettings`, if it uses one.
+fn xray_ws(stream: &Value) -> Option<Value> {
+    match str_of(stream, "network") {
+        "ws" | "websocket" => Some(stream.get("wsSettings").cloned().unwrap_or(Value::Null)),
+        "httpupgrade" => Some(stream.get("httpupgradeSettings").cloned().unwrap_or(Value::Null)),
+        _ => None,
+    }
+}
+
 fn ss_link(method: &str, password: &str, host: &str, port: u64, name: &str) -> String {
     let ui = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("{method}:{password}"));
     format!("ss://{ui}@{}#{}", host_port(host, port), enc(name))
@@ -271,19 +332,9 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
         "vless" => {
             let network = str_of(&stream, "network");
             let security = str_of(&stream, "security");
-            let mut params: Vec<(&str, String)> = Vec::new();
-            if security == "tls" {
-                let t = stream.get("tlsSettings").cloned().unwrap_or(Value::Null);
-                params.push(("sni", str_of(&t, "serverName").to_string()));
-                params.push(("alpn", join_alpn(t.get("alpn"))));
-                params.push(("fp", str_of(&t, "fingerprint").to_string()));
-            } else if security == "reality" {
-                let r = stream.get("realitySettings").cloned().unwrap_or(Value::Null);
-                params.push(("sni", str_of(&r, "serverName").to_string()));
-                params.push(("pbk", str_of(&r, "publicKey").to_string()));
-                params.push(("sid", str_of(&r, "shortId").to_string()));
-                params.push(("fp", str_of(&r, "fingerprint").to_string()));
-                params.push(("spx", str_of(&r, "spiderX").to_string()));
+            let mut params = xray_security_params(&stream);
+            if let Some(t) = xray_ws(&stream) {
+                params.extend(ws_params(&t));
             }
             if network == "xhttp" || network == "splithttp" {
                 let x = stream
@@ -333,7 +384,24 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
             port,
             name,
         )),
-        "trojan" => Some(simple_link("trojan", str_of(&server, "password"), host, port, name)),
+        "trojan" => {
+            let mut params = xray_security_params(&stream);
+            if let Some(t) = xray_ws(&stream) {
+                params.extend(ws_params(&t));
+            }
+            if stream.pointer("/tlsSettings/allowInsecure") == Some(&Value::Bool(true)) {
+                params.push(("allowInsecure", "1".into()));
+            }
+            Some(trojan_link(
+                str_of(&user, "password"),
+                host,
+                port,
+                str_of(&stream, "network"),
+                str_of(&stream, "security"),
+                &params,
+                name,
+            ))
+        }
         "vmess" => {
             let net = str_of(&stream, "network");
             let net = if net.is_empty() { "tcp" } else { net };
@@ -430,6 +498,14 @@ fn xray_config(cfg: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// `path` and `host` of a sing-box `ws` or `httpupgrade` transport.
+fn sing_box_ws_params(ob: &Value, network: &str) -> Vec<(&'static str, String)> {
+    match network {
+        "ws" | "httpupgrade" => ws_params(ob.get("transport").unwrap_or(&Value::Null)),
+        _ => Vec::new(),
+    }
+}
+
 fn sing_box_outbound(ob: &Value) -> Option<String> {
     let kind = str_of(ob, "type");
     let host = str_of(ob, "server");
@@ -453,13 +529,14 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
                 .get("utls")
                 .map(|u| str_of(u, "fingerprint").to_string())
                 .unwrap_or_default();
-            let params = vec![
+            let mut params = vec![
                 ("sni", str_of(&tls, "server_name").to_string()),
                 ("alpn", join_alpn(tls.get("alpn"))),
                 ("fp", fp),
                 ("pbk", str_of(&reality, "public_key").to_string()),
                 ("sid", str_of(&reality, "short_id").to_string()),
             ];
+            params.extend(sing_box_ws_params(ob, &network));
             Some(vless_link(
                 str_of(ob, "uuid"),
                 host,
@@ -473,7 +550,25 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
         }
         "shadowsocks" => Some(ss_link(str_of(ob, "method"), str_of(ob, "password"), host, port, name)),
         "socks" => Some(socks_link(str_of(ob, "username"), str_of(ob, "password"), host, port, name)),
-        "trojan" => Some(simple_link("trojan", str_of(ob, "password"), host, port, name)),
+        "trojan" => {
+            let security = if reality_on { "reality" } else if tls_on { "tls" } else { "none" };
+            let fp = tls
+                .get("utls")
+                .map(|u| str_of(u, "fingerprint").to_string())
+                .unwrap_or_default();
+            let mut params = vec![
+                ("sni", str_of(&tls, "server_name").to_string()),
+                ("alpn", join_alpn(tls.get("alpn"))),
+                ("fp", fp),
+                ("pbk", str_of(&reality, "public_key").to_string()),
+                ("sid", str_of(&reality, "short_id").to_string()),
+            ];
+            params.extend(sing_box_ws_params(ob, &network));
+            if tls.get("insecure") == Some(&Value::Bool(true)) {
+                params.push(("allowInsecure", "1".into()));
+            }
+            Some(trojan_link(str_of(ob, "password"), host, port, &network, security, &params, name))
+        }
         "hysteria2" => {
             let mut params = vec![
                 ("security", "tls".into()),
@@ -773,13 +868,57 @@ mod tests {
                 "id":"{UUID}","flow":"xtls-rprx-vision"}},"streamSettings":{{"network":"raw","security":"tls",
                 "tlsSettings":{{"serverName":"h.example","alpn":["h2","http/1.1"]}}}}}},
                 {{"protocol":"vless","settings":{{"address":"ws.example","port":443,"id":"{UUID}"}},
-                  "streamSettings":{{"network":"ws","security":"tls"}}}}]}}"#
+                  "streamSettings":{{"network":"ws","security":"tls",
+                    "wsSettings":{{"path":"/ws","headers":{{"Host":"cdn.example"}}}}}}}}]}}"#
         );
         let links = links_from_json(&body).unwrap();
         assert_eq!(links.len(), 2);
         assert!(parse_server(&links[0]).unwrap().is_supported());
         let ws = parse_server(&links[1]).unwrap();
-        assert!(ws.unsupported.unwrap().contains("ws"));
+        assert_eq!(ws.transport, "ws+tls");
+        assert!(ws.is_supported(), "{:?}", ws.unsupported);
+        let OutboundConfig::Vless(v) = unbihex_engine::link::parse_link(&links[1], "proxy").unwrap() else {
+            panic!("not vless");
+        };
+        let w = v.ws.unwrap();
+        assert_eq!((w.path.as_str(), w.host.as_deref()), ("/ws", Some("cdn.example")));
+    }
+
+    #[test]
+    fn trojan_from_xray_and_sing_box() {
+        let xray = r#"{"outbounds":[{"tag":"proxy","protocol":"trojan","settings":{"servers":[{
+            "address":"t.example","port":443,"password":"p@ss word"}]},
+            "streamSettings":{"network":"ws","security":"tls","wsSettings":{"path":"/tj","host":"cdn.example"},
+            "tlsSettings":{"serverName":"sni.example","fingerprint":"chrome"}}}]}"#;
+        let sing_box = r#"{"outbounds":[{"type":"trojan","tag":"t","server":"1.2.3.4","server_port":8443,
+            "password":"p@ss word","tls":{"enabled":true,"server_name":"sni.example",
+            "utls":{"enabled":true,"fingerprint":"chrome"}},
+            "transport":{"type":"httpupgrade","path":"/tj","host":"cdn.example"}}]}"#;
+        for (body, transport) in [(xray, "ws+tls"), (sing_box, "httpupgrade+tls")] {
+            let links = links_from_json(body).unwrap();
+            let s = parse_server(&links[0]).unwrap();
+            assert_eq!((s.protocol.as_str(), s.transport.as_str()), ("trojan", transport));
+            assert!(s.is_supported(), "{:?}", s.unsupported);
+            let OutboundConfig::Trojan(t) = unbihex_engine::link::parse_link(&links[0], "proxy").unwrap() else {
+                panic!("not trojan");
+            };
+            assert_eq!(t.password.expose(), "p@ss word");
+            let tls = t.tls.unwrap();
+            assert_eq!(tls.sni.as_deref(), Some("sni.example"));
+            assert_eq!(tls.fingerprint.as_deref(), Some("chrome"));
+            let ws = t.ws.unwrap();
+            assert_eq!((ws.path.as_str(), ws.host.as_deref()), ("/tj", Some("cdn.example")));
+        }
+        // Xray's default security for Trojan is none: kept, and refused by the engine.
+        let plain = r#"{"outbounds":[{"protocol":"trojan","settings":{"address":"t.example","port":80,"password":"p"}}]}"#;
+        let s = parse_server(&links_from_json(plain).unwrap()[0]).unwrap();
+        assert!(s.unsupported.unwrap().contains("без TLS"));
+        let reality = r#"{"outbounds":[{"type":"trojan","tag":"r","server":"1.2.3.4","server_port":443,"password":"p",
+            "tls":{"enabled":true,"server_name":"www.example.com",
+            "reality":{"enabled":true,"public_key":"wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE","short_id":"ab"}}}]}"#;
+        let s = parse_server(&links_from_json(reality).unwrap()[0]).unwrap();
+        assert_eq!(s.transport, "tcp+reality");
+        assert!(s.is_supported(), "{:?}", s.unsupported);
     }
 
     #[test]

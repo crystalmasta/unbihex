@@ -12,6 +12,7 @@ pub mod shadowsocks;
 pub mod socks;
 pub mod tls;
 pub mod tls_stream;
+pub mod trojan;
 pub mod trusttunnel;
 pub mod vision;
 pub mod vless;
@@ -169,6 +170,10 @@ pub async fn build_outbound(
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
             Arc::new(vmess::VmessOutbound::new(c, server, ctx.sockets.clone())?)
         }
+        OutboundConfig::Trojan(c) => {
+            let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
+            Arc::new(trojan::TrojanOutbound::new(c, server, ctx.sockets.clone())?)
+        }
         OutboundConfig::Trusttunnel(c) => {
             c.validate()?;
             let server = trusttunnel::resolve(c, &ctx.server_resolver).await?;
@@ -194,6 +199,7 @@ pub async fn build_outbound(
                     v.fragment = c.fragment.clone();
                 }
                 OutboundConfig::Vmess(v) if v.tls.is_some() => v.fragment = c.fragment.clone(),
+                OutboundConfig::Trojan(t) => t.fragment = c.fragment.clone(),
                 OutboundConfig::Trusttunnel(t) if t.fragment.is_none() => {
                     t.fragment = c.fragment.clone()
                 }

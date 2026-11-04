@@ -1,5 +1,5 @@
 //! Share links: display metadata for any common scheme, and the outbound the
-//! engine needs for the ones it supports (`vless://`, `vmess://`, `ss://`,
+//! engine needs for the ones it supports (`vless://`, `vmess://`, `trojan://`, `ss://`,
 //! `socks://`, `hy2://`, `tt://`).
 
 use base64::Engine as _;
@@ -260,7 +260,7 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
         "hysteria2" | "hy2" if json_options_dropped(link) => {
             Some("в профиле есть настройки Hysteria 2, которых клиент пока не поддерживает".into())
         }
-        "vless" | "vmess" | "ss" | "hysteria2" | "hy2" | "tt" => match unbihex_engine::link::parse_link(link, "proxy") {
+        "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "hy2" | "tt" => match unbihex_engine::link::parse_link(link, "proxy") {
             Ok(OutboundConfig::Vless(v)) if v.is_plaintext() => {
                 Some("VLESS без TLS передаёт UUID и трафик открыто".into())
             }
@@ -268,7 +268,6 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
             Err(e) => Some(explain_engine_error(&e.to_string())),
         },
         "socks" | "socks5" => socks_parts(link).err().map(|e| e.to_string()),
-        "trojan" => Some("Trojan пока не поддерживается ядром".into()),
         "hysteria" => Some("Hysteria 1 пока не поддерживается ядром".into()),
         "tuic" => Some("TUIC пока не поддерживается ядром".into()),
         "wireguard" | "wg" => Some("WireGuard пока не поддерживается ядром".into()),
@@ -290,6 +289,24 @@ pub fn explain_engine_error(msg: &str) -> String {
             return "VMess без проверки сертификата не поддерживается".into();
         }
     }
+    if m.contains("trojan") {
+        if m.contains("insecure") {
+            return "Trojan без проверки сертификата не поддерживается".into();
+        }
+        if m.contains("needs tls") {
+            return "Trojan без TLS или REALITY не поддерживается".into();
+        }
+        if m.contains("password") {
+            return "в ссылке Trojan нет пароля".into();
+        }
+    }
+    if m.contains("not websocket") || m.contains("not httpupgrade") {
+        return if m.contains("reality") {
+            "REALITY работает только поверх TCP, не WebSocket/HTTPUpgrade".into()
+        } else {
+            "Vision работает только поверх TCP, не WebSocket/HTTPUpgrade".into()
+        };
+    }
     if m.contains("pbk") || m.contains("public_key") || m.contains("short_id") {
         "неверные параметры REALITY (pbk/sid)".into()
     } else if m.contains("flow") {
@@ -299,7 +316,7 @@ pub fn explain_engine_error(msg: &str) -> String {
     } else if m.contains("xhttp") {
         format!("эти настройки XHTTP пока не поддерживаются ({msg})")
     } else if let Some(t) = m.split("type=").nth(1) {
-        let have = if m.contains("vmess") { "tcp, ws и httpupgrade" } else { "tcp и xhttp" };
+        let have = if m.contains("vless") { "tcp, xhttp, ws и httpupgrade" } else { "tcp, ws и httpupgrade" };
         format!(
             "транспорт {} пока не поддерживается (есть {have})",
             t.split_whitespace().next().unwrap_or(t)
@@ -386,7 +403,7 @@ pub fn outbound_json(server: &Server) -> Result<Value> {
         return Err(ClientError::Unsupported(why.clone()));
     }
     match server.protocol.as_str() {
-        "vless" | "vmess" | "ss" | "hysteria2" | "trusttunnel" => {
+        "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "trusttunnel" => {
             Ok(json!({ "type": "link", "tag": "proxy", "url": server.link }))
         }
         "socks" => {
@@ -436,8 +453,15 @@ mod tests {
         assert!(s.is_supported(), "{:?}", s.unsupported);
         let s = parse_server(&format!("vless://{UUID}@h.com:443?security=reality&pbk=x#B")).unwrap();
         assert!(s.unsupported.unwrap().contains("REALITY"));
-        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=ws#W")).unwrap();
-        assert!(s.unsupported.unwrap().contains("ws"));
+        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=ws&path=%2Fws#W")).unwrap();
+        assert_eq!(s.transport, "ws+tls");
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=httpupgrade#U")).unwrap();
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=ws&flow=xtls-rprx-vision#V")).unwrap();
+        assert!(s.unsupported.unwrap().contains("Vision работает только поверх TCP"));
+        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=grpc#G")).unwrap();
+        assert!(s.unsupported.unwrap().contains("grpc"));
         let s = parse_server(&format!("vless://{UUID}@h.com:80?type=tcp#P")).unwrap();
         assert!(s.unsupported.unwrap().contains("без TLS"));
     }
@@ -495,10 +519,30 @@ mod tests {
     }
 
     #[test]
-    fn trojan_and_legacy_hysteria_remain_unsupported() {
+    fn trojan_links() {
         let s = parse_server("trojan://pw@t.example:443?sni=t.example#T").unwrap();
+        assert_eq!((s.protocol.as_str(), s.name.as_str()), ("trojan", "T"));
         assert_eq!(s.transport, "tcp+tls");
-        assert!(!s.is_supported());
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        assert_eq!(outbound_json(&s).unwrap()["url"], s.link);
+        let s = parse_server("trojan://pw@[2001:db8::1]:8443?type=ws&path=%2Fws&host=cdn.example#W").unwrap();
+        assert_eq!((s.host.as_str(), s.port, s.transport.as_str()), ("2001:db8::1", 8443, "ws+tls"));
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        for (query, why) in [
+            ("security=none", "без TLS"),
+            ("allowInsecure=1", "без проверки сертификата"),
+            ("type=grpc", "grpc"),
+            ("security=reality&sni=a.example", "REALITY"),
+        ] {
+            let s = parse_server(&format!("trojan://pw@t.example:443?{query}")).unwrap();
+            let problem = s.unsupported.clone().unwrap_or_default();
+            assert!(problem.contains(why), "{query}: {problem}");
+            assert!(outbound_json(&s).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_hysteria_remains_unsupported() {
         let s = parse_server("hy2://pw@[2001:db8::1]:8443#H").unwrap();
         assert_eq!((s.protocol.as_str(), s.host.as_str(), s.port), ("hysteria2", "2001:db8::1", 8443));
         assert!(s.is_supported());

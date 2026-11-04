@@ -13,7 +13,8 @@ linked in each section. A change of engine behaviour updates this document and i
 Unbihex is a client proxy engine. It takes traffic in (a TUN with all of the device's traffic, local SOCKS5/HTTP
 ports), routes connections by rules and sends them directly, blocks them or passes them through a proxy server.
 
-Protocols: VLESS (TLS, REALITY, XTLS Vision, XHTTP, XUDP), Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
+Protocols: VLESS (TLS, REALITY, XTLS Vision, XHTTP, WebSocket, XUDP), VMess, Trojan,
+Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
 TLS and REALITY send a Chrome ClientHello. Rules understand domains, addresses, ports, geosite/geoip databases and
 sing-box rule-sets. Routing and outbounds can be replaced on the fly without dropping open connections.
 
@@ -43,7 +44,7 @@ unbihex-engine/
 │  ├─ address.rs     # Address, TargetAddr, SOCKS5-style addresses
 │  ├─ session.rs     # Session, Network
 │  ├─ config.rs      # config (§5) and checks
-│  ├─ link.rs        # vless://, ss://, hy2:// share links (§5.4)
+│  ├─ link.rs        # vless://, vmess://, trojan://, ss://, hy2://, tt:// share links (§5.4)
 │  ├─ router.rs      # rules (§6)
 │  ├─ rules/         # geosite/geoip (geodata.rs), .srs (srs.rs), succinct trie, IP sets (§6.2)
 │  ├─ dispatcher.rs  # outbound choice, address checks, hot table swap (§7)
@@ -53,7 +54,7 @@ unbihex-engine/
 │  ├─ net/socket.rs  # SocketFactory (§9)
 │  ├─ dns/           # fake IP (§8.1), TUN DNS server (§8.2), upstream client and resolvers (§8.3)
 │  ├─ inbound/       # socks, http, mixed, tun (§10); vless, reality, reality_shape, mux: `server` feature only (§16)
-│  └─ outbound/      # vless, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
+│  └─ outbound/      # vless, trojan, vmess, ws, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
 │                    # hysteria2/, shadowsocks, socks, direct, block (§11)
 └─ tests/            # integration.rs, xray_interop.rs, hysteria2_interop.rs (§15)
 ```
@@ -226,7 +227,8 @@ Outbound fields are described in §11, rules in §6, DNS in §8.
 - TLS has **no** option to disable certificate verification.
 - A SOCKS/HTTP/mixed inbound without `users` is allowed only on a loopback address: otherwise it is an open proxy.
 - VLESS without TLS or REALITY is refused unless `allow_plaintext: true` (§11.1). Vision needs TLS or REALITY and does
-  not work over XHTTP. `tls` and `reality` together are an error.
+  not work over XHTTP, WebSocket or HTTPUpgrade (neither does VLESS REALITY). `tls` and `reality` together are an
+  error. Trojan needs TLS or REALITY (§11.12).
 - At most one tun inbound; `ipv4` is /30 or shorter; `mtu` ≥ 576. Mobile (`tun_fd`): `name`, `auto_route` and the
   addresses are ignored, the OS manages them; `tun_fd` without a tun inbound is an error.
 - `route.default_interface` is not empty; `route.default_mark` is not 0 and Linux only.
@@ -247,16 +249,18 @@ to both `VpnService` and the engine.
 ### 5.4 Share links (`type: "link"`)
 
 The `{"type": "link", "tag", "url", "allow_plaintext"?, "fragment"?}` outbound parses the link when the outbound is
-built; `allow_plaintext` and `fragment` are carried into VLESS, `fragment` also into VMess with TLS and TrustTunnel
+built; `allow_plaintext` and `fragment` are carried into VLESS, `fragment` also into Trojan, VMess with TLS and TrustTunnel
 without `anti_dpi`. Parsing (`link.rs`): all parameters are
 percent-decoded, the host may be IPv6 in brackets.
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:
   - `security=tls|reality|none`; `sni` / `serverName` (the host by default), `alpn`, `fp` / `fingerprint` (§11.2);
     REALITY takes `pbk` / `publicKey`, `sid` / `shortId`;
-  - `type=tcp|raw` (or none), or `type=xhttp|splithttp` with `path`, `host`, `mode`, `extra` (Xray settings JSON, §11.5);
+  - `type=tcp|raw` (or none), or `type=xhttp|splithttp` with `path`, `host`, `mode`, `extra` (Xray settings JSON, §11.5),
+    or `type=ws|httpupgrade` with `path` and `host` (§11.10; `host` is the first of a comma list and, without `sni`,
+    the TLS name, as in v2rayN); Vision and REALITY over WebSocket are an error, as in Xray;
   - `flow=xtls-rprx-vision` (`-udp443` too);
-  - other `type` values (`ws`, `grpc`, …; only VMess has WebSocket so far), `flow`, `encryption`, `headerType` and
+  - other `type` values (`grpc`, `h2`, …), `flow`, `encryption`, `headerType` and
     `security` values give a clear
     `Unsupported("...")` error.
 - `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002) and the legacy
@@ -274,6 +278,10 @@ percent-decoded, the host may be IPv6 in brackets.
   `sni` the TLS name comes from `host`, then the server (as in v2rayN). Refused: other transports (`grpc`, `h2`,
   `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, `allowInsecure=1`, the `none`/`zero`
   ciphers.
+- `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, `tls` by default; `sni` / `peer` /
+  `serverName`, `alpn`, `fp`, and `pbk`, `sid` for REALITY; `type=tcp|raw|ws|httpupgrade` with `path` and `host` (as
+  with VLESS: without `sni` the WebSocket's TLS name comes from `host`). Refused: `security=none` and others, other
+  transports, `headerType` other than `none`, `flow`, `allowInsecure=1`, an empty password.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, versions 0–2, §11.11): `hostname`, `addresses` (port 443 by
   default), `custom_sni`, `has_ipv6`, user and password, `certificate` (a DER chain), `anti_dpi` → `fragment`, `name`.
   Refused: a version above 2, `skip_verification`, HTTP/3, `client_random_prefix` / `client_random_auth_key`, a
@@ -385,7 +393,7 @@ impl Dispatcher {
      internet"), `local`, `lan`, `localdomain`, `home.arpa`, `internal`, `localhost`. An empty list disables the
      exclusions.
   3. A → a fake IP, TTL = `dns.ttl`, NOERROR, also for names leading to `direct`: direct resolves the real address
-     itself (§11.13).
+     itself (§11.14).
   4. AAAA, HTTPS, SVCB (28/65/64) → NOERROR with no answers: no IPv6 and no ECH/IP hints that bypass the fake IPs.
      PTR of a fake address (`…in-addr.arpa` inside the pool) → the name it maps to, or NXDOMAIN; it never goes upstream.
   5. Other types (MX, TXT, other PTR …) and single-label names are forwarded to the upstream as a UDP session through the
@@ -521,7 +529,8 @@ Public specification: https://xtls.github.io/en/development/protocols/vless.html
 ```json
 { "type": "vless", "tag": "proxy", "server": "example.com", "port": 443, "uuid": "<uuid>",
   "tls": { "sni": "example.com", "alpn": ["h2"], "fingerprint": "chrome", "pinned_sha256": [] },
-  "reality": null, "flow": "xtls-rprx-vision", "xhttp": null, "fragment": null, "allow_plaintext": false }
+  "reality": null, "flow": "xtls-rprx-vision", "xhttp": null, "ws": null, "fragment": null,
+  "allow_plaintext": false }
 ```
 
 The client request, once at the start of the stream:
@@ -542,7 +551,8 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
   error.
 - UDP (command 0x02): every packet in both directions is `length u16 BE | payload`; one VLESS stream is one destination.
   With Vision, UDP goes as XUDP (§11.4).
-- Transport: TCP through the SocketFactory, then TLS (§11.2) or REALITY (§11.3); XHTTP (§11.5) may replace the raw TCP.
+- Transport: TCP through the SocketFactory, then TLS (§11.2) or REALITY (§11.3); XHTTP (§11.5) may replace the raw TCP,
+  and WebSocket or HTTPUpgrade (§11.10) may run over TCP or TLS (without Vision and REALITY, as in Xray).
   Without TLS and REALITY, `allow_plaintext: true` is required, otherwise it is a config error: the UUID and the
   traffic would cross the network in the clear.
 - `uuid` is parsed from its string form; an invalid one is a config error.
@@ -745,7 +755,7 @@ What Xray's client sends, byte for byte (Xray sources `proxy/vmess/{aead,encodin
 
 ### 11.10 WebSocket and HTTPUpgrade
 
-`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false}` (on VMess). The client side of RFC 6455 over TCP or
+`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false}` (on VLESS, VMess and Trojan). The client side of RFC 6455 over TCP or
 TLS: `GET <path>` with `Host` (from `host`, else the TLS SNI, else the server, as Xray does), today's Chrome
 User-Agent, `Upgrade: websocket`, a random `Sec-WebSocket-Key`; only a `101` with `Upgrade: websocket` and the right
 `Sec-WebSocket-Accept` is accepted. Data travels in masked binary frames (up to 16 KiB); frames up to 1 MiB are
@@ -788,18 +798,43 @@ Public specification: https://github.com/TrustTunnel/TrustTunnel/blob/master/PRO
   gives back one unit of that limit (no more than 100 in a row still); only TrustTunnel turns it on.
 - Not implemented: HTTP/3, `client_random_prefix` / `client_random_auth_key`, ICMP (`_icmp`), the `_check` probe.
 
-### 11.12 SOCKS5 client
+### 11.12 Trojan
+
+The wire format as Xray and sing-box speak it (Xray source `proxy/trojan/protocol.go`):
+
+```json
+{ "type": "trojan", "tag": "tj", "server": "tj.example", "port": 443, "password": "…",
+  "tls": { "sni": "tj.example", "fingerprint": "chrome" }, "reality": null, "ws": null, "fragment": null }
+```
+
+```
+request:    hex(SHA-224(password)) (56 B) | CRLF | command (1 B) | atyp | address | port | CRLF | payload…
+command:    0x01 = TCP, 0x03 = UDP;  atyp/address/port as in SOCKS5 (0x01 IPv4, 0x03 domain, 0x04 IPv6), port BE
+UDP packet (both ways): atyp | address | port | length (2 B BE) | CRLF | payload
+```
+
+- The password is any non-empty string; the wire carries the 56 lowercase hex digits of its SHA-224. There is no
+  response header: everything from the server is data. A server that does not know the password sends the
+  connection to its fallback or closes it.
+- The header goes out with the client's first data, or alone after 5 ms, as with VLESS (§11.1).
+- UDP (command 0x03): one stream per destination; the header rides with the first packet. A packet carries up to
+  8192 bytes of data, as with Xray (a larger one is an error); the address in response packets is not checked (Xray
+  puts there the address it sent to).
+- TLS (§11.2, fragmentation §11.6) or REALITY (§11.3) is required; neither, both at once or an empty password is a
+  config error. Transports: TCP, WebSocket and HTTPUpgrade (§11.10) over TLS. REALITY over TCP only, as in Xray.
+
+### 11.13 SOCKS5 client
 
 RFC 1928/1929: CONNECT, optional username and password. Domains are sent as ATYP 3, without a local lookup.
 `connect_udp` → `Error::Unsupported` (DNS through such an outbound goes over TCP, §8.2).
 
-### 11.13 Direct
+### 11.14 Direct
 
 - TCP: the domain is resolved (§8.3) and checked by the Dispatcher (§6.1); addresses are tried in turn with a 5 s
   timeout each. UDP: `udp_bind` and `connect` to the destination. Sockets come only from the SocketFactory.
 - A fake-IP destination without a mapping is an error (loop protection).
 
-### 11.14 Block
+### 11.15 Block
 
 `connect_tcp` and `connect_udp` return `Error::Blocked` at once; the incoming connection is closed (TCP RST when the
 stack allows it). Names a domain rule blocks are not resolved by the TUN DNS server (§8.2).
@@ -870,7 +905,7 @@ routes `0.0.0.0/0` and `::/0`, DNS `10.199.233.2`, the MTU and an exclusion of t
 
 ## 14. Security and robustness
 
-- Every length from the network is checked before allocating: domain ≤ 255, SS chunk ≤ 0x3FFF, VLESS UDP ≤ 65,535,
+- Every length from the network is checked before allocating: domain ≤ 255, SS chunk ≤ 0x3FFF, VLESS UDP ≤ 65,535, Trojan UDP ≤ 8192,
   HTTP headers ≤ 16 KB, Hysteria 2 address ≤ 2048, Hysteria 2 message and padding ≤ 2048 / 4096, WebSocket frame
   ≤ 1 MiB, VMess response header ≤ 259, TrustTunnel UDP frame ≤ 65,571.
 - Every handshake read runs under the `handshake_timeout_secs` timeout.
@@ -893,9 +928,11 @@ Running: `cargo test`, `cargo test --features server`, `cargo clippy --all-targe
   resends), VLESS and SOCKS5 headers, Shadowsocks (KDF and encryption), Vision, XUDP, REALITY, the Chrome fingerprint,
   X25519MLKEM768, fragmentation, XHTTP (request builder, padding, metadata), Hysteria 2 (varints, frames, UDP
   reassembly, Salamander), VMess (the user key against v2ray's vector, the KDF, the header layout, masked and padded
-  chunks, counter wrap, stream and UDP against our own server), WebSocket / HTTPUpgrade, TrustTunnel (UDP frames, the
+  chunks, counter wrap, stream and UDP against our own server), Trojan (the password's SHA-224, the header, UDP
+  packets byte by byte), WebSocket / HTTPUpgrade, TrustTunnel (UDP frames, the
   multiplexer, a stream through real TLS + HTTP/2 with the endpoint's own certificate and another SNI, 407, a
-  certificate for another name, empty DATA frames with and without the h2 patch), `vmess://` and `tt://` links, the
+  certificate for another name, empty DATA frames with and without the h2 patch), `vmess://`, `trojan://` and `tt://`
+  links, VLESS with `type=ws|httpupgrade`, the
   TUN (sniffing, windows, the stack), the SocketFactory.
 - **Integration** (`tests/integration.rs`, all on `127.0.0.1` without internet access): SOCKS → direct → echo; HTTP
   CONNECT and a plain request; keep-alive cannot reach another host; SOCKS → VLESS without TLS (TCP and UDP) and with
@@ -904,8 +941,9 @@ Running: `cargo test`, `cargo test --features server`, `cargo clippy --all-targe
   the mixed inbound; a missing `default_interface`.
 - **Against real servers** when `XRAY_BIN` / `HYSTERIA_BIN` are set (otherwise the tests return at once):
   `xray_interop.rs` — Vision and REALITY, XHTTP in all modes, the XHTTP CDN format (GET packet-up, tokenish, custom
-  session IDs) over HTTP/2+TLS, HTTP/1.1+TLS and HTTP/1.1 without TLS, VMess with both ciphers over TCP, WebSocket and HTTPUpgrade with and without
-  TLS (TCP and UDP); `hysteria2_interop.rs` — Hysteria 2 (the
+  session IDs) over HTTP/2+TLS, HTTP/1.1+TLS and HTTP/1.1 without TLS, VLESS over WebSocket and HTTPUpgrade with and
+  without TLS, VMess with both ciphers over TCP, WebSocket and HTTPUpgrade with and without TLS, Trojan over TLS (TCP,
+  WebSocket, HTTPUpgrade) and REALITY with fragmentation and a wrong password (TCP and UDP everywhere); `hysteria2_interop.rs` — Hysteria 2 (the
   official server and Xray) with and without Salamander: parallel TCP and UDP, fragments, refusals for a wrong auth /
   root / SNI / pin and for a failed protect.
 - The test server: §16.3.

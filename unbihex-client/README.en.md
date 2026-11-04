@@ -57,7 +57,9 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
 Works:
 
 - **VLESS** with TLS or REALITY, including XTLS Vision (`flow=xtls-rprx-vision`) and UDP over XUDP;
-  the TCP and XHTTP transports (packet-up, stream-up and stream-one over HTTP/2; packet-up also over HTTP/1.1).
+  the TCP and XHTTP transports (packet-up, stream-up and stream-one over HTTP/2; packet-up also over HTTP/1.1),
+  WebSocket and HTTPUpgrade (without Vision and REALITY, as in Xray).
+- **Trojan** with TLS or REALITY, TCP and UDP; the TCP, WebSocket and HTTPUpgrade transports.
 - **Shadowsocks** with the AEAD ciphers aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
 - **SOCKS5**.
 - **Hysteria2**: TCP/UDP over QUIC/TLS, including Salamander, share links and Xray/sing-box JSON subscriptions.
@@ -67,8 +69,8 @@ Works:
 
 Not supported yet — such servers are listed, but greyed out:
 
-- the VMess, Trojan, Hysteria 1, TUIC and WireGuard protocols;
-- for VLESS: the ws, grpc and httpupgrade transports, XHTTP over HTTP/3, and `flow` kinds other than Vision;
+- the Hysteria 1, TUIC and WireGuard protocols;
+- for VLESS: the grpc transport, XHTTP over HTTP/3, and `flow` kinds other than Vision;
 - for Shadowsocks: Shadowsocks 2022 and plugins.
 
 The engine refuses VLESS without TLS or REALITY on purpose: the UUID and traffic would go in the clear.

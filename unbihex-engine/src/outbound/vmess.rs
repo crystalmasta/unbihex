@@ -767,21 +767,12 @@ impl VmessOutbound {
             .map_err(|_| Error::config(format!("outbound {}: invalid uuid", cfg.tag)))?;
         let tls = match &cfg.tls {
             Some(t) if t.enabled => {
-                let mut t = t.clone();
-                if cfg.ws.is_some() {
-                    // The Upgrade is HTTP/1.1; Xray offers only that ALPN here too.
-                    t.alpn = vec!["http/1.1".into()];
-                }
+                let t = if cfg.ws.is_some() { super::ws::http1_tls(t) } else { t.clone() };
                 Some(TlsClient::new(&t, &cfg.server)?)
             }
             _ => None,
         };
-        let ws_host = cfg
-            .tls
-            .as_ref()
-            .filter(|t| t.enabled)
-            .and_then(|t| t.sni.clone())
-            .unwrap_or_else(|| cfg.server.clone());
+        let ws_host = super::ws::default_host(cfg.tls.as_ref(), &cfg.server);
         Ok(VmessOutbound {
             tag: cfg.tag.clone(),
             uuid: *uuid.as_bytes(),
@@ -803,10 +794,7 @@ impl VmessOutbound {
         roots: Vec<rustls::pki_types::CertificateDer<'static>>,
     ) -> Result<Self> {
         if let Some(t) = cfg.tls.as_ref().filter(|t| t.enabled) {
-            let mut t = t.clone();
-            if cfg.ws.is_some() {
-                t.alpn = vec!["http/1.1".into()];
-            }
+            let t = if cfg.ws.is_some() { super::ws::http1_tls(t) } else { t.clone() };
             self.tls = Some(TlsClient::with_extra_roots(&t, &cfg.server, roots)?);
         }
         Ok(self)
@@ -815,19 +803,14 @@ impl VmessOutbound {
     /// TCP, then TLS, then the WebSocket/HTTPUpgrade handshake.
     async fn transport(&self) -> Result<BoxStream> {
         let tcp = self.server.connect(&self.sockets).await?;
-        let stream: BoxStream = match &self.tls {
-            Some(tls) if self.fragment.is_some() => {
-                let mut s = tls.connect_record(tcp, self.fragment.as_ref()).await?;
-                s.set_bulk();
-                Box::new(s)
-            }
-            Some(tls) => Box::new(tls.connect(tcp).await?),
-            None => Box::new(tcp),
-        };
-        match &self.ws {
-            Some(ws) => super::ws::connect(stream, ws, &self.ws_host).await,
-            None => Ok(stream),
-        }
+        super::ws::dial(
+            tcp,
+            self.tls.as_ref(),
+            self.fragment.as_ref(),
+            self.ws.as_ref(),
+            &self.ws_host,
+        )
+        .await
     }
 }
 

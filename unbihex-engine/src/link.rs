@@ -1,6 +1,7 @@
-//! Share links: `vless://`, `vmess://`, `ss://`, `hy2://`, `hysteria2://` and
-//! TrustTunnel's `tt://` (SPEC §5.4).
+//! Share links: `vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, `hysteria2://`
+//! and TrustTunnel's `tt://` (SPEC §5.4).
 
+mod trojan;
 mod tt;
 mod vmess;
 
@@ -23,6 +24,8 @@ pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
         parse_vless(rest, tag)
     } else if let Some(rest) = strip_scheme(url, "vmess://") {
         vmess::parse(rest, tag)
+    } else if let Some(rest) = strip_scheme(url, "trojan://") {
+        trojan::parse(rest, tag)
     } else if strip_scheme(url, "tt://").is_some() {
         tt::parse(url, tag)
     } else if let Some(rest) = strip_scheme(url, "ss://") {
@@ -33,7 +36,8 @@ pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
         parse_hysteria2(rest, tag)
     } else {
         Err(Error::Unsupported(
-            "only vless://, vmess://, ss://, hysteria2://, hy2:// and tt:// links are supported"
+            "only vless://, vmess://, trojan://, ss://, hysteria2://, hy2:// and tt:// links \
+             are supported"
                 .into(),
         ))
     }
@@ -177,7 +181,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut pbk = None;
     let mut sid = String::new();
     let mut fingerprint = None;
-    let mut xhttp: Option<serde_json::Map<String, serde_json::Value>> = None;
+    let mut net = String::new();
     let mut xhttp_fields = serde_json::Map::new();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let v = v.into_owned();
@@ -191,10 +195,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
                     .map(String::from)
                     .collect()
             }
-            "type" if v == "xhttp" || v == "splithttp" => xhttp = Some(serde_json::Map::new()),
-            "type" if !(v.is_empty() || v == "tcp" || v == "raw") => {
-                return Err(Error::Unsupported(format!("vless transport type={v}")));
-            }
+            "type" => net = v.to_ascii_lowercase(),
             "path" | "host" | "mode" if !v.is_empty() => {
                 xhttp_fields.insert(k.into_owned(), serde_json::Value::String(v));
             }
@@ -223,6 +224,29 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
             _ => {}
         }
     }
+    let field = |k: &str| xhttp_fields.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let (xhttp, ws) = match net.as_str() {
+        "" | "tcp" | "raw" => (None, None),
+        "xhttp" | "splithttp" => (
+            Some(crate::outbound::xhttp::XhttpConfig::from_xray(&serde_json::Value::Object(
+                xhttp_fields.clone(),
+            ))?),
+            None,
+        ),
+        "ws" | "websocket" | "httpupgrade" => {
+            // Like v2rayN: the first host of a comma list.
+            let host = field("host").split(',').map(str::trim).find(|h| !h.is_empty());
+            let ws = crate::outbound::ws::WsConfig {
+                path: field("path").to_string(),
+                host: host.map(String::from),
+                httpupgrade: net == "httpupgrade",
+            };
+            (None, Some(ws))
+        }
+        other => return Err(Error::Unsupported(format!("vless transport type={other}"))),
+    };
+    // Over WebSocket, as in v2rayN, the HTTP host names the site when there is no SNI.
+    let sni = sni.or_else(|| ws.as_ref().and_then(|w| w.host.clone()));
     let (tls, reality) = match security.as_str() {
         "tls" => (
             Some(TlsConfig {
@@ -252,13 +276,6 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
         "none" | "" => (None, None),
         other => return Err(Error::Unsupported(format!("vless security={other}"))),
     };
-    let xhttp = match xhttp {
-        Some(mut m) => {
-            m.extend(xhttp_fields);
-            Some(crate::outbound::xhttp::XhttpConfig::from_xray(&serde_json::Value::Object(m))?)
-        }
-        None => None,
-    };
     let cfg = VlessConfig {
         tag: tag.to_string(),
         server,
@@ -270,6 +287,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
         reality,
         fragment: None,
         xhttp,
+        ws,
     };
     cfg.check_flow()?;
     Ok(OutboundConfig::Vless(cfg))
@@ -407,7 +425,7 @@ mod tests {
 
     #[test]
     fn vless_unsupported() {
-        for q in ["type=ws", "type=grpc", "flow=xtls-rprx-direct", "security=xtls"] {
+        for q in ["type=grpc", "type=h2", "flow=xtls-rprx-direct", "security=xtls"] {
             let l = format!("vless://{UUID}@h:443?{q}");
             assert!(
                 matches!(parse_link(&l, "p"), Err(Error::Unsupported(_))),
@@ -416,7 +434,36 @@ mod tests {
         }
         assert!(parse_link("vless://bad@h:443", "p").is_err());
         assert!(parse_link(&format!("vless://{UUID}@h"), "p").is_err());
-        assert!(parse_link("trojan://x@h:1", "p").is_err());
+        assert!(parse_link("trojan-go://x@h:1", "p").is_err());
+    }
+
+    #[test]
+    fn vless_websocket_and_httpupgrade() {
+        let l = format!(
+            "vless://{UUID}@h.com:443?security=tls&type=ws&path=%2Fws%3Fed%3D2048&host=cdn.example%2Cb.example#W"
+        );
+        let OutboundConfig::Vless(v) = parse_link(&l, "p").unwrap() else {
+            panic!()
+        };
+        let ws = v.ws.as_ref().unwrap();
+        assert_eq!((ws.path.as_str(), ws.host.as_deref()), ("/ws?ed=2048", Some("cdn.example")));
+        assert!(!ws.httpupgrade && v.xhttp.is_none());
+        assert_eq!(v.tls.unwrap().sni.as_deref(), Some("cdn.example"), "SNI falls back to the host");
+        let l = format!("vless://{UUID}@h.com:443?security=tls&sni=s.example&type=httpupgrade&host=c.example");
+        let OutboundConfig::Vless(v) = parse_link(&l, "p").unwrap() else {
+            panic!()
+        };
+        assert!(v.ws.unwrap().httpupgrade);
+        assert_eq!(v.tls.unwrap().sni.as_deref(), Some("s.example"));
+        // Vision and REALITY need raw TCP, as in Xray.
+        let vision = format!("vless://{UUID}@h.com:443?security=tls&type=ws&flow=xtls-rprx-vision");
+        let e = parse_link(&vision, "p").unwrap_err().to_string();
+        assert!(e.contains("not WebSocket"), "{e}");
+        let reality = format!(
+            "vless://{UUID}@h.com:443?security=reality&pbk=wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE&type=httpupgrade"
+        );
+        assert!(parse_link(&reality, "p").is_err());
+        assert!(parse_link(&format!("vless://{UUID}@h.com:443?security=tls&type=ws&path=ws"), "p").is_err());
     }
 
     #[test]

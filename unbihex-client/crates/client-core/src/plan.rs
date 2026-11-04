@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn unsupported_server_is_refused() {
-        let s = parse_server("trojan://pw@t.example:443#T").unwrap();
+        let s = parse_server("hysteria://pw@t.example:443#T").unwrap();
         assert!(build_config(&s, &Settings::default(), &Geo::default(), Target::DesktopProxy).is_err());
     }
 }

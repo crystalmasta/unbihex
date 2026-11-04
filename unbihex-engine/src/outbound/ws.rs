@@ -15,6 +15,9 @@ use sha1::{Digest, Sha1};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use super::BoxStream;
+use super::fragment::FragmentConfig;
+use super::tls::TlsClient;
+use crate::config::TlsConfig;
 use crate::error::{Error, Result};
 use crate::net::{PendingOut, PrefixedStream};
 
@@ -92,6 +95,45 @@ const OP_BINARY: u8 = 0x2;
 const OP_CLOSE: u8 = 0x8;
 const OP_PING: u8 = 0x9;
 const OP_PONG: u8 = 0xA;
+
+/// The TLS settings for a client that upgrades: the Upgrade is HTTP/1.1, so that is
+/// the only ALPN offered (Xray does the same).
+pub fn http1_tls(cfg: &TlsConfig) -> TlsConfig {
+    let mut cfg = cfg.clone();
+    cfg.alpn = vec!["http/1.1".into()];
+    cfg
+}
+
+/// `Host` of the request when the config names none: the TLS name, else the server.
+pub fn default_host(tls: Option<&TlsConfig>, server: &str) -> String {
+    tls.filter(|t| t.enabled)
+        .and_then(|t| t.sni.clone())
+        .unwrap_or_else(|| server.to_string())
+}
+
+/// The transport VLESS, VMess and Trojan share: TLS over `tcp` (record-exact when the
+/// ClientHello is fragmented) or plain TCP, then the Upgrade when `ws` is set.
+pub async fn dial(
+    tcp: tokio::net::TcpStream,
+    tls: Option<&TlsClient>,
+    fragment: Option<&FragmentConfig>,
+    ws: Option<&WsConfig>,
+    ws_host: &str,
+) -> Result<BoxStream> {
+    let stream: BoxStream = match tls {
+        Some(tls) if fragment.is_some() => {
+            let mut s = tls.connect_record(tcp, fragment).await?;
+            s.set_bulk();
+            Box::new(s)
+        }
+        Some(tls) => Box::new(tls.connect(tcp).await?),
+        None => Box::new(tcp),
+    };
+    match ws {
+        Some(ws) => connect(stream, ws, ws_host).await,
+        None => Ok(stream),
+    }
+}
 
 /// Upgrades `io`; `default_host` is the TLS server name or the server address.
 pub async fn connect<S>(mut io: S, cfg: &WsConfig, default_host: &str) -> Result<BoxStream>

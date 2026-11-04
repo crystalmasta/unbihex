@@ -20,6 +20,7 @@ use super::reality::RealityClient;
 use super::tls::TlsClient;
 use super::tls_stream::TlsRecordStream;
 use super::vision::VisionStream;
+use super::ws::WsConfig;
 use super::xhttp::XhttpClient;
 use super::{BoxStream, Outbound, PacketStream, ServerEndpoint};
 use crate::address::{Address, TargetAddr};
@@ -138,6 +139,13 @@ impl<S> VlessStream<S> {
                 got: 0,
             },
         }
+    }
+
+    /// Sends `header` the same lazy way but expects no response header (Trojan).
+    pub fn request_only(inner: S, header: Vec<u8>) -> Self {
+        let mut s = Self::new(inner, header);
+        s.resp = Resp::Done;
+        s
     }
 }
 
@@ -274,6 +282,9 @@ pub struct VlessOutbound {
     vision: bool,
     fragment: Option<super::fragment::FragmentConfig>,
     xhttp: Option<Arc<XhttpClient>>,
+    ws: Option<WsConfig>,
+    /// `Host` of the WebSocket request when the config names none.
+    ws_host: String,
     sockets: Arc<SocketFactory>,
 }
 
@@ -291,6 +302,9 @@ impl VlessOutbound {
         cfg.check_flow()?;
         let reality = cfg.reality.as_ref().map(RealityClient::new).transpose()?;
         let tls = match &cfg.tls {
+            Some(t) if t.enabled && cfg.ws.is_some() => {
+                Some(TlsClient::new(&super::ws::http1_tls(t), &cfg.server)?)
+            }
             Some(t) if t.enabled => Some(TlsClient::new(t, &cfg.server)?),
             _ if reality.is_some() => None,
             _ => {
@@ -340,7 +354,23 @@ impl VlessOutbound {
         ob.vision = cfg.is_vision();
         ob.fragment = cfg.fragment.clone();
         ob.xhttp = xhttp;
+        ob.ws = cfg.ws.clone();
+        ob.ws_host = super::ws::default_host(cfg.tls.as_ref(), &cfg.server);
         Ok(ob)
+    }
+
+    /// Test only: trust extra roots (a self-signed test CA) for plain TLS.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_extra_roots(
+        mut self,
+        cfg: &VlessConfig,
+        roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    ) -> Result<Self> {
+        if let Some(t) = cfg.tls.as_ref().filter(|t| t.enabled) {
+            let t = if cfg.ws.is_some() { super::ws::http1_tls(t) } else { t.clone() };
+            self.tls = Some(TlsClient::with_extra_roots(&t, &cfg.server, roots)?);
+        }
+        Ok(self)
     }
 
     /// Enables the Vision flow (used by tests).
@@ -384,6 +414,8 @@ impl VlessOutbound {
             vision: false,
             fragment: None,
             xhttp: None,
+            ws: None,
+            ws_host: String::new(),
             sockets,
         }
     }
@@ -394,6 +426,19 @@ impl VlessOutbound {
             return Ok(Box::new(VlessStream::new(x.open().await?, header)));
         }
         let tcp = self.server.connect(&self.sockets).await?;
+        if let Some(ws) = &self.ws {
+            // Config checks keep Vision and REALITY off WebSocket.
+            let header = encode_request(&self.uuid, cmd, target)?;
+            let stream = super::ws::dial(
+                tcp,
+                self.tls.as_ref(),
+                self.fragment.as_ref(),
+                Some(ws),
+                &self.ws_host,
+            )
+            .await?;
+            return Ok(Box::new(VlessStream::new(stream, header)));
+        }
         if !self.vision && self.reality.is_none() && self.fragment.is_none() {
             let header = encode_request(&self.uuid, cmd, target)?;
             let stream: BoxStream = match &self.tls {
