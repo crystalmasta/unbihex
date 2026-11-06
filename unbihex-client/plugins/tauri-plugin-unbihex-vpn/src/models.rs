@@ -29,11 +29,14 @@ pub struct StartArgs {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartResponse {
-    /// Android: the TUN descriptor (owned by the service; the engine dups it).
+    /// Android: an owned duplicate of the TUN descriptor; the engine duplicates it again.
     pub fd: Option<i32>,
     /// Android: the read end of a pipe the service closes when the VPN goes away
     /// (stop, revoke, the notification's "Отключить"); ours to close.
     pub stop_fd: Option<i32>,
+    /// Android: unique process-local service generation.
+    #[serde(default)]
+    pub generation: Option<u64>,
     /// Android: physical-network DNS captured before establishing the VPN.
     /// Older plugins and iOS may omit this field.
     #[serde(default)]
@@ -75,5 +78,9 @@ mod tests {
         assert_eq!(v6.scope_id(), 4);
         let old: StartResponse = serde_json::from_str(r#"{"fd":7}"#).unwrap();
         assert!(old.bootstrap_dns.is_empty());
+        assert_eq!(old.generation, None);
+        let current: StartResponse =
+            serde_json::from_str(r#"{"fd":7,"stopFd":8,"generation":42}"#).unwrap();
+        assert_eq!(current.generation, Some(42));
     }
 }

@@ -29,10 +29,36 @@ impl<R: Runtime> UnbihexVpn<R> {
         self.0.run_mobile_plugin("start", args).map_err(Into::into)
     }
 
+    #[cfg(target_os = "android")]
+    pub fn mark_connected(&self, generation: u64) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>(
+                "markConnected",
+                serde_json::json!({"generation": generation}),
+            )
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn stop_generation(&self, generation: u64) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>(
+                "stop",
+                serde_json::json!({"generation": generation}),
+            )
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     /// Brings the tunnel down.
     pub fn stop(&self) -> crate::Result<()> {
+        #[cfg(target_os = "android")]
+        let args = serde_json::json!({});
+        #[cfg(not(target_os = "android"))]
+        let args = ();
         self.0
-            .run_mobile_plugin::<serde_json::Value>("stop", ())
+            .run_mobile_plugin::<serde_json::Value>("stop", args)
             .map(|_| ())
             .map_err(Into::into)
     }

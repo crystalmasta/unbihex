@@ -1,0 +1,65 @@
+name: Android build
+
+# By akurach (github.com/akurach), PR #51.
+# An unsigned debug APK for testing; releases are built and signed by hand (release procedure).
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0, Node 24
+        with:
+          node-version: '26'
+      - name: Prepare Rust and Android SDK
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android
+          rustup override set 1.99.1
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          # Gradle installs a missing platform itself; only the NDK must be the pinned one.
+          test -x "$ANDROID_HOME/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.3.13750724" >> "$GITHUB_ENV"
+      - name: Install Tauri CLI
+        run: |
+          # Keep in step with the `tauri` crate in unbihex-client/Cargo.lock.
+          npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-package-lock --no-audit --no-fund --ignore-scripts @tauri-apps/cli@2.11.4
+          # The generated Gradle task invokes `cargo tauri`.
+          mkdir -p "$RUNNER_TEMP/tauri-bin"
+          cat > "$RUNNER_TEMP/tauri-bin/cargo-tauri" <<'SH'
+          #!/bin/sh
+          if [ "$1" = tauri ]; then shift; fi
+          exec "$RUNNER_TEMP/tauri-cli/node_modules/.bin/tauri" "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/tauri-bin/cargo-tauri"
+          echo "$RUNNER_TEMP/tauri-bin" >> "$GITHUB_PATH"
+      - name: Build debug APK
+        working-directory: unbihex-client/app/src-tauri
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/tauri-cli/node_modules/.bin/tauri" android build --debug --target aarch64 --apk --ci 2>&1 | tee "$RUNNER_TEMP/android-build.log"
+      - name: Test Android lifecycle
+        working-directory: unbihex-client/app/src-tauri/gen/android
+        run: ./gradlew :tauri-plugin-unbihex-vpn:testDebugUnitTest --console=plain
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
+        if: always()
+        with:
+          name: Unbihex-android-arm64-debug
+          if-no-files-found: warn
+          path: |
+            unbihex-client/app/src-tauri/gen/android/app/build/outputs/apk/
+            unbihex-client/plugins/tauri-plugin-unbihex-vpn/android/build/reports/tests/
+            ${{ runner.temp }}/android-build.log

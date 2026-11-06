@@ -38,3 +38,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "=0.21.1"

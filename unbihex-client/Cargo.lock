@@ -5675,6 +5675,7 @@ dependencies = [
 name = "unbihex-client"
 version = "0.2.7"
 dependencies = [
+ "jni 0.21.1",
  "parking_lot",
  "serde",
  "serde_json",
