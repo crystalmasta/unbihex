@@ -114,15 +114,52 @@ fn xray_security_params(stream: &Value) -> Vec<(&'static str, String)> {
     params
 }
 
-/// `path` and `host` of a WebSocket or HTTPUpgrade transport (Xray's `wsSettings` /
-/// `httpupgradeSettings`, sing-box's `transport`); older configs keep the host in
-/// `headers.Host`.
+/// The `Host` of a WebSocket or HTTPUpgrade transport: `host`, else `headers.Host`
+/// (older configs keep it there).
+fn ws_host(t: &Value) -> String {
+    match str_of(t, "host") {
+        "" => t
+            .get("headers")
+            .and_then(Value::as_object)
+            .and_then(|h| h.iter().find(|(k, _)| k.eq_ignore_ascii_case("host")))
+            .and_then(|(_, v)| header_value(v))
+            .unwrap_or_default(),
+        h => h.to_string(),
+    }
+}
+
+/// A header value: Xray's is a string, sing-box's a string or a list (the first is used).
+fn header_value(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(a) => a.first().and_then(Value::as_str).map(String::from),
+        _ => None,
+    }
+}
+
+/// The request headers of a WebSocket or HTTPUpgrade transport (Xray's `headers`,
+/// sing-box's `headers`) other than `Host`, as a JSON object for the engine's
+/// `headers` link parameter. Some servers answer the Upgrade only with the
+/// User-Agent from here.
+fn ws_headers(t: &Value) -> Option<Value> {
+    let m: serde_json::Map<String, Value> = t
+        .get("headers")?
+        .as_object()?
+        .iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("host"))
+        .filter_map(|(k, v)| Some((k.clone(), Value::String(header_value(v)?))))
+        .collect();
+    (!m.is_empty()).then_some(Value::Object(m))
+}
+
+/// `path`, `host` and `headers` of a WebSocket or HTTPUpgrade transport (Xray's
+/// `wsSettings` / `httpupgradeSettings`, sing-box's `transport`).
 fn ws_params(t: &Value) -> Vec<(&'static str, String)> {
-    let host = match str_of(t, "host") {
-        "" => t.pointer("/headers/Host").and_then(Value::as_str).unwrap_or(""),
-        h => h,
-    };
-    vec![("path", str_of(t, "path").to_string()), ("host", host.to_string())]
+    vec![
+        ("path", str_of(t, "path").to_string()),
+        ("host", ws_host(t)),
+        ("headers", ws_headers(t).map(|h| h.to_string()).unwrap_or_default()),
+    ]
 }
 
 /// The WebSocket/HTTPUpgrade settings of an Xray `streamSettings`, if it uses one.
@@ -405,15 +442,10 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
         "vmess" => {
             let net = str_of(&stream, "network");
             let net = if net.is_empty() { "tcp" } else { net };
-            // WebSocket keeps the host in headers.Host on older configs.
             let t = match net {
                 "ws" | "websocket" => stream.get("wsSettings").cloned().unwrap_or(Value::Null),
                 "httpupgrade" => stream.get("httpupgradeSettings").cloned().unwrap_or(Value::Null),
                 _ => Value::Null,
-            };
-            let ws_host = match str_of(&t, "host") {
-                "" => t.pointer("/headers/Host").and_then(Value::as_str).unwrap_or(""),
-                h => h,
             };
             let header = stream
                 .pointer("/tcpSettings/header/type")
@@ -421,14 +453,17 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let tls = stream.get("tlsSettings").cloned().unwrap_or(Value::Null);
-            let j = json!({
+            let mut j = json!({
                 "v": "2", "ps": name, "add": host, "port": port.to_string(),
                 "id": str_of(&user, "id"), "scy": str_of(&user, "security"),
-                "net": net, "type": header, "host": ws_host, "path": str_of(&t, "path"),
+                "net": net, "type": header, "host": ws_host(&t), "path": str_of(&t, "path"),
                 "tls": str_of(&stream, "security"), "sni": str_of(&tls, "serverName"),
                 "alpn": join_alpn(tls.get("alpn")), "fp": str_of(&tls, "fingerprint"),
                 "allowInsecure": json_bool_flag(tls.get("allowInsecure")),
             });
+            if let Some(h) = ws_headers(&t) {
+                j["headers"] = h;
+            }
             Some(format!(
                 "vmess://{}",
                 base64::engine::general_purpose::STANDARD.encode(j.to_string())
@@ -632,21 +667,20 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
         "tuic" => Some(simple_link("tuic", str_of(ob, "uuid"), host, port, name)),
         "vmess" => {
             let t = ob.get("transport").cloned().unwrap_or(Value::Null);
-            let ws_host = match str_of(&t, "host") {
-                "" => t.pointer("/headers/Host").and_then(Value::as_str).unwrap_or(""),
-                h => h,
-            };
             let fp = tls
                 .get("utls")
                 .map(|u| str_of(u, "fingerprint").to_string())
                 .unwrap_or_default();
-            let j = json!({ "v": "2", "ps": name, "add": host, "port": port.to_string(),
+            let mut j = json!({ "v": "2", "ps": name, "add": host, "port": port.to_string(),
                 "id": str_of(ob, "uuid"), "scy": str_of(ob, "security"),
                 "net": if network.is_empty() { "tcp" } else { &network },
-                "host": ws_host, "path": str_of(&t, "path"),
+                "host": ws_host(&t), "path": str_of(&t, "path"),
                 "tls": if tls_on { "tls" } else { "" }, "sni": str_of(&tls, "server_name"),
                 "alpn": join_alpn(tls.get("alpn")), "fp": fp,
                 "allowInsecure": json_bool_flag(tls.get("insecure")) });
+            if let Some(h) = ws_headers(&t) {
+                j["headers"] = h;
+            }
             Some(format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(j.to_string())))
         }
         _ => None,
@@ -1008,6 +1042,62 @@ mod tests {
             let ws = v.ws.unwrap();
             assert!(ws.path == "/ws" || ws.path == "/up");
             assert!(ws.host.as_deref() == Some("cdn.example") || ws.host.as_deref() == Some("h.example"));
+        }
+    }
+
+    /// The WebSocket headers a panel gives in its Xray JSON (a server behind nginx may
+    /// answer the Upgrade only with that User-Agent) reach the engine for every
+    /// protocol, from Xray and from sing-box.
+    #[test]
+    fn websocket_headers_reach_the_engine() {
+        const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
+        let ws = json!({"path": null, "host": "app.example", "headers": {"User-Agent": UA}});
+        let tls = json!({"serverName": "app.example", "fingerprint": "chrome"});
+        let xray = |protocol: &str, settings: Value, network: &str| {
+            json!({"protocol": protocol, "tag": protocol, "settings": settings,
+                "streamSettings": {"network": network, "security": "tls", "tlsSettings": tls,
+                    "wsSettings": ws, "httpupgradeSettings": ws}})
+        };
+        let server = json!({"address": "s.example", "port": 443});
+        let mut vless = server.clone();
+        vless["id"] = UUID.into();
+        let vmess = json!({"vnext": [{"address": "s.example", "port": 443,
+            "users": [{"id": UUID, "security": "auto"}]}]});
+        let trojan = json!({"servers": [{"address": "s.example", "port": 443, "password": "pw"}]});
+        // sing-box: a list value, and the host in headers as old configs keep it.
+        let transport = json!({"type": "ws", "path": "/sb",
+            "headers": {"host": "app.example", "User-Agent": [UA, "second"], "X-A": "1"}});
+        let sb_tls = json!({"enabled": true, "server_name": "app.example"});
+        let sing_box = json!({"outbounds": [
+            {"type": "vless", "tag": "a", "server": "s.example", "server_port": 443, "uuid": UUID,
+             "tls": sb_tls, "transport": transport},
+            {"type": "vmess", "tag": "b", "server": "s.example", "server_port": 443, "uuid": UUID,
+             "security": "auto", "tls": sb_tls, "transport": transport},
+            {"type": "trojan", "tag": "c", "server": "s.example", "server_port": 443, "password": "pw",
+             "tls": sb_tls, "transport": transport}]});
+        let xray = json!({"outbounds": [
+            xray("vless", vless.clone(), "ws"), xray("vmess", vmess.clone(), "ws"),
+            xray("trojan", trojan.clone(), "ws"), xray("vless", vless, "httpupgrade"),
+            xray("vmess", vmess, "httpupgrade"), xray("trojan", trojan, "httpupgrade")]});
+        let mut links = links_from_json(&xray.to_string()).unwrap();
+        assert_eq!(links.len(), 6);
+        let from_sing_box = links_from_json(&sing_box.to_string()).unwrap();
+        assert_eq!(from_sing_box.len(), 3);
+        links.extend(from_sing_box);
+        for (i, link) in links.iter().enumerate() {
+            assert!(parse_server(link).unwrap().is_supported(), "{link}");
+            let ws = match unbihex_engine::link::parse_link(link, "proxy").unwrap() {
+                OutboundConfig::Vless(v) => v.ws,
+                OutboundConfig::Vmess(v) => v.ws,
+                OutboundConfig::Trojan(t) => t.ws,
+                other => panic!("{other:?}"),
+            }
+            .unwrap();
+            assert_eq!(ws.headers.get("User-Agent").map(String::as_str), Some(UA), "{link}");
+            assert_eq!(ws.host_header(), Some("app.example"), "{link}");
+            assert!(!ws.headers.keys().any(|k| k.eq_ignore_ascii_case("host")), "{link}");
+            assert_eq!(ws.headers.len(), if i < 6 { 1 } else { 2 }, "{link}");
+            assert_eq!(ws.path, if i < 6 { "" } else { "/sb" });
         }
     }
 

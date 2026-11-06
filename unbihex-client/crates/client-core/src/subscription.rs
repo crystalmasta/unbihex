@@ -29,6 +29,8 @@ pub struct Fetched {
     pub support_url: Option<String>,
     /// `profile-web-page-url`.
     pub web_page_url: Option<String>,
+    /// The body was an Xray or sing-box JSON config, not share links.
+    pub json: bool,
 }
 
 /// Request options.
@@ -38,7 +40,15 @@ pub struct FetchOptions {
     pub user_agent: String,
     /// Device headers, when the user lets them be sent.
     pub device: Option<Device>,
+    /// Ask once more with [`JSON_USER_AGENT`] when share links came back and some
+    /// use WebSocket, HTTPUpgrade or XHTTP (see [`fetch`]).
+    pub retry_as_json: bool,
 }
+
+/// A User-Agent panels (Remnawave, Marzban, …) answer with an Xray JSON config.
+/// Its transport settings carry what share links lose, such as the WebSocket
+/// `headers`: some servers answer the Upgrade only with the User-Agent from there.
+pub const JSON_USER_AGENT: &str = "v2rayN/7.10.0";
 
 /// What the provider's panel is told about this device (issue #47). Panels
 /// such as Remnawave list devices by these headers and count them against the
@@ -259,8 +269,46 @@ pub(crate) fn request_error(e: &reqwest::Error) -> String {
     e.to_string()
 }
 
-/// Downloads and parses a subscription.
+/// Whether some links use a transport whose settings the panel's JSON may carry
+/// further than a share link does (WebSocket and HTTPUpgrade headers, XHTTP extras).
+fn needs_json(links: &[String]) -> bool {
+    links.iter().any(|l| {
+        crate::links::parse_server(l).is_ok_and(|s| {
+            let net = s.transport.split(['+', ' ']).next().unwrap_or_default();
+            matches!(net, "ws" | "websocket" | "httpupgrade" | "xhttp" | "splithttp")
+        })
+    })
+}
+
+/// Downloads and parses a subscription. With `retry_as_json`, when the panel sent
+/// share links and some of them use WebSocket, HTTPUpgrade or XHTTP, asks once more
+/// with [`JSON_USER_AGENT`] and the same device headers (the panel sees the same
+/// device) and takes the answer if it is JSON; otherwise keeps the links.
 pub async fn fetch(url: &str, opts: &FetchOptions) -> Result<Fetched> {
+    let first = fetch_as(url, opts, &opts.user_agent).await?;
+    if !opts.retry_as_json || first.json || !needs_json(&first.links) {
+        return Ok(first);
+    }
+    match fetch_as(url, opts, JSON_USER_AGENT).await {
+        Ok(mut f) if f.json => {
+            tracing::info!("subscription: the panel gave a JSON config for {JSON_USER_AGENT}");
+            f.title = f.title.or(first.title);
+            f.info = f.info.or(first.info);
+            f.update_interval_hours = f.update_interval_hours.or(first.update_interval_hours);
+            f.support_url = f.support_url.or(first.support_url);
+            f.web_page_url = f.web_page_url.or(first.web_page_url);
+            Ok(f)
+        }
+        Ok(_) => Ok(first),
+        Err(e) => {
+            tracing::debug!("subscription: no JSON for {JSON_USER_AGENT}: {e}");
+            Ok(first)
+        }
+    }
+}
+
+/// One request with User-Agent `ua`.
+async fn fetch_as(url: &str, opts: &FetchOptions, ua: &str) -> Result<Fetched> {
     let parsed = Url::parse(url.trim())
         .map_err(|_| ClientError::Subscription("неверный адрес подписки".into()))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -274,7 +322,7 @@ pub async fn fetch(url: &str, opts: &FetchOptions) -> Result<Fetched> {
     let client = reqwest::Client::builder()
         // HTTP(S)_PROXY or system proxies may point at our own or a dead local port; TUN captures us when connected.
         .no_proxy()
-        .user_agent(opts.user_agent.clone())
+        .user_agent(ua)
         .timeout(Duration::from_secs(25))
         .connect_timeout(Duration::from_secs(10))
         .redirect(redirect_policy())
@@ -330,6 +378,7 @@ pub async fn fetch(url: &str, opts: &FetchOptions) -> Result<Fetched> {
         support_url: header("support-url"),
         web_page_url: header("profile-web-page-url"),
         links: Vec::new(),
+        json: false,
     };
     if out.title.is_none() {
         out.title = header("content-disposition").and_then(|h| filename_of(&h));
@@ -340,12 +389,17 @@ pub async fn fetch(url: &str, opts: &FetchOptions) -> Result<Fetched> {
             BodyError::Read(e) => format!("ошибка чтения ответа: {e}"),
         })
     })?;
-    out.links = parse_body(&String::from_utf8_lossy(&body))?;
+    (out.links, out.json) = parse_body_kind(&String::from_utf8_lossy(&body))?;
     Ok(out)
 }
 
 /// Extracts share links from a subscription body (plain or base64).
 pub fn parse_body(body: &str) -> Result<Vec<String>> {
+    parse_body_kind(body).map(|(links, _)| links)
+}
+
+/// [`parse_body`], and whether the body was a JSON config.
+fn parse_body_kind(body: &str) -> Result<(Vec<String>, bool)> {
     let body = body.trim_start_matches('\u{feff}').trim();
     if body.is_empty() {
         return Err(ClientError::Subscription("подписка пустая".into()));
@@ -354,16 +408,16 @@ pub fn parse_body(body: &str) -> Result<Vec<String>> {
         && let Some(links) = crate::jsonsub::links_from_json(body)
         && !links.is_empty()
     {
-        return Ok(links);
+        return Ok((links, true));
     }
     let links = links_in(body);
     if !links.is_empty() {
-        return Ok(links);
+        return Ok((links, false));
     }
     if let Some(decoded) = b64_decode(body).and_then(|b| String::from_utf8(b).ok()) {
         let links = links_in(&decoded);
         if !links.is_empty() {
-            return Ok(links);
+            return Ok((links, false));
         }
     }
     let kind = if body.starts_with('{') || body.starts_with('[') {
@@ -518,6 +572,7 @@ mod tests {
                     hwid: "abc".into(),
                     name: "Ноутбук\r\nАнны".into(),
                 }),
+                retry_as_json: true,
             },
         )
         .await
@@ -565,7 +620,96 @@ mod tests {
         FetchOptions {
             user_agent: "test".into(),
             device: None,
+            retry_as_json: false,
         }
+    }
+
+    type Seen = std::sync::Arc<parking_lot::Mutex<Vec<String>>>;
+
+    /// A panel like Remnawave: share links without headers for most User-Agents, an
+    /// Xray JSON with the WebSocket headers for v2rayN. Records each request head.
+    async fn panel(links: &'static str, json: Option<&'static str>) -> (u16, Seen) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen = Seen::default();
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    match s.read_u8().await {
+                        Ok(b) => head.push(b),
+                        Err(_) => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                let body = match json {
+                    Some(j) if head.contains(&format!("user-agent: {}\r\n", JSON_USER_AGENT.to_ascii_lowercase())) => j.to_string(),
+                    _ => base64::engine::general_purpose::STANDARD.encode(links),
+                };
+                log.lock().push(head);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nprofile-title: Panel\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        (port, seen)
+    }
+
+    const WS_LINK: &str = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@s.example:443?type=ws&security=tls&host=app.example#ws\n";
+    const PANEL_JSON: &str = r#"[{"remarks":"ws","outbounds":[{"protocol":"vless","tag":"proxy",
+        "settings":{"vnext":[{"address":"s.example","port":443,"users":[{"id":"b831381d-6324-4d53-ad4f-8cda48b30811","encryption":"none"}]}]},
+        "streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"app.example"},
+            "wsSettings":{"path":null,"host":"app.example","headers":{"User-Agent":"Mozilla/5.0 (iPhone) Safari/604.1"}}}}]}]"#;
+
+    #[tokio::test]
+    async fn websocket_links_are_asked_again_as_json_from_the_same_device() {
+        let (port, seen) = panel(WS_LINK, Some(PANEL_JSON)).await;
+        let url = format!("http://127.0.0.1:{port}/sub");
+        let mut o = opts();
+        o.user_agent = "unbihex-client/0.2.7".into();
+        o.device = Some(Device { hwid: "hw-1".into(), name: "PC".into() });
+        o.retry_as_json = true;
+        let f = fetch(&url, &o).await.unwrap();
+        assert!(f.json);
+        assert_eq!(f.title.as_deref(), Some("Panel"));
+        let Ok(unbihex_engine::config::OutboundConfig::Vless(v)) = unbihex_engine::link::parse_link(&f.links[0], "p") else {
+            panic!("not vless");
+        };
+        assert_eq!(v.ws.unwrap().headers["User-Agent"], "Mozilla/5.0 (iPhone) Safari/604.1");
+        {
+            let seen = seen.lock();
+            assert_eq!(seen.len(), 2);
+            assert!(seen[0].contains("user-agent: unbihex-client/0.2.7\r\n"), "{}", seen[0]);
+            assert!(seen[1].contains("user-agent: v2rayn/7.10.0\r\n"), "{}", seen[1]);
+            for h in seen.iter() {
+                assert!(h.contains("x-hwid: hw-1\r\n") && h.contains("x-device-model: pc\r\n"), "{h}");
+            }
+        }
+        // Without permission to retry (an own User-Agent), one request and the links.
+        o.retry_as_json = false;
+        let f = fetch(&url, &o).await.unwrap();
+        assert!(!f.json && f.links[0].starts_with("vless://"));
+        assert_eq!(seen.lock().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn no_retry_without_websocket_or_without_json() {
+        // Plain TCP links need nothing from the JSON.
+        let (port, seen) = panel("ss://YWVzLTI1Ni1nY206cHc@1.2.3.4:8388#ss\n", Some(PANEL_JSON)).await;
+        let mut o = opts();
+        o.retry_as_json = true;
+        let f = fetch(&format!("http://127.0.0.1:{port}/sub"), &o).await.unwrap();
+        assert!(!f.json);
+        assert_eq!(seen.lock().len(), 1);
+        // A panel with links only: the second answer is links again, the first stays.
+        let (port, seen) = panel(WS_LINK, None).await;
+        let f = fetch(&format!("http://127.0.0.1:{port}/sub"), &o).await.unwrap();
+        assert!(!f.json && f.links.len() == 1);
+        assert_eq!(seen.lock().len(), 2);
     }
 
     #[test]

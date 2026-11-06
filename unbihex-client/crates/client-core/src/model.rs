@@ -50,6 +50,9 @@ pub struct Subscription {
     pub last_error: Option<String>,
     /// The user renamed it: keep the name on updates.
     pub custom_name: bool,
+    /// The panel gave an Xray JSON for `subscription::JSON_USER_AGENT` when its share
+    /// links lacked WebSocket settings: updates ask for the JSON right away.
+    pub json_user_agent: bool,
 }
 
 impl Default for Subscription {
@@ -66,6 +69,7 @@ impl Default for Subscription {
             web_page_url: None,
             last_error: None,
             custom_name: false,
+            json_user_agent: false,
         }
     }
 }

@@ -21,6 +21,12 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   nothing from the hardware), `x-device-os`, `x-ver-os`, `x-device-model` — the computer's name or the phone's model,
   which can be changed in the settings. A switch in the settings turns them off; they never go into DNS or proxied
   traffic.
+  Share links carry no WebSocket headers, and some servers answer a WebSocket only with the User-Agent from the
+  panel's JSON config (any other request gets a stub site). So when a panel sends links and some use WebSocket,
+  HTTPUpgrade or XHTTP, the client asks once more with the User-Agent `v2rayN/7.10.0`, for which panels (Remnawave
+  and others) give an Xray JSON, and the same device data, so no extra device shows up in the panel. If JSON comes
+  back, its servers are used (with the transport `headers`), and later updates ask for it right away. A
+  subscription's own User-Agent is sent as is, without the second request.
   Subscriptions and rule databases are downloaded over `https://` only; `http://` is allowed just for addresses
   of this computer and the local network (`127.0.0.1`, `localhost`, `192.168.x.x` and so on), and redirects to
   `http://` on the internet are refused. A subscription response is at most 8 MB, a database file at most 256 MB

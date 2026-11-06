@@ -5,7 +5,7 @@
 use base64::Engine;
 use serde_json::Value;
 
-use super::{decode, host_port, split_parts};
+use super::{WsHeaders, decode, host_port, split_parts};
 use crate::config::{OutboundConfig, Secret, TlsConfig, VmessConfig};
 use crate::error::{Error, Result};
 use crate::outbound::ws::WsConfig;
@@ -23,6 +23,7 @@ struct Fields {
     alpn: String,
     fp: String,
     insecure: bool,
+    headers: WsHeaders,
 }
 
 pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
@@ -47,6 +48,8 @@ fn url_form(rest: &str) -> Result<(String, String, u16, Fields)> {
         let v = v.into_owned();
         match k.as_ref() {
             "encryption" | "scy" => f.cipher = v,
+            "headers" => f.headers.set_param(&v)?,
+            "ua" => f.headers.ua = v,
             "type" => f.net = v,
             "headerType" => f.header_type = v,
             "host" => f.host = v,
@@ -85,6 +88,18 @@ fn json_form(body: &str) -> Result<(String, String, u16, Fields)> {
         .ok()
         .filter(|p| *p != 0)
         .ok_or_else(|| Error::config("vmess link: invalid port"))?;
+    let headers = WsHeaders {
+        // An object, or the same JSON as a string, as in the URL form.
+        json: match &j["headers"] {
+            Value::String(s) if !s.is_empty() => Some(
+                serde_json::from_str(s)
+                    .map_err(|_| Error::config("vmess link: headers is not valid JSON"))?,
+            ),
+            Value::String(_) => None,
+            v => Some(v.clone()),
+        },
+        ua: field("ua"),
+    };
     let f = Fields {
         cipher: field("scy"),
         net: field("net"),
@@ -97,6 +112,7 @@ fn json_form(body: &str) -> Result<(String, String, u16, Fields)> {
         fp: field("fp"),
         insecure: matches!(field("allowInsecure").as_str(), "1" | "true")
             || matches!(field("insecure").as_str(), "1" | "true"),
+        headers,
     };
     // `aid` (alterId) is ignored, as Xray does: only the AEAD header exists today.
     Ok((field("id"), field("add"), port, f))
@@ -127,6 +143,7 @@ fn build(tag: &str, uuid: String, server: String, port: u16, f: Fields) -> Resul
             path: f.path.clone(),
             host: host.clone(),
             httpupgrade: f.net.eq_ignore_ascii_case("httpupgrade"),
+            headers: f.headers.build()?,
         }),
         other => return Err(Error::Unsupported(format!("vmess transport type={other}"))),
     };
@@ -139,6 +156,7 @@ fn build(tag: &str, uuid: String, server: String, port: u16, f: Fields) -> Resul
             // Like v2rayN: without an SNI the HTTP host names the site.
             let sni = Some(f.sni.clone())
                 .filter(|s| !s.is_empty())
+                .or_else(|| ws.as_ref().and_then(|w| w.host_header().map(String::from)))
                 .or_else(|| host.clone())
                 .or_else(|| Some(server.clone()));
             Some(TlsConfig {

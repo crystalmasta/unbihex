@@ -1,8 +1,10 @@
 //! WebSocket (RFC 6455) and Xray's HTTPUpgrade, client side (SPEC §11.10): an HTTP/1.1
 //! Upgrade request over an established TCP or TLS stream, then binary frames
 //! (WebSocket) or the bare stream (HTTPUpgrade). The request looks like Xray's:
-//! `Host` from the config, else the TLS name, else the server; Chrome's User-Agent.
+//! `Host` from the config, else the TLS name, else the server; Chrome's User-Agent
+//! unless the config's `headers` give one, then the rest of those headers.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker, ready};
@@ -34,9 +36,67 @@ pub struct WsConfig {
     /// Xray's HTTPUpgrade: after `101` the stream carries data as is, without frames.
     #[serde(default)]
     pub httpupgrade: bool,
+    /// Extra request headers, as Xray's `wsSettings.headers` and sing-box's
+    /// `transport.headers`: `User-Agent` replaces ours, `Host` counts when `host` is
+    /// empty (old Xray configs), the headers of the Upgrade itself are never replaced.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// Most extra headers a config may set.
+const MAX_HEADERS: usize = 32;
+/// Longest extra header value.
+const MAX_HEADER_VALUE: usize = 2048;
+/// Longest name plus value of all extra headers together.
+const MAX_HEADERS_TOTAL: usize = 8 * 1024;
+
+/// Headers the Upgrade sets itself; a config's value for them is ignored.
+fn reserved_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "host" | "connection" | "upgrade" | "content-length" | "transfer-encoding"
+    ) || n.starts_with("sec-websocket-")
+}
+
+/// An HTTP token (RFC 9110 §5.6.2).
+fn header_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
 impl WsConfig {
+    /// `Host` of the request when set: `host`, else a `Host` in `headers`.
+    pub fn host_header(&self) -> Option<&str> {
+        self.host.as_deref().filter(|h| !h.is_empty()).or_else(|| {
+            self.headers
+                .iter()
+                .find(|(k, v)| k.eq_ignore_ascii_case("host") && !v.is_empty())
+                .map(|(_, v)| v.as_str())
+        })
+    }
+
+    /// The extra headers as sent: `User-Agent` first, without the reserved ones,
+    /// one per name (case-insensitive); nothing that could break the head even
+    /// when `validate` was skipped.
+    fn extra_headers(&self) -> Vec<(&str, &str)> {
+        let mut out: Vec<(&str, &str)> = Vec::new();
+        for (k, v) in &self.headers {
+            if header_name_ok(k)
+                && !v.contains(['\r', '\n'])
+                && !reserved_header(k)
+                && !out.iter().any(|(n, _)| n.eq_ignore_ascii_case(k))
+            {
+                out.push((k, v));
+            }
+        }
+        out.sort_by_key(|(k, _)| !k.eq_ignore_ascii_case("user-agent"));
+        out
+    }
+
     /// Checks what goes into the request head.
     pub fn validate(&self) -> Result<()> {
         let bad = |c: char| c.is_ascii_control() || c == ' ';
@@ -48,10 +108,29 @@ impl WsConfig {
                 "ws: path must start with '/' and have no spaces",
             ));
         }
-        if let Some(h) = &self.host
+        if let Some(h) = self.host_header()
             && (h.len() > 255 || h.chars().any(|c| bad(c) || c == '/'))
         {
             return Err(Error::config("ws: invalid host"));
+        }
+        if self.headers.len() > MAX_HEADERS {
+            return Err(Error::config(format!(
+                "ws: more than {MAX_HEADERS} headers"
+            )));
+        }
+        let mut total = 0;
+        for (k, v) in &self.headers {
+            total += k.len() + v.len();
+            // Tabs are the only control character a field value may hold.
+            if !header_name_ok(k)
+                || v.len() > MAX_HEADER_VALUE
+                || v.chars().any(|c| c.is_control() && c != '\t')
+            {
+                return Err(Error::config(format!("ws: invalid header {k:?}")));
+            }
+        }
+        if total > MAX_HEADERS_TOTAL {
+            return Err(Error::config("ws: headers too large"));
         }
         Ok(())
     }
@@ -140,11 +219,7 @@ pub async fn connect<S>(mut io: S, cfg: &WsConfig, default_host: &str) -> Result
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let host = cfg
-        .host
-        .as_deref()
-        .filter(|h| !h.is_empty())
-        .unwrap_or(default_host);
+    let host = cfg.host_header().unwrap_or(default_host);
     let mut nonce = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut nonce);
     let key = base64::engine::general_purpose::STANDARD.encode(nonce);
@@ -156,12 +231,15 @@ where
     } else {
         format!("Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n")
     };
-    let head = format!(
-        "GET {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {}\r\nConnection: Upgrade\r\n\
-         Upgrade: websocket\r\n{ws_headers}\r\n",
-        cfg.request_path(),
-        super::xhttp::chrome_user_agent(),
-    );
+    let mut head = format!("GET {} HTTP/1.1\r\nHost: {host}\r\n", cfg.request_path());
+    let extra = cfg.extra_headers();
+    if !extra.iter().any(|(k, _)| k.eq_ignore_ascii_case("user-agent")) {
+        head += &format!("User-Agent: {}\r\n", super::xhttp::chrome_user_agent());
+    }
+    for (k, v) in extra {
+        head += &format!("{k}: {v}\r\n");
+    }
+    head += &format!("Connection: Upgrade\r\nUpgrade: websocket\r\n{ws_headers}\r\n");
     io.write_all(head.as_bytes()).await?;
     io.flush().await?;
 
@@ -547,6 +625,7 @@ mod tests {
             path: "/v?ed=2048".into(),
             host: Some("cdn.example".into()),
             httpupgrade: false,
+            ..Default::default()
         };
         let srv = tokio::spawn(async move {
             // Data glued to the 101 must not be lost.
@@ -609,6 +688,7 @@ mod tests {
             path: "/up".into(),
             host: None,
             httpupgrade: true,
+            ..Default::default()
         };
         let srv = tokio::spawn(async move {
             let head = serve_upgrade(&mut server, b"raw").await;
@@ -626,6 +706,102 @@ mod tests {
         s.write_all(b"ping").await.unwrap();
         s.flush().await.unwrap();
         srv.await.unwrap();
+    }
+
+    const IPHONE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) \
+                             AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
+
+    #[tokio::test]
+    async fn config_headers_replace_the_user_agent_but_not_the_upgrade() {
+        for httpupgrade in [false, true] {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let cfg = WsConfig {
+                path: "/".into(),
+                host: None,
+                httpupgrade,
+                headers: [
+                    ("user-agent", IPHONE_UA),
+                    ("Host", "app.example"),
+                    ("X-Custom", "a\tb"),
+                    ("Connection", "close"),
+                    ("Upgrade", "h2c"),
+                    ("Sec-WebSocket-Key", "AAAAAAAAAAAAAAAAAAAAAA=="),
+                    ("Sec-WebSocket-Version", "8"),
+                    ("Content-Length", "5"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            };
+            cfg.validate().unwrap();
+            let srv = tokio::spawn(async move {
+                let head = serve_upgrade(&mut server, b"").await;
+                let lines: Vec<&str> = head.split("\r\n").collect();
+                assert_eq!(lines[1], "Host: app.example", "{head}");
+                assert_eq!(lines[2], format!("user-agent: {IPHONE_UA}"), "{head}");
+                let lower = head.to_ascii_lowercase();
+                assert_eq!(lower.matches("user-agent:").count(), 1, "{head}");
+                assert_eq!(lower.matches("host:").count(), 1, "{head}");
+                assert!(head.contains("X-Custom: a\tb\r\n"), "{head}");
+                assert!(head.contains("Connection: Upgrade\r\nUpgrade: websocket\r\n"), "{head}");
+                for gone in ["close", "h2c", "AAAAAAAA", "version: 8", "content-length"] {
+                    assert!(!lower.contains(&gone.to_ascii_lowercase()), "{gone}: {head}");
+                }
+                server
+            });
+            connect(client, &cfg, "default.example").await.unwrap();
+            drop(srv.await.unwrap());
+        }
+    }
+
+    #[test]
+    fn host_field_wins_over_host_header_and_bad_headers_are_refused() {
+        let mut cfg = WsConfig {
+            host: Some("field.example".into()),
+            headers: [("Host".to_string(), "header.example".to_string())].into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.host_header(), Some("field.example"));
+        cfg.host = Some(String::new());
+        assert_eq!(cfg.host_header(), Some("header.example"));
+        assert!(cfg.validate().is_ok());
+        for (k, v) in [
+            ("User-Agent", "a\r\nX-Injected: 1"),
+            ("User-Agent", "a\nb"),
+            ("User-Agent", "a\0b"),
+            ("Bad Name", "v"),
+            ("Bad:Name", "v"),
+            ("", "v"),
+            ("Host", "evil.example/path"),
+        ] {
+            let cfg = WsConfig {
+                headers: [(k.to_string(), v.to_string())].into(),
+                ..Default::default()
+            };
+            assert!(cfg.validate().is_err(), "{k:?}: {v:?}");
+            // Even unvalidated, nothing breaks the head.
+            assert!(
+                cfg.extra_headers()
+                    .iter()
+                    .all(|(k, v)| !k.is_empty() && !v.contains(['\r', '\n'])),
+                "{k:?}"
+            );
+        }
+        let long = WsConfig {
+            headers: [("User-Agent".to_string(), "x".repeat(MAX_HEADER_VALUE + 1))].into(),
+            ..Default::default()
+        };
+        assert!(long.validate().is_err());
+        let many = WsConfig {
+            headers: (0..=MAX_HEADERS).map(|i| (format!("X-{i}"), "v".into())).collect(),
+            ..Default::default()
+        };
+        assert!(many.validate().is_err());
+        let parsed: WsConfig = serde_json::from_str(
+            r#"{"path":"/","headers":{"User-Agent":"ua"}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.headers["User-Agent"], "ua");
     }
 
     #[tokio::test]

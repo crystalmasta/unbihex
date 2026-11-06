@@ -1,7 +1,7 @@
 //! `trojan://password@host:port?security=tls&sni=…&fp=…&type=ws&path=…&host=…#name`
 //! (Xray's share-link format; `security` defaults to `tls`).
 
-use super::{decode, host_port, split_parts};
+use super::{WsHeaders, decode, host_port, split_parts};
 use crate::config::{OutboundConfig, RealityConfig, Secret, TlsConfig, TrojanConfig};
 use crate::error::{Error, Result};
 use crate::outbound::ws::WsConfig;
@@ -19,9 +19,12 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut net = String::new();
     let (mut sni, mut alpn, mut fp, mut pbk) = (None, Vec::new(), None, None);
     let (mut sid, mut path, mut host) = (String::new(), String::new(), None);
+    let mut headers = WsHeaders::default();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let v = v.into_owned();
         match k.as_ref() {
+            "headers" => headers.set_param(&v)?,
+            "ua" => headers.ua = v,
             "security" if !v.is_empty() => security = v.to_ascii_lowercase(),
             "sni" | "peer" | "serverName" if !v.is_empty() => sni = Some(v),
             "alpn" => {
@@ -61,16 +64,16 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
         "" | "tcp" | "raw" => None,
         "ws" | "websocket" | "httpupgrade" => Some(WsConfig {
             path,
-            host: host.clone(),
+            host,
             httpupgrade: net == "httpupgrade",
+            headers: headers.build()?,
         }),
         other => return Err(Error::Unsupported(format!("trojan transport type={other}"))),
     };
     let (tls, reality) = match security.as_str() {
         "tls" => {
             // Like v2rayN: without an SNI the HTTP host names the site.
-            let sni = sni
-                .or_else(|| host.filter(|_| ws.is_some()))
+            let sni = sni.or_else(|| ws.as_ref().and_then(|w| w.host_header().map(String::from)))
                 .or_else(|| Some(server.clone()));
             let tls = TlsConfig {
                 enabled: true,

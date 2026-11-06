@@ -12,7 +12,7 @@ use crate::geo::Geo;
 use crate::links::{b64_decode, is_share_link, parse_server};
 use crate::model::{AppData, Server, Settings, Subscription, now_secs};
 use crate::ping::{describe_error, measure};
-use crate::subscription::{Device, FetchOptions, fallback_name, fetch};
+use crate::subscription::{Device, FetchOptions, JSON_USER_AGENT, fallback_name, fetch};
 
 const STATE_FILE: &str = "state.json";
 /// Shortest LAN proxy password a user may set (generated ones are 32 characters).
@@ -200,23 +200,28 @@ impl Client {
 
     /// Downloads a subscription again; returns the number of servers.
     pub async fn update_subscription(&self, id: Uuid) -> Result<usize> {
-        let (url, opts) = {
+        let (url, opts, as_json) = {
             let d = self.data.read();
             let sub = d
                 .subscriptions
                 .iter()
                 .find(|s| s.id == id)
                 .ok_or_else(|| ClientError::NotFound("подписка".into()))?;
-            let ua = sub
-                .user_agent
-                .clone()
-                .filter(|u| !u.trim().is_empty())
-                .unwrap_or_else(|| d.settings.user_agent.clone());
+            let own = sub.user_agent.clone().filter(|u| !u.trim().is_empty());
+            // An own User-Agent is sent as is; otherwise links that lack WebSocket
+            // settings make us ask for the panel's JSON (remembered once it works).
+            let as_json = own.is_none() && sub.json_user_agent;
+            let ua = match own.clone() {
+                Some(ua) => ua,
+                None if as_json => JSON_USER_AGENT.to_string(),
+                None => d.settings.user_agent.clone(),
+            };
             let device = d.settings.send_hwid.then(|| Device {
                 hwid: d.settings.hwid.clone(),
                 name: d.settings.device_name.clone(),
             });
-            (sub.url.clone(), FetchOptions { user_agent: ua, device })
+            let retry_as_json = own.is_none() && !as_json;
+            (sub.url.clone(), FetchOptions { user_agent: ua, device, retry_as_json }, as_json)
         };
         match fetch(&url, &opts).await {
             Ok(f) => {
@@ -242,6 +247,11 @@ impl Client {
                         sub.web_page_url = f.web_page_url;
                         sub.updated_at = Some(now_secs());
                         sub.last_error = None;
+                        // Remembered when the retry got JSON; forgotten when the
+                        // panel stops giving it.
+                        if f.json || as_json {
+                            sub.json_user_agent = f.json && sub.user_agent.is_none();
+                        }
                     }
                     d.ensure_selection();
                 })?;
@@ -298,6 +308,7 @@ impl Client {
             }
             if let Some(ua) = user_agent {
                 sub.user_agent = Some(ua.trim().to_string()).filter(|u| !u.is_empty());
+                sub.json_user_agent = false;
             }
             Ok(())
         })?

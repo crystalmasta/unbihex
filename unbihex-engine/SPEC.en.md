@@ -56,7 +56,7 @@ unbihex-engine/
 │  ├─ inbound/       # socks, http, mixed, tun (§10); vless, reality, reality_shape, mux: `server` feature only (§16)
 │  └─ outbound/      # vless, trojan, vmess, ws, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
 │                    # hysteria2/, shadowsocks, socks, direct, block, balancer (§11)
-└─ tests/            # integration.rs, xray_interop.rs, hysteria2_interop.rs (§15)
+└─ tests/            # integration.rs, xray_interop.rs, singbox_interop.rs, hysteria2_interop.rs (§15)
 ```
 
 The client (`../unbihex-client`) and the test server (`../test_server`) use the engine by relative path and carry the
@@ -261,6 +261,11 @@ percent-decoded, the host may be IPv6 in brackets.
   - `type=tcp|raw` (or none), or `type=xhttp|splithttp` with `path`, `host`, `mode`, `extra` (Xray settings JSON, §11.5),
     or `type=ws|httpupgrade` with `path` and `host` (§11.10; `host` is the first of a comma list and, without `sni`,
     the TLS name, as in v2rayN); Vision and REALITY over WebSocket are an error, as in Xray;
+  - `ws`/`httpupgrade` also take the client's own parameters for the request headers (§11.10): `headers`, a JSON
+    object of strings (the client carries Xray's `wsSettings.headers` / `httpupgradeSettings.headers` and sing-box's
+    `transport.headers` into it), and `ua`, a single `User-Agent` that wins over one in `headers`; a `Host` in
+    `headers` counts when there is no `host` and also gives the TLS name. Not a JSON object, a non-string value or
+    CR/LF is an error;
   - `flow=xtls-rprx-vision` (`-udp443` too);
   - other `type` values (`grpc`, `h2`, …), `flow`, `encryption`, `headerType` and
     `security` values give a clear
@@ -277,12 +282,13 @@ percent-decoded, the host may be IPv6 in brackets.
 - `vmess://` (§11.9): v2rayN base64 JSON (`add`, `port`, `id`, `scy`, `net`, `type`, `host`, `path`, `tls`, `sni`,
   `alpn`, `fp`) or the URL form `vmess://<uuid>@<host>:<port>?type=…&security=…&encryption=…#<name>`. `net`/`type`:
   `tcp`/`raw` without header camouflage, `ws`, `httpupgrade` (§11.10); `host` is the first of a comma list; without
-  `sni` the TLS name comes from `host`, then the server (as in v2rayN). Refused: other transports (`grpc`, `h2`,
+  `sni` the TLS name comes from `host`, then the server (as in v2rayN). `headers` and `ua` as with VLESS (in v2rayN
+  JSON `headers` is an object or the same JSON as a string). Refused: other transports (`grpc`, `h2`,
   `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, `allowInsecure=1`, the `none`/`zero`
   ciphers.
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, `tls` by default; `sni` / `peer` /
-  `serverName`, `alpn`, `fp`, and `pbk`, `sid` for REALITY; `type=tcp|raw|ws|httpupgrade` with `path` and `host` (as
-  with VLESS: without `sni` the WebSocket's TLS name comes from `host`). Refused: `security=none` and others, other
+  `serverName`, `alpn`, `fp`, and `pbk`, `sid` for REALITY; `type=tcp|raw|ws|httpupgrade` with `path`, `host`,
+  `headers` and `ua` (as with VLESS: without `sni` the WebSocket's TLS name comes from `host`). Refused: `security=none` and others, other
   transports, `headerType` other than `none`, `flow`, `allowInsecure=1`, an empty password.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, versions 0–2, §11.11): `hostname`, `addresses` (port 443 by
   default), `custom_sni`, `has_ipv6`, user and password, `certificate` (a DER chain), `anti_dpi` → `fragment`, `name`.
@@ -779,9 +785,15 @@ What Xray's client sends, byte for byte (Xray sources `proxy/vmess/{aead,encodin
 
 ### 11.10 WebSocket and HTTPUpgrade
 
-`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false}` (on VLESS, VMess and Trojan). The client side of RFC 6455 over TCP or
-TLS: `GET <path>` with `Host` (from `host`, else the TLS SNI, else the server, as Xray does), today's Chrome
-User-Agent, `Upgrade: websocket`, a random `Sec-WebSocket-Key`; only a `101` with `Upgrade: websocket` and the right
+`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false, "headers": {"User-Agent": "…"}}` (on VLESS, VMess
+and Trojan). The client side of RFC 6455 over TCP or TLS: `GET <path>` with `Host` (from `host`, else a `Host` in
+`headers`, as old Xray configs keep it, else the TLS SNI, else the server, as Xray does), the `User-Agent` from
+`headers` or else today's Chrome one, the other `headers` (as Xray's `wsSettings.headers` and sing-box's
+`transport.headers`: some servers behind nginx give a `101` only to a request with the right User-Agent and a `200`
+with a site to any other), then `Connection: Upgrade`, `Upgrade: websocket`, a random `Sec-WebSocket-Key`. The
+Upgrade's own headers (`Connection`, `Upgrade`, `Sec-WebSocket-*`) and `Content-Length` / `Transfer-Encoding` are
+never taken from `headers`; one name, ignoring case, gives one header. Checks: a name is an HTTP token of up to 128
+bytes, a value has no control characters (but tab) and is up to 2 KiB, at most 32 headers and 8 KiB in all; only a `101` with `Upgrade: websocket` and the right
 `Sec-WebSocket-Accept` is accepted. Data travels in masked binary frames (up to 16 KiB); frames up to 1 MiB are
 accepted; a ping gets a pong (while under 20 KiB is unsent; past that the ping goes unanswered, so a server that pings
 and never reads cannot grow the queue), a close gets a close back and ends the stream; text frames and extensions are errors.
@@ -988,11 +1000,14 @@ Running: `cargo test`, `cargo test --features server`, `cargo clippy --all-targe
   TLS; Shadowsocks with all methods (TCP and UDP); a block rule; the `link` outbound and SOCKS authentication; IP rules
   for host names and loop refusal; hot reload (open connections live on, new ones switch); loopback without a password;
   the mixed inbound; a missing `default_interface`.
-- **Against real servers** when `XRAY_BIN` / `HYSTERIA_BIN` are set (otherwise the tests return at once):
+- **Against real servers** when `XRAY_BIN` / `SINGBOX_BIN` / `HYSTERIA_BIN` are set (otherwise the tests return at once):
   `xray_interop.rs` — Vision and REALITY, XHTTP in all modes, the XHTTP CDN format (GET packet-up, tokenish, custom
   session IDs) over HTTP/2+TLS, HTTP/1.1+TLS and HTTP/1.1 without TLS, VLESS over WebSocket and HTTPUpgrade with and
-  without TLS, VMess with both ciphers over TCP, WebSocket and HTTPUpgrade with and without TLS, Trojan over TLS (TCP,
-  WebSocket, HTTPUpgrade) and REALITY with fragmentation and a wrong password (TCP and UDP everywhere); `hysteria2_interop.rs` — Hysteria 2 (the
+  without TLS (`Host` and `User-Agent` from `headers`, a wrong `Host` refused, behind an nginx-like gate that lets one
+  User-Agent through, where ours gets a `200`), VMess with both ciphers over TCP, WebSocket and HTTPUpgrade with and without TLS, Trojan over TLS (TCP,
+  WebSocket, HTTPUpgrade) and REALITY with fragmentation and a wrong password (TCP and UDP everywhere);
+  `singbox_interop.rs` — VLESS over sing-box's WebSocket and HTTPUpgrade with `headers`, directly and behind the same
+  gate; `hysteria2_interop.rs` — Hysteria 2 (the
   official server and Xray) with and without Salamander: parallel TCP and UDP, fragments, refusals for a wrong auth /
   root / SNI / pin and for a failed protect.
 - The test server: §16.3.

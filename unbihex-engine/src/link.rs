@@ -156,6 +156,50 @@ fn decode(s: &str) -> Result<String> {
         .map_err(|_| Error::config("link contains invalid percent-encoding"))
 }
 
+/// Extra HTTP headers of a WebSocket/HTTPUpgrade link (SPEC §5.4): `headers`, the
+/// client's own parameter (a JSON object of strings, carried over from Xray's
+/// `wsSettings.headers` and sing-box's `transport.headers`), and `ua`, a bare
+/// `User-Agent` that wins over one in `headers`.
+#[derive(Default)]
+struct WsHeaders {
+    json: Option<serde_json::Value>,
+    ua: String,
+}
+
+impl WsHeaders {
+    /// Takes the `headers` parameter of a URL-form link.
+    fn set_param(&mut self, v: &str) -> Result<()> {
+        if !v.is_empty() {
+            self.json = Some(
+                serde_json::from_str(v)
+                    .map_err(|_| Error::config("link: headers is not valid JSON"))?,
+            );
+        }
+        Ok(())
+    }
+
+    fn build(self) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut out = std::collections::BTreeMap::new();
+        match self.json {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::Object(m)) => {
+                for (k, v) in m {
+                    let v = v
+                        .as_str()
+                        .ok_or_else(|| Error::config("link: header values must be strings"))?;
+                    out.insert(k, v.to_string());
+                }
+            }
+            Some(_) => return Err(Error::config("link: headers must be a JSON object")),
+        }
+        if !self.ua.is_empty() {
+            out.retain(|k, _| !k.eq_ignore_ascii_case("user-agent"));
+            out.insert("User-Agent".into(), self.ua);
+        }
+        Ok(out)
+    }
+}
+
 fn host_port(s: &str) -> Result<(String, u16)> {
     let t: TargetAddr = decode(s)?.parse()?;
     let host = match t.addr {
@@ -183,9 +227,12 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut fingerprint = None;
     let mut net = String::new();
     let mut xhttp_fields = serde_json::Map::new();
+    let mut headers = WsHeaders::default();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let v = v.into_owned();
         match k.as_ref() {
+            "headers" => headers.set_param(&v)?,
+            "ua" => headers.ua = v,
             "security" => security = v.to_ascii_lowercase(),
             "sni" | "serverName" if !v.is_empty() => sni = Some(v),
             "alpn" => {
@@ -240,13 +287,14 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
                 path: field("path").to_string(),
                 host: host.map(String::from),
                 httpupgrade: net == "httpupgrade",
+                headers: headers.build()?,
             };
             (None, Some(ws))
         }
         other => return Err(Error::Unsupported(format!("vless transport type={other}"))),
     };
     // Over WebSocket, as in v2rayN, the HTTP host names the site when there is no SNI.
-    let sni = sni.or_else(|| ws.as_ref().and_then(|w| w.host.clone()));
+    let sni = sni.or_else(|| ws.as_ref().and_then(|w| w.host_header().map(String::from)));
     let (tls, reality) = match security.as_str() {
         "tls" => (
             Some(TlsConfig {
@@ -464,6 +512,79 @@ mod tests {
         );
         assert!(parse_link(&reality, "p").is_err());
         assert!(parse_link(&format!("vless://{UUID}@h.com:443?security=tls&type=ws&path=ws"), "p").is_err());
+    }
+
+    #[test]
+    fn websocket_headers_from_every_link_form() {
+        let ua = "Mozilla/5.0 (iPhone) Safari/604.1";
+        let headers = format!(
+            r#"{{"User-Agent":"{ua}","Host":"app.example","X-A":"1"}}"#
+        );
+        let q = format!(
+            "type=ws&security=tls&headers={}",
+            percent_encoding::utf8_percent_encode(&headers, percent_encoding::NON_ALPHANUMERIC)
+        );
+        let vmess_json = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(
+                serde_json::json!({"add":"h.com","port":443,"id":UUID,"net":"ws","tls":"tls",
+                    "headers": serde_json::from_str::<serde_json::Value>(&headers).unwrap()})
+                .to_string()
+            )
+        );
+        for link in [
+            format!("vless://{UUID}@h.com:443?{q}"),
+            format!("vmess://{UUID}@h.com:443?{q}"),
+            format!("trojan://pw@h.com:443?{q}"),
+            vmess_json,
+        ] {
+            let (ws, tls) = match parse_link(&link, "p").unwrap() {
+                OutboundConfig::Vless(v) => (v.ws, v.tls),
+                OutboundConfig::Vmess(v) => (v.ws, v.tls),
+                OutboundConfig::Trojan(t) => (t.ws, t.tls),
+                other => panic!("{other:?}"),
+            };
+            let ws = ws.unwrap();
+            assert_eq!(ws.headers["User-Agent"], ua, "{link}");
+            assert_eq!(ws.headers["X-A"], "1", "{link}");
+            assert_eq!(ws.host_header(), Some("app.example"), "{link}");
+            assert_eq!(tls.unwrap().sni.as_deref(), Some("app.example"), "{link}");
+        }
+        // `ua` alone, and over a User-Agent in `headers`.
+        let OutboundConfig::Vless(v) = parse_link(
+            &format!("vless://{UUID}@h.com:443?type=ws&security=tls&ua=Happ%2F1.0"),
+            "p",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(v.ws.unwrap().headers["User-Agent"], "Happ/1.0");
+        let OutboundConfig::Trojan(t) = parse_link(
+            &format!("trojan://pw@h.com:443?type=httpupgrade&{q}&ua=Other%2F2"),
+            "p",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        let ws = t.ws.unwrap();
+        assert_eq!(ws.headers["User-Agent"], "Other/2");
+        assert_eq!(ws.headers.len(), 3);
+        // Broken or dangerous headers are refused.
+        for bad in [
+            "headers=%7B",
+            "headers=%5B%5D",
+            "headers=%7B%22X%22%3A1%7D",
+            "headers=%7B%22X%22%3A%22a%5Cr%5CnB%3A%20c%22%7D",
+            "ua=a%0D%0AB%3A%20c",
+        ] {
+            for link in [
+                format!("vless://{UUID}@h.com:443?type=ws&security=tls&{bad}"),
+                format!("vmess://{UUID}@h.com:443?type=ws&security=tls&{bad}"),
+                format!("trojan://pw@h.com:443?type=ws&{bad}"),
+            ] {
+                assert!(parse_link(&link, "p").is_err(), "{link}");
+            }
+        }
     }
 
     #[test]

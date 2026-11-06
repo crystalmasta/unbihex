@@ -28,7 +28,7 @@ use unbihex_engine::outbound::xhttp::{XhttpClient, XhttpConfig};
 use unbihex_engine::outbound::{BoxStream, Outbound, ServerEndpoint};
 use unbihex_engine::session::{Network, Session};
 
-use common::{UUID, free_port, init_tracing, tcp_echo, udp_echo};
+use common::{IPHONE_UA, UUID, free_port, init_tracing, tcp_echo, ua_gate, udp_echo};
 
 struct Xray {
     child: Child,
@@ -858,6 +858,7 @@ async fn vmess_against_xray() {
                         path: "/vm?ed=2048".into(),
                         host: Some("cdn.test".into()),
                         httpupgrade: network == "httpupgrade",
+                        ..Default::default()
                     }),
                 };
                 let server = ServerEndpoint {
@@ -909,7 +910,9 @@ fn stream_settings(network: &str, tls: bool, dir: &std::path::Path) -> serde_jso
 }
 
 /// VLESS over WebSocket and HTTPUpgrade against Xray's VLESS inbound, with and
-/// without TLS; TCP and UDP echo through each.
+/// without TLS; TCP and UDP echo through each. The client sends its `Host` and
+/// `User-Agent` from `headers` (as a panel's Xray JSON gives them); without TLS an
+/// nginx-like gate in front of Xray lets only that User-Agent through.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn vless_websocket_against_xray() {
     use unbihex_engine::config::{Secret, VlessConfig};
@@ -931,12 +934,15 @@ async fn vless_websocket_against_xray() {
     for network in ["ws", "httpupgrade"] {
         for tls in [true, false] {
             let port = free_port();
+            // Xray checks the Host of the Upgrade when its inbound names one.
+            let mut stream = stream_settings(network, tls, &dir);
+            stream[format!("{network}Settings")]["host"] = "app.test".into();
             let config = serde_json::json!({
                 "log": { "loglevel": "debug" },
                 "inbounds": [{
                     "listen": "127.0.0.1", "port": port, "protocol": "vless",
                     "settings": { "clients": [{ "id": UUID }], "decryption": "none" },
-                    "streamSettings": stream_settings(network, tls, &dir)
+                    "streamSettings": stream
                 }],
                 "outbounds": [loopback_freedom()]
             });
@@ -954,12 +960,16 @@ async fn vless_websocket_against_xray() {
                 xhttp: None,
                 ws: Some(WsConfig {
                     path: "/p?ed=2048".into(),
-                    host: Some("cdn.test".into()),
+                    host: None,
                     httpupgrade: network == "httpupgrade",
+                    headers: [("Host", "app.test"), ("User-Agent", IPHONE_UA), ("X-Test", "1")]
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
                 }),
             };
             let build = |cfg: &VlessConfig| {
-                VlessOutbound::new(cfg, endpoint(port), Arc::new(SocketFactory::default()))
+                VlessOutbound::new(cfg, endpoint(cfg.port), Arc::new(SocketFactory::default()))
                     .unwrap()
                     .with_extra_roots(cfg, vec![pem.cert_der.clone()])
                     .unwrap()
@@ -973,6 +983,27 @@ async fn vless_websocket_against_xray() {
             wrong.ws.as_mut().unwrap().path = "/other".into();
             let r = build(&wrong).connect_tcp(&session(echo)).await;
             assert!(r.is_err(), "wrong path must fail");
+            // So is a wrong Host.
+            let mut wrong = cfg.clone();
+            wrong.ws.as_mut().unwrap().headers.insert("Host".into(), "other.test".into());
+            let r = build(&wrong).connect_tcp(&session(echo)).await;
+            assert!(r.is_err(), "wrong host must fail");
+            if !tls {
+                let gate = ua_gate(SocketAddr::from(([127, 0, 0, 1], port)), IPHONE_UA).await;
+                let mut gated = cfg.clone();
+                gated.port = gate.port();
+                eprintln!("vless {network} behind a User-Agent gate");
+                let ob = build(&gated);
+                plain_roundtrip(&ob, echo).await;
+                udp_roundtrip(&ob, uecho).await;
+                // Our own User-Agent gets the site page.
+                gated.ws.as_mut().unwrap().headers.remove("User-Agent");
+                let e = match build(&gated).connect_tcp(&session(echo)).await {
+                    Ok(_) => panic!("the gate must refuse our User-Agent"),
+                    Err(e) => e.to_string(),
+                };
+                assert!(e.contains("200"), "{e}");
+            }
         }
     }
     let _ = std::fs::remove_dir_all(dir);
@@ -1052,6 +1083,7 @@ async fn trojan_against_xray() {
                 path: "/p".into(),
                 host: None,
                 httpupgrade: network == "httpupgrade",
+                ..Default::default()
             }),
         };
         let build = |cfg: &TrojanConfig| {

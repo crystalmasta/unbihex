@@ -177,6 +177,53 @@ pub async fn vless_server() -> SocketAddr {
     addr
 }
 
+/// A User-Agent like the one a provider's panel puts into its Xray JSON.
+pub const IPHONE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) \
+                             AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
+
+/// Stands in for a provider's nginx in front of a WebSocket/HTTPUpgrade server:
+/// passes the request on only when its `User-Agent` is exactly `ua`, and answers any
+/// other with `200` and a site page, as such a server does.
+pub async fn ua_gate(upstream: SocketAddr, ua: &'static str) -> SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    match s.read_u8().await {
+                        Ok(b) if head.len() < 16 * 1024 => head.push(b),
+                        _ => return,
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).into_owned();
+                let ok = text.split("\r\n").skip(1).any(|l| {
+                    l.split_once(':').is_some_and(|(k, v)| {
+                        k.eq_ignore_ascii_case("user-agent") && v.trim() == ua
+                    })
+                });
+                if !ok {
+                    let page = "<html><body>Welcome</body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{page}",
+                        page.len()
+                    );
+                    let _ = s.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let Ok(mut up) = TcpStream::connect(upstream).await else {
+                    return;
+                };
+                if up.write_all(&head).await.is_ok() {
+                    let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;
+                }
+            });
+        }
+    });
+    addr
+}
+
 pub struct TestCert {
     pub cert_der: rustls::pki_types::CertificateDer<'static>,
     key_der: Vec<u8>,

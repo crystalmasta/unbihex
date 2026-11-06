@@ -56,7 +56,7 @@ unbihex-engine/
 │  ├─ inbound/       # socks, http, mixed, tun (§10); vless, reality, reality_shape, mux — только feature server (§16)
 │  └─ outbound/      # vless, trojan, vmess, ws, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
 │                    # hysteria2/, shadowsocks, socks, direct, block, balancer (§11)
-└─ tests/            # integration.rs, xray_interop.rs, hysteria2_interop.rs (§15)
+└─ tests/            # integration.rs, xray_interop.rs, singbox_interop.rs, hysteria2_interop.rs (§15)
 ```
 
 Клиент (`../unbihex-client`) и тестовый сервер (`../test_server`) подключают ядро по относительному пути и несут тот же
@@ -260,6 +260,10 @@ IPv6 в скобках:
   - `type=tcp|raw` (или нет) либо `type=xhttp|splithttp` с `path`, `host`, `mode`, `extra` (JSON настроек Xray, §11.5),
     либо `type=ws|httpupgrade` с `path` и `host` (§11.10; `host` — первый из списка через запятую, без `sni` имя для
     TLS берётся из него — как в v2rayN); Vision и REALITY поверх WebSocket — ошибка, как в Xray;
+  - у `ws`/`httpupgrade` — свои параметры клиента для заголовков запроса (§11.10): `headers` — JSON-объект строк
+    (клиент переносит в него `wsSettings.headers` / `httpupgradeSettings.headers` Xray и `transport.headers`
+    sing-box), `ua` — один `User-Agent`, он главнее `User-Agent` из `headers`; `Host` из `headers` работает, когда
+    нет `host`, и тоже даёт имя для TLS. Не JSON-объект, не строка в значении, CR/LF — ошибка;
   - `flow=xtls-rprx-vision` (`-udp443` тоже);
   - другие `type` (`grpc`, `h2`, …), `flow`, `encryption`, `headerType`, а также `security` — понятная ошибка
     `Unsupported("...")`.
@@ -274,11 +278,12 @@ IPv6 в скобках:
 - `vmess://` (§11.9): base64 JSON v2rayN (`add`, `port`, `id`, `scy`, `net`, `type`, `host`, `path`, `tls`, `sni`,
   `alpn`, `fp`) или URL-вид `vmess://<uuid>@<host>:<port>?type=…&security=…&encryption=…#<name>`. `net`/`type`:
   `tcp`/`raw` без маскировки заголовка, `ws`, `httpupgrade` (§11.10); `host` — первый из списка через запятую; без
-  `sni` имя для TLS берётся из `host`, затем сервера (как в v2rayN). Отклоняются: другие транспорты (`grpc`, `h2`,
+  `sni` имя для TLS берётся из `host`, затем сервера (как в v2rayN). `headers` и `ua` — как у VLESS (в JSON v2rayN
+  `headers` — объект или та же JSON-строка). Отклоняются: другие транспорты (`grpc`, `h2`,
   `xhttp`, …), `headerType` кроме `none`, `security` кроме `tls`, `allowInsecure=1`, шифры `none`/`zero`.
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, по умолчанию `tls`; `sni` / `peer` /
-  `serverName`, `alpn`, `fp`, для REALITY — `pbk`, `sid`; `type=tcp|raw|ws|httpupgrade` с `path` и `host` (как у
-  VLESS, без `sni` имя для TLS у WebSocket — из `host`). Отклоняются: `security=none` и другие, другие транспорты,
+  `serverName`, `alpn`, `fp`, для REALITY — `pbk`, `sid`; `type=tcp|raw|ws|httpupgrade` с `path`, `host`, `headers` и
+  `ua` (как у VLESS, без `sni` имя для TLS у WebSocket — из `host`). Отклоняются: `security=none` и другие, другие транспорты,
   `headerType` кроме `none`, `flow`, `allowInsecure=1`, пустой пароль.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, версии 0–2, §11.11): `hostname`, `addresses` (порт по умолчанию
   443), `custom_sni`, `has_ipv6`, логин и пароль, `certificate` (цепочка DER), `anti_dpi` → `fragment`, `name`.
@@ -763,9 +768,15 @@ VLESS внутри обычных на вид HTTP-запросов, совме�
 
 ### 11.10 WebSocket и HTTPUpgrade
 
-`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false}` (у VLESS, VMess и Trojan). Клиентская часть RFC 6455 поверх TCP или
-TLS: `GET <path>` с `Host` (из `host`, иначе TLS SNI, иначе сервер — как у Xray), User-Agent текущего Chrome,
-`Upgrade: websocket`, случайный `Sec-WebSocket-Key`; ответ — только `101` с `Upgrade: websocket` и верным
+`ws: {"path": "/ws", "host": "cdn.example", "httpupgrade": false, "headers": {"User-Agent": "…"}}` (у VLESS, VMess и
+Trojan). Клиентская часть RFC 6455 поверх TCP или TLS: `GET <path>` с `Host` (из `host`, иначе `Host` из `headers` —
+так в старых конфигах Xray, иначе TLS SNI, иначе сервер — как у Xray), `User-Agent` из `headers`, а без него —
+текущего Chrome, остальные `headers` (как `wsSettings.headers` у Xray и `transport.headers` у sing-box: некоторые
+серверы за nginx отдают `101` только запросу с нужным User-Agent, а остальным — `200` и сайт), затем
+`Connection: Upgrade`, `Upgrade: websocket`, случайный `Sec-WebSocket-Key`. Заголовки самого Upgrade (`Connection`,
+`Upgrade`, `Sec-WebSocket-*`) и `Content-Length` / `Transfer-Encoding` из `headers` не берутся; одно имя без учёта
+регистра — один заголовок. Проверка: имя — токен HTTP до 128 байт, в значении нет управляющих символов (кроме
+табуляции), значение до 2 КиБ, не больше 32 заголовков и 8 КиБ на все; ответ — только `101` с `Upgrade: websocket` и верным
 `Sec-WebSocket-Accept`. Данные — бинарные кадры с маской (до 16 КиБ), принимаются кадры до 1 МиБ; ping получает pong
 (пока неотправленного меньше 20 КиБ, иначе ping остаётся без ответа — сервер, который шлёт ping и не читает, не
 раздувает очередь), close — ответный close и конец потока; текстовые кадры и расширения — ошибка. `?ed=` (ранние данные Xray в заголовке)
@@ -959,11 +970,13 @@ const char *unbihex_version(void);
   методами (TCP и UDP); правило block; outbound `link` и аутентификация SOCKS; IP-правила для имён и запрет петель;
   горячая перезагрузка (открытые соединения живут, новые идут по-новому); loopback без пароля; mixed-inbound;
   несуществующий `default_interface`.
-- **Против настоящих серверов**, если заданы `XRAY_BIN` / `HYSTERIA_BIN` (иначе тесты сразу выходят): `xray_interop.rs`
+- **Против настоящих серверов**, если заданы `XRAY_BIN` / `SINGBOX_BIN` / `HYSTERIA_BIN` (иначе тесты сразу выходят): `xray_interop.rs`
   — Vision и REALITY, XHTTP во всех режимах, CDN-формат XHTTP (GET packet-up, tokenish, свои session ID) по HTTP/2+TLS,
-  HTTP/1.1+TLS и HTTP/1.1 без TLS, VLESS поверх WebSocket и HTTPUpgrade с TLS и без, VMess обоими шифрами поверх TCP,
+  HTTP/1.1+TLS и HTTP/1.1 без TLS, VLESS поверх WebSocket и HTTPUpgrade с TLS и без (`Host` и `User-Agent` из
+  `headers`, неверный `Host` отклоняется, за шлюзом вроде nginx, пропускающим один User-Agent, — наш получает `200`), VMess обоими шифрами поверх TCP,
   WebSocket и HTTPUpgrade с TLS и без, Trojan поверх TLS (TCP, WebSocket, HTTPUpgrade) и REALITY с фрагментацией и
-  неверным паролем (везде TCP и UDP);
+  неверным паролем (везде TCP и UDP); `singbox_interop.rs` — VLESS поверх WebSocket и HTTPUpgrade sing-box с
+  `headers` напрямую и за тем же шлюзом;
   `hysteria2_interop.rs` — Hysteria 2 (официальный сервер и Xray) с Salamander и без:
   параллельные TCP и UDP, фрагменты, отказы при неверных auth / корне / SNI / пине и при отказе protect.
 - Тестовый сервер — §16.3.
