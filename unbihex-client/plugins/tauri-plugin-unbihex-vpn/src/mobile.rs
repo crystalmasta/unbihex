@@ -53,8 +53,12 @@ impl<R: Runtime> UnbihexVpn<R> {
 
     /// Brings the tunnel down.
     pub fn stop(&self) -> crate::Result<()> {
+        #[cfg(target_os = "android")]
+        let args = serde_json::json!({});
+        #[cfg(not(target_os = "android"))]
+        let args = ();
         self.0
-            .run_mobile_plugin::<serde_json::Value>("stop", ())
+            .run_mobile_plugin::<serde_json::Value>("stop", args)
             .map(|_| ())
             .map_err(Into::into)
     }

@@ -829,9 +829,18 @@ fn start_background(app: AppHandle) {
         let auto = state.client.settings().auto_connect;
         if auto && state.client.selected_server().is_ok() {
             let _op = state.op.lock().await;
+            #[cfg(target_os = "android")]
+            let connecting = {
+                use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+                let handle = app.clone();
+                matches!(tauri::async_runtime::spawn_blocking(move || handle.unbihex_vpn().status()).await,
+                    Ok(Ok(status)) if status.state == "connecting")
+            };
+            #[cfg(not(target_os = "android"))]
+            let connecting = false;
             #[cfg(desktop)]
             set_tray_transition(&app, true);
-            if !state.client.controller.is_connected().await
+            if !connecting && !state.client.controller.is_connected().await
                 && let Err(e) = do_connect(&app, &state.client).await
             {
                 tracing::warn!("auto-connect: {e}");
