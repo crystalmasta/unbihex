@@ -38,7 +38,17 @@ jobs:
           test -x "$ANDROID_HOME/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.3.13750724" >> "$GITHUB_ENV"
       - name: Install Tauri CLI
-        run: npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-package-lock --no-audit --no-fund @tauri-apps/cli@2.11.4
+        run: |
+          npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-package-lock --no-audit --no-fund @tauri-apps/cli@2.11.4
+          # The generated Gradle task invokes `cargo tauri`.
+          mkdir -p "$RUNNER_TEMP/tauri-bin"
+          cat > "$RUNNER_TEMP/tauri-bin/cargo-tauri" <<'SH'
+          #!/bin/sh
+          if [ "$1" = tauri ]; then shift; fi
+          exec "$RUNNER_TEMP/tauri-cli/node_modules/.bin/tauri" "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/tauri-bin/cargo-tauri"
+          echo "$RUNNER_TEMP/tauri-bin" >> "$GITHUB_PATH"
       - name: Build debug APK
         working-directory: unbihex-client/app/src-tauri
         run: |
