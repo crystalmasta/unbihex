@@ -20,6 +20,8 @@ Hysteria2 (TCP/UDP, Salamander), а также TrustTunnel (HTTP/2).
 | `unbihex-cli-<версия>-linux-x86_64.tar.gz`, `…-aarch64`, `…-armv7` | консольный клиент для Linux без меню: роутеры, NAS, скрипты (статический бинарник, любой дистрибутив) |
 | `unbihex-cli-tui-<версия>-linux-x86_64.tar.gz`, `…-aarch64`, `…-armv7` | тот же клиент с меню на весь экран, как у btop: серверы и работа в консоли |
 
+Для macOS (Apple Silicon) готовых файлов нет: есть неофициальная сборка скриптом, см.
+[`unbihex-client/README.md`](unbihex-client/README.md#сборка-для-macos-apple-silicon).
 Windows SmartScreen может предупредить о неизвестном издателе: «Подробнее» → «Выполнить в любом случае».
 Контрольные суммы файлов — в `SHA256SUMS.txt` того же релиза.
 

@@ -46,6 +46,7 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   login and password from the settings (the password is random; the "New password" button changes it).
   Programs on this computer and the system proxy connect without a password.
 - Android and iOS: the system VPN (TUN).
+- macOS (Apple Silicon): an unofficial build, see "Building for macOS"; TUN mode needs root.
 - Android: add the **Unbihex** tile in Quick Settings. Tap it to connect to the selected server or disconnect;
   the main screen stays closed. Long-press opens the app. Android asks for VPN permission on first use.
 - Routing: "Everything through VPN", "Russia direct" (.ru/.su/.рф and major Russian services),
@@ -80,7 +81,11 @@ Works:
 - **VLESS** with TLS or REALITY, including XTLS Vision (`flow=xtls-rprx-vision`) and UDP over XUDP;
   the TCP and XHTTP transports (packet-up, stream-up and stream-one over HTTP/2; packet-up also over HTTP/1.1),
   WebSocket and HTTPUpgrade (without Vision and REALITY, as in Xray).
+- **VMess** (AEAD, as Xray's client) with or without TLS, TCP and UDP; the TCP, WebSocket and HTTPUpgrade
+  transports; the auto, aes-128-gcm and chacha20-poly1305 ciphers (`none` and `zero` act as `auto`, as in Xray 26.x).
 - **Trojan** with TLS or REALITY, TCP and UDP; the TCP, WebSocket and HTTPUpgrade transports.
+- WebSocket and HTTPUpgrade send the request headers from the subscription (`headers`, such as a User-Agent), as Xray.
+- **TrustTunnel** over HTTP/2, TCP and UDP; `tt://` links and endpoint JSON profiles.
 - **Shadowsocks** with the AEAD ciphers aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
 - **SOCKS5**.
 - **Hysteria2**: TCP/UDP over QUIC/TLS, including Salamander, share links and Xray/sing-box JSON subscriptions.
@@ -127,6 +132,8 @@ Local builds go to the `dist/` folder (it is not in the repository):
 - `dist/Unbihex-0.2.7-setup.exe` — installer for Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — portable version; `wintun.dll` must sit next to it.
   An MSVC build with a static CRT: no Visual C++ Redistributable needed, WebView2Loader is built into the exe.
+- `dist/macos-arm64/Unbihex-<version>-macos-arm64.zip` — an unofficial build for macOS on Apple Silicon
+  (`installer/build-macos.sh`, on a Mac only).
 - `dist/android/Unbihex-android-arm64.apk` — Android 7+ (arm64, almost all phones).
   Signed with the author's key `dist/android/unbihex.jks` (alias `unbihex`); the key and its password are not in the
   repository. To publish your own build, make your own key: APK updates must be signed with the same key as the

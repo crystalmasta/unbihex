@@ -1,4 +1,4 @@
-# Where things stand (01.11.2026)
+# Where things stand (06.11.2026)
 
 [Русский](PROGRESS.md) · **English**
 
@@ -151,10 +151,34 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   `sid`/`spx` in its links (#35); pings are kept too.
 - test_server 0.0.2 is built on engine 0.1.6.
 
+## 03–05.11 — client 0.2.7, engine 0.1.7, test_server 0.0.3
+- New protocols: VMess (TCP, TLS, WebSocket, HTTPUpgrade; PR #37), TrustTunnel over HTTP/2 (PR #38), Trojan (TLS,
+  REALITY, WebSocket, HTTPUpgrade; #6), VLESS over WebSocket and HTTPUpgrade.
+- Every TLS fingerprint Xray knows and HTTP/2 SETTINGS per browser (PR #41); XHTTP with a connection pool and
+  streaming upload (PR #42); a 16 KiB TUN MTU on Linux (PR #45).
+- DNS over TLS and HTTPS (#44), a balancer and server auto-select (#46), the real device name and OS version for
+  panels (#47), Windows autostart with administrator rights (#39), tray icons (PR #43).
+- Licensed under BSL 1.1 from this version.
+
+## 06.11 — client 0.2.8, engine 0.1.8
+- WebSocket and HTTPUpgrade: request headers from the config (`headers`, as Xray's `wsSettings.headers`); a
+  User-Agent there replaces the browser one. Some servers behind nginx answer a WebSocket only with the User-Agent
+  from the JSON subscription and give any other request a stub site; such servers now work.
+- Subscriptions: when a panel sends links with WebSocket, HTTPUpgrade or XHTTP, the client asks it once for an Xray
+  JSON (User-Agent `v2rayN/7.10.0`, the same device) and remembers that for the subscription; headers from Xray and
+  sing-box JSON are carried into the servers.
+- VMess: `scy=none` and `zero` work as `auto`, as Xray 26.x's client does (#49); an unknown cipher is named in the
+  error.
+- Android: a quick settings tile connects the selected server and disconnects without opening the app (#30, by
+  akurach, PR #51).
+- macOS (Apple Silicon): an unofficial build with `installer/build-macos.sh` and in CI on demand (by akurach, PR
+  #50); TUN mode needs root, system proxy mode works without it.
+
 ## Next
 1. Fuzzing and benchmarks, the engine README as an SDK.
-2. Firefox and Safari templates for `fp=firefox` / `fp=safari` (they give Chrome for now).
+2. TrustTunnel over HTTP/3.
 
 ## To check by hand
-1. The APK on a phone: connecting, ping, Vision/REALITY servers, ICMP ping.
+1. The APK on a phone: connecting, ping, Vision/REALITY servers, ICMP ping; the tile on Android 12–14 (release APK).
 2. iOS: a build on a Mac following the README (needs Xcode and an Apple Developer account).
+3. macOS: the `build-macos.sh` build and system proxy mode.

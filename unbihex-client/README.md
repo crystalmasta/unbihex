@@ -44,6 +44,7 @@ VPN-клиент для подписок на собственном ядре **
   логин и пароль из настроек (пароль случайный, кнопка «Новый пароль» его меняет).
   Программы на этом компьютере и системный прокси подключаются без пароля.
 - Android и iOS: системный VPN (TUN).
+- macOS (Apple Silicon): неофициальная сборка, см. «Сборка для macOS»; режим TUN требует root.
 - Android: добавьте плитку **Unbihex** в быстрые настройки. Нажатие подключает выбранный сервер или отключает VPN,
   не открывая главный экран. Долгое нажатие открывает приложение. При первом запуске Android запросит разрешение на VPN.
 - Маршрутизация: «Всё через VPN», «Россия напрямую» (.ru/.su/.рф и крупные российские сервисы),
@@ -78,7 +79,11 @@ VPN-клиент для подписок на собственном ядре **
 - **VLESS** с TLS или REALITY, в том числе XTLS Vision (`flow=xtls-rprx-vision`) и UDP через XUDP;
   транспорты TCP и XHTTP (режимы packet-up, stream-up и stream-one поверх HTTP/2; packet-up — и поверх HTTP/1.1),
   WebSocket и HTTPUpgrade (без Vision и REALITY, как в Xray).
+- **VMess** (AEAD, как у клиента Xray) с TLS или без, TCP и UDP; транспорты TCP, WebSocket и HTTPUpgrade; шифры
+  auto, aes-128-gcm, chacha20-poly1305 (`none` и `zero` — как `auto`, так делает Xray 26.x).
 - **Trojan** с TLS или REALITY, TCP и UDP; транспорты TCP, WebSocket и HTTPUpgrade.
+- У WebSocket и HTTPUpgrade — заголовки запроса из подписки (`headers`, например свой User-Agent), как у Xray.
+- **TrustTunnel** поверх HTTP/2, TCP и UDP; ссылки `tt://` и JSON-профили эндпоинта.
 - **Shadowsocks** с AEAD-шифрами aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
 - **SOCKS5**.
 - **Hysteria2**: TCP и UDP поверх QUIC/TLS, в том числе Salamander; ссылки и JSON-подписки Xray/sing-box.
@@ -125,6 +130,8 @@ unbihex-client/
 - `dist/Unbihex-0.2.7-setup.exe` — установщик для Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — портативная версия; рядом должен лежать `wintun.dll`.
   Сборка MSVC со статическим CRT: Visual C++ Redistributable не нужен, WebView2Loader вшит в exe.
+- `dist/macos-arm64/Unbihex-<версия>-macos-arm64.zip` — неофициальная сборка для macOS на Apple Silicon
+  (`installer/build-macos.sh`, только на Mac).
 - `dist/android/Unbihex-android-arm64.apk` — Android 7+ (arm64, почти все телефоны).
   Подписан ключом автора `dist/android/unbihex.jks` (alias `unbihex`); ключ и пароль в репозиторий не входят.
   Для публикации сделайте свой ключ: обновления APK должны подписываться тем же ключом, что и первая установка.

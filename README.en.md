@@ -20,6 +20,8 @@ Ready-made builds are on the [latest release](https://github.com/crystalmasta/un
 | `unbihex-cli-<version>-linux-x86_64.tar.gz`, `…-aarch64`, `…-armv7` | console client for Linux without the menu: routers, NAS, scripts (a static binary, any distribution) |
 | `unbihex-cli-tui-<version>-linux-x86_64.tar.gz`, `…-aarch64`, `…-armv7` | the same client with a btop-like full-screen menu: servers and hands-on console use |
 
+There are no ready files for macOS (Apple Silicon): an unofficial build script is described in
+[`unbihex-client/README.en.md`](unbihex-client/README.en.md#building-for-macos-apple-silicon).
 Windows SmartScreen may warn about an unknown publisher: "More info" → "Run anyway".
 File checksums are in `SHA256SUMS.txt` of the same release.
 
