@@ -29,7 +29,9 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android
           rustup override set 1.99.1
           echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
-          sdkmanager 'platforms;android-37.0' 'platforms;android-36' 'ndk;27.3.13750724'
+          test -d "$ANDROID_HOME/platforms/android-37.0"
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -x "$ANDROID_HOME/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.3.13750724" >> "$GITHUB_ENV"
       - name: Install Tauri CLI
         run: npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-package-lock --no-audit --no-fund @tauri-apps/cli@2.11.4
