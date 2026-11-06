@@ -35,6 +35,19 @@ Windows SmartScreen может предупредить о неизвестно�
 Сборка, тесты и готовые установщики описаны в [`unbihex-client/README.md`](unbihex-client/README.md),
 устройство ядра — в [`unbihex-engine/SPEC.md`](unbihex-engine/SPEC.md), планы — в [`unbihex-client/ROADMAP.md`](unbihex-client/ROADMAP.md).
 
+## Участники
+
+Спасибо всем, чьи изменения вошли в проект:
+
+- [Павел Шахмин (pshakhmin)](https://github.com/pshakhmin) — производительность (окна TCP в TUN, буферы сокетов,
+  REALITY; #18, #20, #25), отпечатки TLS (#41), пул соединений XHTTP (#42), MTU 16 КиБ для TUN на Linux (#45),
+  стенд xray-bench;
+- [dubr1k](https://github.com/dubr1k) — XHTTP для CDN (#32), Hysteria2 (#33), DNS физической сети на Android (#36),
+  VMess (#37), TrustTunnel (#38);
+- [emiliya-central-uni](https://github.com/emiliya-central-uni) — разбор hosts-списков (#31);
+- [Finorion](https://github.com/Finorion) — значки трея (#43);
+- [akurach](https://github.com/akurach) — сборка для macOS (#50), плитка быстрых настроек Android (#51).
+
 ## Автор и лицензия
 
 © 2026 Crystalmasta — https://github.com/crystalmasta.

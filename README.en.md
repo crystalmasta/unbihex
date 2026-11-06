@@ -36,6 +36,19 @@ Building, tests and installers are described in [`unbihex-client/README.en.md`](
 the engine design in [`unbihex-engine/SPEC.en.md`](unbihex-engine/SPEC.en.md), the plans in
 [`unbihex-client/ROADMAP.en.md`](unbihex-client/ROADMAP.en.md).
 
+## Contributors
+
+Thanks to everyone whose changes are in the project:
+
+- [Pavel Shakhmin (pshakhmin)](https://github.com/pshakhmin) — performance (TCP windows in TUN, socket buffers,
+  REALITY; #18, #20, #25), TLS fingerprints (#41), the XHTTP connection pool (#42), the 16 KiB TUN MTU on Linux
+  (#45), the xray-bench test bench;
+- [dubr1k](https://github.com/dubr1k) — XHTTP for CDNs (#32), Hysteria2 (#33), the physical network's DNS on
+  Android (#36), VMess (#37), TrustTunnel (#38);
+- [emiliya-central-uni](https://github.com/emiliya-central-uni) — the hosts list parser (#31);
+- [Finorion](https://github.com/Finorion) — tray icons (#43);
+- [akurach](https://github.com/akurach) — the macOS build (#50), the Android quick settings tile (#51).
+
 ## Author and license
 
 © 2026 Crystalmasta — https://github.com/crystalmasta.
