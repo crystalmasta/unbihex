@@ -1,6 +1,7 @@
 //! `trojan://password@host:port?security=tls&sni=…&fp=…&type=ws&path=…&host=…#name`
 //! (Xray's share-link format; `security` defaults to `tls`).
 
+use super::finalmask::LinkFragment;
 use super::{WsHeaders, decode, host_port, split_parts};
 use crate::config::{OutboundConfig, RealityConfig, Secret, TlsConfig, TrojanConfig};
 use crate::error::{Error, Result};
@@ -20,9 +21,12 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let (mut sni, mut alpn, mut fp, mut pbk) = (None, Vec::new(), None, None);
     let (mut sid, mut path, mut host) = (String::new(), String::new(), None);
     let mut headers = WsHeaders::default();
+    let mut frag = LinkFragment::default();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let v = v.into_owned();
         match k.as_ref() {
+            "fm" | "finalmask" if !v.is_empty() => frag.fm = Some(v),
+            "fragment" if !v.is_empty() => frag.fragment = Some(v),
             "headers" => headers.set_param(&v)?,
             "ua" => headers.ua = v,
             "security" if !v.is_empty() => security = v.to_ascii_lowercase(),
@@ -108,8 +112,8 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
         port,
         password: Secret(password),
         tls,
+        fragment: frag.build(tag, true)?,
         reality,
-        fragment: None,
         ws,
     };
     cfg.validate()?;

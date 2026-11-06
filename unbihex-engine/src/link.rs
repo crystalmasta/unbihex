@@ -1,6 +1,7 @@
 //! Share links: `vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, `hysteria2://`
 //! and TrustTunnel's `tt://` (SPEC §5.4).
 
+mod finalmask;
 mod trojan;
 mod tt;
 mod vmess;
@@ -73,6 +74,7 @@ fn parse_hysteria2(rest: &str, tag: &str) -> Result<OutboundConfig> {
     };
     let mut obfs = String::new();
     let mut obfs_password = None;
+    let mut fm_salamander = None;
     let unsupported =
         |key: &str| Error::Unsupported(format!("hysteria2: parameter {key} is not supported yet"));
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
@@ -93,6 +95,10 @@ fn parse_hysteria2(rest: &str, tag: &str) -> Result<OutboundConfig> {
                 cfg.pinned_sha256.push(value.into_owned())
             }
             "obfs" => obfs = value.into_owned(),
+            // Xray 26 writes Salamander as a finalmask UDP mask; `obfs` wins.
+            "fm" | "finalmask" if !value.is_empty() => {
+                fm_salamander = finalmask::salamander(&value, tag).map(Secret)
+            }
             "obfs-password" | "obfsPassword" if !value.is_empty() => {
                 obfs_password = Some(Secret(value.into_owned()))
             }
@@ -111,6 +117,10 @@ fn parse_hysteria2(rest: &str, tag: &str) -> Result<OutboundConfig> {
             // implemented (QUIC's own congestion control works instead).
             _ => {}
         }
+    }
+    if obfs.is_empty() && obfs_password.is_none() && fm_salamander.is_some() {
+        obfs = "salamander".into();
+        obfs_password = fm_salamander;
     }
     match obfs.as_str() {
         "salamander" => {
@@ -228,9 +238,12 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut net = String::new();
     let mut xhttp_fields = serde_json::Map::new();
     let mut headers = WsHeaders::default();
+    let mut frag = finalmask::LinkFragment::default();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let v = v.into_owned();
         match k.as_ref() {
+            "fm" | "finalmask" if !v.is_empty() => frag.fm = Some(v),
+            "fragment" if !v.is_empty() => frag.fragment = Some(v),
             "headers" => headers.set_param(&v)?,
             "ua" => headers.ua = v,
             "security" => security = v.to_ascii_lowercase(),
@@ -324,6 +337,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
         "none" | "" => (None, None),
         other => return Err(Error::Unsupported(format!("vless security={other}"))),
     };
+    let fragment = frag.build(tag, tls.is_some() || reality.is_some())?;
     let cfg = VlessConfig {
         tag: tag.to_string(),
         server,
@@ -333,7 +347,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
         allow_plaintext: false,
         flow,
         reality,
-        fragment: None,
+        fragment,
         xhttp,
         ws,
     };
@@ -436,6 +450,14 @@ mod tests {
                 "{query}"
             );
         }
+        // Xray 26's finalmask Salamander, as the client writes it from Xray JSON.
+        let fm = "%7B%22udp%22%3A%5B%7B%22type%22%3A%22salamander%22%2C%22settings%22%3A%7B%22password%22%3A%22obfs%22%7D%7D%5D%7D";
+        let OutboundConfig::Hysteria2(c) =
+            parse_link(&format!("hy2://pw@hy.example:443?fm={fm}"), "proxy").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(c.salamander_password.unwrap().expose(), "obfs");
     }
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
@@ -512,6 +534,67 @@ mod tests {
         );
         assert!(parse_link(&reality, "p").is_err());
         assert!(parse_link(&format!("vless://{UUID}@h.com:443?security=tls&type=ws&path=ws"), "p").is_err());
+    }
+
+    #[test]
+    fn finalmask_fragment_from_every_link_form() {
+        // What the provider's panel puts into its links and JSON.
+        let fm = r#"{"tcp":[{"type":"fragment","settings":{"length":"10-20","packets":"tlshello","interval":"10-20"}}]}"#;
+        let q = format!(
+            "type=ws&security=tls&host=app.example&fm={}",
+            percent_encoding::utf8_percent_encode(fm, percent_encoding::NON_ALPHANUMERIC)
+        );
+        let vmess_json = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(
+                serde_json::json!({"add":"h.com","port":443,"id":UUID,"net":"ws","tls":"tls",
+                    "fm": serde_json::from_str::<serde_json::Value>(fm).unwrap()})
+                .to_string()
+            )
+        );
+        // `interval` is not Xray's: no pause, as in Xray.
+        let want = crate::outbound::fragment::FragmentConfig {
+            length: "10-20".into(),
+            interval: "0".into(),
+        };
+        for link in [
+            format!("vless://{UUID}@h.com:443?{q}"),
+            format!("vmess://{UUID}@h.com:443?{q}"),
+            format!("trojan://pw@h.com:443?{q}&fragment=tlshello,100-200,1-2"),
+            vmess_json,
+        ] {
+            let fragment = match parse_link(&link, "p").unwrap() {
+                OutboundConfig::Vless(v) => v.fragment,
+                OutboundConfig::Vmess(v) => v.fragment,
+                OutboundConfig::Trojan(t) => t.fragment,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(fragment.as_ref(), Some(&want), "{link}");
+        }
+        // Without TLS there is no ClientHello to cut: ignored, the server still parses.
+        let OutboundConfig::Vmess(v) =
+            parse_link(&format!("vmess://{UUID}@h.com:80?type=ws&fm={}", &q[q.find("fm=").unwrap() + 3..]), "p")
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert!(v.fragment.is_none());
+        // Unsupported masks never refuse the server.
+        let OutboundConfig::Vless(v) = parse_link(
+            &format!("vless://{UUID}@h.com:443?security=tls&fm=%7B%22tcp%22%3A%5B%7B%22type%22%3A%22noise%22%7D%5D%7D"),
+            "p",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert!(v.fragment.is_none());
+        // A fragment the engine cannot do refuses the server, with the reason.
+        let e = parse_link(
+            &format!("trojan://pw@h.com:443?fm={}", q[q.find("fm=").unwrap() + 3..].replace("tlshello", "1-3")),
+            "p",
+        )
+        .unwrap_err();
+        assert!(matches!(e, Error::Unsupported(_)) && e.to_string().contains("tlshello"), "{e}");
     }
 
     #[test]

@@ -5,6 +5,7 @@
 use base64::Engine;
 use serde_json::Value;
 
+use super::finalmask::LinkFragment;
 use super::{WsHeaders, decode, host_port, split_parts};
 use crate::config::{OutboundConfig, Secret, TlsConfig, VmessConfig};
 use crate::error::{Error, Result};
@@ -24,6 +25,7 @@ struct Fields {
     fp: String,
     insecure: bool,
     headers: WsHeaders,
+    fragment: LinkFragment,
 }
 
 pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
@@ -48,6 +50,8 @@ fn url_form(rest: &str) -> Result<(String, String, u16, Fields)> {
         let v = v.into_owned();
         match k.as_ref() {
             "encryption" | "scy" => f.cipher = v,
+            "fm" | "finalmask" if !v.is_empty() => f.fragment.fm = Some(v),
+            "fragment" if !v.is_empty() => f.fragment.fragment = Some(v),
             "headers" => f.headers.set_param(&v)?,
             "ua" => f.headers.ua = v,
             "type" => f.net = v,
@@ -113,6 +117,15 @@ fn json_form(body: &str) -> Result<(String, String, u16, Fields)> {
         insecure: matches!(field("allowInsecure").as_str(), "1" | "true")
             || matches!(field("insecure").as_str(), "1" | "true"),
         headers,
+        // `fm` as a JSON string (like the URL parameter) or the object itself.
+        fragment: LinkFragment {
+            fm: match &j["fm"] {
+                Value::String(s) if !s.is_empty() => Some(s.clone()),
+                Value::Object(_) | Value::Array(_) => Some(j["fm"].to_string()),
+                _ => None,
+            },
+            fragment: Some(field("fragment")).filter(|s| !s.is_empty()),
+        },
     };
     // `aid` (alterId) is ignored, as Xray does: only the AEAD header exists today.
     Ok((field("id"), field("add"), port, f))
@@ -181,8 +194,8 @@ fn build(tag: &str, uuid: String, server: String, port: u16, f: Fields) -> Resul
         port,
         uuid: Secret(uuid),
         security: f.cipher.to_ascii_lowercase(),
+        fragment: f.fragment.build(tag, tls.is_some())?,
         tls,
-        fragment: None,
         ws,
     };
     cfg.validate()?;

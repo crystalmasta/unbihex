@@ -713,6 +713,60 @@ mod tests {
         assert_eq!(raw, b"raw bytes after the switch");
     }
 
+    /// The fragmentation of a link's finalmask (`fm`) reaches the wire: the ClientHello
+    /// arrives as TLS records of 10–20 bytes, and the server takes it.
+    #[tokio::test]
+    async fn link_finalmask_cuts_the_client_hello() {
+        for settings in [
+            r#""length":"10-20","packets":"tlshello","interval":"10-20""#,
+            r#""length":"10-20","packets":"tlshello","delay":"0-1""#,
+        ] {
+            let fm = format!(r#"{{"tcp":[{{"type":"fragment","settings":{{{settings}}}}}]}}"#);
+            let link = format!(
+                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=ws&security=tls&fm={}",
+                url::form_urlencoded::byte_serialize(fm.as_bytes()).collect::<String>()
+            );
+            let crate::config::OutboundConfig::Vless(v) = crate::link::parse_link(&link, "p").unwrap()
+            else {
+                panic!("not vless");
+            };
+            let fragment = v.fragment.expect("fragment from fm");
+            let (client_cfg, server_cfg) = configs();
+            let (ours, mut peer) = tcp_pair().await;
+            let name = ServerName::try_from("example.com").unwrap();
+            let client = tokio::spawn(async move {
+                TlsRecordStream::connect(ours, client_cfg, name, Some(&fragment)).await
+            });
+            // Records up to the end of the ClientHello message.
+            let complete = |h: &[u8]| {
+                h.len() >= 4 && h.len() >= 4 + (usize::from(h[1]) << 16 | usize::from(h[2]) << 8 | usize::from(h[3]))
+            };
+            let (mut wire, mut seen, mut hello, mut records) = (Vec::new(), 0, Vec::new(), 0);
+            let mut buf = [0u8; 4096];
+            while !complete(&hello) {
+                let n = peer.read(&mut buf).await.unwrap();
+                assert!(n > 0, "closed before the ClientHello");
+                wire.extend_from_slice(&buf[..n]);
+                while let Some(h) = wire.get(seen..seen + 5) {
+                    let len = usize::from(u16::from_be_bytes([h[3], h[4]]));
+                    let Some(body) = wire.get(seen + 5..seen + 5 + len) else { break };
+                    assert_eq!(h[0], 0x16, "{settings}");
+                    assert!((1..=20).contains(&len), "{settings}: record of {len} bytes");
+                    hello.extend_from_slice(body);
+                    seen += 5 + len;
+                    records += 1;
+                }
+            }
+            assert_eq!(hello[0], 1, "a ClientHello");
+            assert!(records > 10, "{settings}: {records} records");
+            // The server accepts the cut ClientHello and answers it.
+            let mut server: Connection = ServerConnection::new(server_cfg).unwrap().into();
+            feed(&mut server, &wire[..seen]);
+            assert!(server.wants_write(), "{settings}: no ServerHello");
+            client.abort();
+        }
+    }
+
     /// Records cut at any byte (inside headers, across several records) come out whole.
     #[tokio::test]
     async fn records_split_anywhere_arrive_whole() {

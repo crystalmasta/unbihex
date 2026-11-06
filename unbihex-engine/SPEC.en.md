@@ -261,6 +261,9 @@ percent-decoded, the host may be IPv6 in brackets.
   - `type=tcp|raw` (or none), or `type=xhttp|splithttp` with `path`, `host`, `mode`, `extra` (Xray settings JSON, §11.5),
     or `type=ws|httpupgrade` with `path` and `host` (§11.10; `host` is the first of a comma list and, without `sni`,
     the TLS name, as in v2rayN); Vision and REALITY over WebSocket are an error, as in Xray;
+  - `fm` / `finalmask` (Xray 26's `finalmask`, JSON) and the older `fragment=tlshello,<length>,<interval>` give the
+    ClientHello fragmentation (§11.6); the same on `vmess://` (in v2rayN JSON `fm` is an object or a string) and
+    `trojan://`;
   - `ws`/`httpupgrade` also take the client's own parameters for the request headers (§11.10): `headers`, a JSON
     object of strings (the client carries Xray's `wsSettings.headers` / `httpupgradeSettings.headers` and sing-box's
     `transport.headers` into it), and `ua`, a single `User-Agent` that wins over one in `headers`; a `Host` in
@@ -274,7 +277,9 @@ percent-decoded, the host may be IPv6 in brackets.
   `ss://<base64(method:password@host:port)>#name`; base64 with or without padding. Plugins (`?plugin=`) are an error.
 - `hysteria2://` / `hy2://<auth>@<host>[:port]/?…#<name>` (§11.7): the whole percent-decoded userinfo is the
   authentication string (including `user:password`); the default port is 443. Parameters: `sni` / `peer` /
-  `serverName`, `pinSHA256`, `obfs=salamander` + `obfs-password`, `insecure=0`. Refused: `insecure=1`,
+  `serverName`, `pinSHA256`, `obfs=salamander` + `obfs-password` (or `fm` with a UDP mask `salamander` and `password`,
+as Xray 26 writes it; `obfs` wins; `salamander` with `packetSize` and other masks are skipped with a warning),
+`insecure=0`. Refused: `insecure=1`,
   `allowInsecure=1`, `skip-cert-verify=1`, `alpn` other than `h3`, `security` other than `tls`, port hopping
   (`mport`, `ports`, `hopInterval`), `ech`, `ca`, other obfs. Skipped: `fp` (a TCP/uTLS hint; there is no browser QUIC
   fingerprint), bandwidth (`up`, `down`, `upmbps`, `downmbps` ask for Brutal, which is absent) and other unknown
@@ -700,8 +705,22 @@ accepted and unused.
 
 `fragment: {"length": "100-200", "interval": "10-20"}` on VLESS with TLS or REALITY (and on `link`). The first record
 (the ClientHello) is cut into several TLS records of random sizes from `length`, each sent in its own TCP write after
-a pause from `interval` (ms). DPI that looks for the server name in the first segment or the first record sees only a
+a pause from `interval` (ms); with `interval` 0 all records go out in one TCP write, as Xray's `tlshello` does. DPI that looks for the server name in the first segment or the first record sees only a
 part of it. TLS allows a handshake message to span records, so servers accept it.
+
+A link (VLESS, VMess, Trojan) gives it through `fm`, Xray 26's `finalmask` (checked against v26.10.31):
+`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"10-20","delay":"10-20"}}]}` → `length`,
+`interval` = `delay` (without `delay` it is 0, the records in one TCP write; the mask has no `interval` field and Xray
+does not read it, so panels that copy it from the old `fragment` get what Xray does; of the `lengths`/`delays` lists
+the first range is used). Without an `fm` that has a `fragment` mask, the older `fragment=` (`tlshello` and ranges:
+length first, then the pause). A link's fragmentation wins over the `fragment` of `link` (the client's setting). A
+`fragment` mask with `packets` other than `tlshello` (Xray's `""` and `1-3` cut TCP writes, not TLS records) is
+`Unsupported` and refuses the server; a bad `length`/`delay` is a config error, as in Xray. Skipped with a warning in
+the log, without refusing the server: `maxSplit`, a second `fragment` mask, the `noise`, `header-custom` and other
+masks, UDP masks, `fm` without TLS/REALITY. The client carries an Xray JSON `streamSettings.finalmask` into `fm`, and
+the older scheme — `sockopt.dialerProxy` to a `freedom` with `settings.fragment` (`packets: tlshello`, `length`,
+`interval` → `delay`, `maxSplit`) — into the same mask; chains through another proxy, `noises` and `packets` as a
+range are not carried over.
 
 ### 11.7 Hysteria 2
 

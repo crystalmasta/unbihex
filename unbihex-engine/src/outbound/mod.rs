@@ -244,13 +244,20 @@ pub async fn build_outbound(
         }
         OutboundConfig::Link(c) => {
             let mut parsed = crate::link::parse_link(c.url.expose(), &c.tag)?;
+            // The link's own fragmentation (`fm`, `fragment`) wins over the config's.
             match &mut parsed {
                 OutboundConfig::Vless(v) => {
                     v.allow_plaintext = c.allow_plaintext;
-                    v.fragment = c.fragment.clone();
+                    if v.fragment.is_none() {
+                        v.fragment = c.fragment.clone();
+                    }
                 }
-                OutboundConfig::Vmess(v) if v.tls.is_some() => v.fragment = c.fragment.clone(),
-                OutboundConfig::Trojan(t) => t.fragment = c.fragment.clone(),
+                OutboundConfig::Vmess(v) if v.tls.is_some() && v.fragment.is_none() => {
+                    v.fragment = c.fragment.clone()
+                }
+                OutboundConfig::Trojan(t) if t.fragment.is_none() => {
+                    t.fragment = c.fragment.clone()
+                }
                 OutboundConfig::Trusttunnel(t) if t.fragment.is_none() => {
                     t.fragment = c.fragment.clone()
                 }

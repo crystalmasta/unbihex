@@ -984,6 +984,30 @@ async fn vless_websocket_against_xray() {
             wrong.ws.as_mut().unwrap().path = "/other".into();
             let r = build(&wrong).connect_tcp(&session(echo)).await;
             assert!(r.is_err(), "wrong path must fail");
+            if tls {
+                // A link with Xray 26's finalmask: the ClientHello goes out in records
+                // of 10-20 bytes, in one write (the provider's `interval` is not
+                // Xray's) or one record per write with a pause (`delay`).
+                for settings in [
+                    r#""length":"10-20","packets":"tlshello","interval":"10-20""#,
+                    r#""length":"10-20","packets":"tlshello","delay":"1-2""#,
+                ] {
+                    let fm = format!(r#"{{"tcp":[{{"type":"fragment","settings":{{{settings}}}}}]}}"#);
+                    let link = format!(
+                        "vless://{UUID}@127.0.0.1:{port}?type={network}&security=tls&sni=vless-ws.test&path=%2Fp&host=app.test&fm={}",
+                        url::form_urlencoded::byte_serialize(fm.as_bytes()).collect::<String>()
+                    );
+                    let unbihex_engine::config::OutboundConfig::Vless(fragmented) =
+                        unbihex_engine::link::parse_link(&link, "vless-fm").unwrap()
+                    else {
+                        panic!("not vless");
+                    };
+                    assert!(fragmented.fragment.is_some());
+                    eprintln!("vless {network} tls with finalmask fragment {settings}");
+                    let ob = build(&fragmented);
+                    plain_roundtrip(&ob, echo).await;
+                }
+            }
             // So is a wrong Host.
             let mut wrong = cfg.clone();
             wrong.ws.as_mut().unwrap().headers.insert("Host".into(), "other.test".into());

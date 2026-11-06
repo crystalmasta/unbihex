@@ -91,9 +91,21 @@ fn trojan_link(
     format!("trojan://{}@{}?{}#{}", enc(password), host_port(host, port), q.join("&"), enc(name))
 }
 
-/// `sni`, `alpn`, `fp` (and the REALITY keys) of an Xray `streamSettings`.
+/// Xray 26's `finalmask` of a `streamSettings` when it has TCP masks: the engine reads
+/// the ClientHello fragmentation from it (the `fm` link parameter); the rest is skipped there.
+fn xray_finalmask(stream: &Value) -> Option<Value> {
+    stream
+        .get("finalmask")
+        .filter(|m| m.get("tcp").and_then(Value::as_array).is_some_and(|a| !a.is_empty()))
+        .cloned()
+}
+
+/// `sni`, `alpn`, `fp` (and the REALITY keys) of an Xray `streamSettings`, and `fm`.
 fn xray_security_params(stream: &Value) -> Vec<(&'static str, String)> {
     let mut params = Vec::new();
+    if let Some(m) = xray_finalmask(stream) {
+        params.push(("fm", m.to_string()));
+    }
     match str_of(stream, "security") {
         "tls" => {
             let t = stream.get("tlsSettings").cloned().unwrap_or(Value::Null);
@@ -464,6 +476,9 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
             if let Some(h) = ws_headers(&t) {
                 j["headers"] = h;
             }
+            if let Some(m) = xray_finalmask(&stream) {
+                j["fm"] = m;
+            }
             Some(format!(
                 "vmess://{}",
                 base64::engine::general_purpose::STANDARD.encode(j.to_string())
@@ -527,10 +542,55 @@ fn xray_config(cfg: &Value, out: &mut Vec<String>) {
             (true, _) if !tag.is_empty() => tag.to_string(),
             _ => str_of(ob, "protocol").to_string(),
         };
-        if let Some(l) = xray_outbound(ob, &name) {
+        let ob = with_dialer_fragment(ob, outbounds);
+        if let Some(l) = xray_outbound(&ob, &name) {
             out.push(l);
         }
     }
+}
+
+/// Fragmentation set up the old way: `sockopt.dialerProxy` names a `freedom` outbound
+/// with `settings.fragment`. When it only cuts the ClientHello (`packets: tlshello`;
+/// the old `interval` is Xray's `delay`) it becomes the `finalmask` it is now; write
+/// ranges, noises, a freedom with its own dialer or a chain through another proxy stay
+/// as they were (not carried over).
+fn with_dialer_fragment<'a>(ob: &'a Value, outbounds: &[Value]) -> std::borrow::Cow<'a, Value> {
+    use std::borrow::Cow;
+    let Some(stream) = ob.get("streamSettings") else {
+        return Cow::Borrowed(ob);
+    };
+    let via = stream
+        .pointer("/sockopt/dialerProxy")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let has_tcp_mask = xray_finalmask(stream).is_some();
+    let freedom = outbounds
+        .iter()
+        .find(|o| !via.is_empty() && str_of(o, "tag") == via && str_of(o, "protocol") == "freedom");
+    let fragment = freedom.and_then(|f| f.pointer("/settings/fragment"));
+    let (Some(freedom), Some(fragment), false) = (freedom, fragment, has_tcp_mask) else {
+        return Cow::Borrowed(ob);
+    };
+    if !str_of(fragment, "packets").eq_ignore_ascii_case("tlshello")
+        || unknown_fields(fragment, &["packets", "length", "interval", "maxSplit"])
+        || freedom.get("settings").is_some_and(|s| s.get("noises").is_some())
+        || freedom.pointer("/streamSettings/sockopt/dialerProxy").is_some()
+    {
+        return Cow::Borrowed(ob);
+    }
+    let mut settings = json!({"packets": "tlshello"});
+    for (from, to) in [("length", "length"), ("interval", "delay"), ("maxSplit", "maxSplit")] {
+        if let Some(v) = fragment.get(from).filter(|v| !v.is_null()) {
+            settings[to] = v.clone();
+        }
+    }
+    let mut ob = ob.clone();
+    let mask = &mut ob["streamSettings"]["finalmask"];
+    if !mask.is_object() {
+        *mask = json!({});
+    }
+    mask["tcp"] = json!([{"type": "fragment", "settings": settings}]);
+    Cow::Owned(ob)
 }
 
 /// `path` and `host` of a sing-box `ws` or `httpupgrade` transport.
@@ -1043,6 +1103,69 @@ mod tests {
             assert!(ws.path == "/ws" || ws.path == "/up");
             assert!(ws.host.as_deref() == Some("cdn.example") || ws.host.as_deref() == Some("h.example"));
         }
+    }
+
+    /// The provider's Xray JSON fragments the ClientHello through `finalmask`; it
+    /// reaches the engine as `fm` for VLESS, VMess and Trojan. So does the older
+    /// `sockopt.dialerProxy` to a `freedom` with `fragment`.
+    #[test]
+    fn finalmask_fragment_reaches_the_engine() {
+        let stream = json!({"network": "ws", "security": "tls",
+            "tlsSettings": {"serverName": "app.example"},
+            "wsSettings": {"path": null, "host": "app.example"},
+            "finalmask": {"tcp": [{"type": "fragment",
+                "settings": {"length": "10-20", "packets": "tlshello", "interval": "10-20"}}]}});
+        let body = json!({"outbounds": [
+            {"protocol": "vless", "settings": {"address": "s.example", "port": 443, "id": UUID}, "streamSettings": stream},
+            {"protocol": "vmess", "settings": {"vnext": [{"address": "s.example", "port": 443,
+                "users": [{"id": UUID}]}]}, "streamSettings": stream},
+            {"protocol": "trojan", "settings": {"servers": [{"address": "s.example", "port": 443,
+                "password": "pw"}]}, "streamSettings": stream}]});
+        let links = links_from_json(&body.to_string()).unwrap();
+        assert_eq!(links.len(), 3);
+        for link in &links {
+            let f = match unbihex_engine::link::parse_link(link, "proxy").unwrap() {
+                OutboundConfig::Vless(v) => v.fragment,
+                OutboundConfig::Vmess(v) => v.fragment,
+                OutboundConfig::Trojan(t) => t.fragment,
+                other => panic!("{other:?}"),
+            }
+            .unwrap_or_else(|| panic!("no fragment: {link}"));
+            // `interval` is not a finalmask field: Xray ignores it, no pause.
+            assert_eq!((f.length.as_str(), f.interval.as_str()), ("10-20", "0"));
+        }
+        // The old way: the proxy dials through a freedom that fragments.
+        let fragment = |f: Value| {
+            let mut stream = stream.clone();
+            stream.as_object_mut().unwrap().remove("finalmask");
+            stream["sockopt"] = json!({"dialerProxy": "fragment"});
+            let body = json!({"outbounds": [
+                {"tag": "proxy", "protocol": "vless",
+                    "settings": {"address": "s.example", "port": 443, "id": UUID}, "streamSettings": stream},
+                {"tag": "fragment", "protocol": "freedom", "settings": {"fragment": f}},
+                {"tag": "direct", "protocol": "freedom"}]});
+            let links = links_from_json(&body.to_string()).unwrap();
+            assert_eq!(links.len(), 1);
+            let OutboundConfig::Vless(v) = unbihex_engine::link::parse_link(&links[0], "proxy").unwrap()
+            else {
+                panic!()
+            };
+            v.fragment.map(|f| (f.length, f.interval))
+        };
+        assert_eq!(
+            fragment(json!({"packets": "tlshello", "length": "100-200", "interval": "10-20"})),
+            Some(("100-200".into(), "10-20".into()))
+        );
+        assert_eq!(
+            fragment(json!({"packets": "tlshello", "length": 50})),
+            Some(("50".into(), "0".into()))
+        );
+        // Write ranges and noises are not the ClientHello: left as they were.
+        assert_eq!(fragment(json!({"packets": "1-3", "length": "100-200"})), None);
+        assert_eq!(
+            fragment(json!({"packets": "tlshello", "length": "1-2", "noises": []})),
+            None
+        );
     }
 
     /// The WebSocket headers a panel gives in its Xray JSON (a server behind nginx may

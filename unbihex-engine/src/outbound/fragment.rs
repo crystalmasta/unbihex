@@ -1,7 +1,8 @@
 //! TLS ClientHello fragmentation.
 //!
 //! The first flight (the ClientHello record) is cut into several TLS records of
-//! random size, and each record goes out in its own TCP write after a short pause.
+//! random size, and each record goes out in its own TCP write after a short pause;
+//! with no pause (`interval` 0) they go out in one write, as Xray's `tlshello` does.
 //! DPI that looks for the server name in the first segment or the first record
 //! then sees only part of it. TLS allows a handshake message to span records, so
 //! servers accept it.
@@ -109,11 +110,16 @@ impl FragmentConfig {
     pub async fn send(&self, tcp: &mut TcpStream, flight: &[u8]) -> Result<()> {
         let (lo, hi) = range(&self.interval, "interval")?;
         let pieces = self.split_records(flight)?;
+        if hi == 0 {
+            tcp.write_all(&pieces.concat()).await?;
+            tcp.flush().await?;
+            return Ok(());
+        }
         let last = pieces.len().saturating_sub(1);
         for (i, p) in pieces.iter().enumerate() {
             tcp.write_all(p).await?;
             tcp.flush().await?;
-            if i < last && hi > 0 {
+            if i < last {
                 let ms = rand::thread_rng().gen_range(lo..=hi);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
             }

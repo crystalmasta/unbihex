@@ -260,6 +260,8 @@ IPv6 в скобках:
   - `type=tcp|raw` (или нет) либо `type=xhttp|splithttp` с `path`, `host`, `mode`, `extra` (JSON настроек Xray, §11.5),
     либо `type=ws|httpupgrade` с `path` и `host` (§11.10; `host` — первый из списка через запятую, без `sni` имя для
     TLS берётся из него — как в v2rayN); Vision и REALITY поверх WebSocket — ошибка, как в Xray;
+  - `fm` / `finalmask` — `finalmask` Xray 26 (JSON) и старый `fragment=tlshello,<length>,<interval>` дают
+    фрагментацию ClientHello (§11.6); то же у `vmess://` (в JSON v2rayN `fm` — объект или строка) и `trojan://`;
   - у `ws`/`httpupgrade` — свои параметры клиента для заголовков запроса (§11.10): `headers` — JSON-объект строк
     (клиент переносит в него `wsSettings.headers` / `httpupgradeSettings.headers` Xray и `transport.headers`
     sing-box), `ua` — один `User-Agent`, он главнее `User-Agent` из `headers`; `Host` из `headers` работает, когда
@@ -271,7 +273,8 @@ IPv6 в скобках:
   base64 с паддингом и без. Плагины (`?plugin=`) — ошибка.
 - `hysteria2://` / `hy2://<auth>@<host>[:port]/?…#<name>` (§11.7): весь percent-decoded userinfo — строка
   аутентификации (в том числе `user:password`), порт по умолчанию 443. Параметры: `sni` / `peer` / `serverName`,
-  `pinSHA256`, `obfs=salamander` + `obfs-password`, `insecure=0`. Отклоняются: `insecure=1`, `allowInsecure=1`,
+  `pinSHA256`, `obfs=salamander` + `obfs-password` (или `fm` с UDP-маской `salamander` и `password`, как пишет Xray 26;
+`obfs` главнее; `salamander` с `packetSize` и другие маски пропускаются с предупреждением), `insecure=0`. Отклоняются: `insecure=1`, `allowInsecure=1`,
   `skip-cert-verify=1`, `alpn` кроме `h3`, `security` кроме `tls`, port hopping (`mport`, `ports`, `hopInterval`),
   `ech`, `ca`, другие obfs. Пропускаются: `fp` (подсказка TCP/uTLS, браузерного QUIC-отпечатка нет), скорости
   (`up`, `down`, `upmbps`, `downmbps` — просят Brutal, его нет) и прочие незнакомые параметры.
@@ -687,8 +690,21 @@ VLESS внутри обычных на вид HTTP-запросов, совме�
 
 `fragment: {"length": "100-200", "interval": "10-20"}` у VLESS с TLS или REALITY (и у `link`). Первая запись
 (ClientHello) режется на несколько TLS-записей случайного размера из `length`, каждая уходит отдельной записью TCP
-после паузы из `interval` (мс). DPI, ищущий имя сервера в первом сегменте или первой записи, видит только часть. TLS
+после паузы из `interval` (мс); при `interval` 0 все записи уходят одной записью TCP, как у `tlshello` Xray. DPI, ищущий имя сервера в первом сегменте или первой записи, видит только часть. TLS
 разрешает сообщению рукопожатия занимать несколько записей, серверы это принимают.
+
+Из ссылки (VLESS, VMess, Trojan) фрагментация берётся из `fm` — `finalmask` Xray 26 (сверено с v26.10.31):
+`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"10-20","delay":"10-20"}}]}` →
+`length`, `interval` = `delay` (без `delay` — 0, записи одной записью TCP; поля `interval` у маски нет, Xray его не
+читает — панели, копирующие его из старого `fragment`, получают то же, что у Xray; из списков `lengths`/`delays`
+берётся первый диапазон). Нет `fm` с маской `fragment` — старый `fragment=` (`tlshello` и диапазоны: сначала длина,
+затем пауза). Фрагментация ссылки главнее `fragment` у `link` (настройки клиента). Маска `fragment` с `packets` не
+`tlshello` (у Xray `""` и `1-3` режут записи TCP, а не TLS) — `Unsupported`, сервер отклоняется; ошибка в
+`length`/`delay` — ошибка конфигурации, как у Xray. Пропускаются с предупреждением в журнале, не отклоняя сервер:
+`maxSplit`, вторая маска `fragment`, маски `noise`, `header-custom` и другие, UDP-маски, `fm` без TLS/REALITY.
+Клиент переносит `streamSettings.finalmask` Xray JSON в `fm`, а старую схему — `sockopt.dialerProxy` на `freedom` с
+`settings.fragment` (`packets: tlshello`, `length`, `interval` → `delay`, `maxSplit`) — в такую же маску; цепочки
+через другой прокси, `noises` и `packets` диапазоном не переносятся.
 
 ### 11.7 Hysteria 2
 
