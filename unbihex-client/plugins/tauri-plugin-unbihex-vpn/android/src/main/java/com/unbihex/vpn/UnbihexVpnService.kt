@@ -1,36 +1,31 @@
 package com.unbihex.vpn
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
+import android.app.*
 import android.content.Intent
+import android.content.ComponentName
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import android.service.quicksettings.TileService
 import android.util.Log
+import androidx.annotation.Keep
+import org.json.JSONObject
+import java.util.concurrent.Executors
 
-/**
- * Owns the TUN interface. The descriptor stays open here; the engine works on a
- * dup() of it, so closing this one (stop or revoke) plus stopping the engine tears
- * the interface down.
- *
- * The app's own package is excluded from the VPN, which keeps the engine's sockets
- * (to the proxy server, DNS and direct sites) out of the tunnel without protect().
- *
- * With the notification on, the service runs in the foreground: Android then keeps
- * the app process (and the engine in it) alive when the app is swiped away. The
- * notification's "Отключить" stops the VPN without opening the app.
- *
- * Every start hands the engine the read end of a pipe whose write end lives here.
- * Closing it on stop, revoke or "Отключить" is how the engine learns that the VPN
- * is gone, also while the app has no window.
- */
+object NativeVpn {
+    init { System.loadLibrary("unbihex_client_lib") }
+    external fun start(dataDir: String, service: UnbihexVpnService, generation: Long, bootstrapDns: String): String?
+    external fun stop(generation: Long)
+}
+
 class UnbihexVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.unbihex.vpn.START"
+        const val ACTION_TILE_START = "com.unbihex.vpn.TILE_START"
         const val ACTION_STOP = "com.unbihex.vpn.STOP"
         const val EXTRA_MTU = "mtu"
         const val EXTRA_ADDRESS = "address"
@@ -39,76 +34,226 @@ class UnbihexVpnService : VpnService() {
         const val EXTRA_SESSION = "session"
         const val EXTRA_SERVER = "server"
         const val EXTRA_NOTIFICATION = "notification"
+        const val EXTRA_GENERATION = "generation"
         private const val TAG = "UnbihexVpn"
         private const val CHANNEL_ID = "vpn"
         private const val NOTIFICATION_ID = 1
+        private val lock = Any()
+        private val worker = Executors.newSingleThreadExecutor()
+        private val lifecycle = VpnLifecycle()
+        private var current: UnbihexVpnService? = null
+        @Volatile var isActive = false
+        val state: String get() = synchronized(lock) { lifecycle.state }
+        private val callbacks = VpnStartCallbacks()
 
-        /** True while the interface is up. Read by the plugin's `status`. */
-        @Volatile
-        var isActive: Boolean = false
+        fun registerCallback(value: Long, callback: (Int?, Int?, Long, String?) -> Unit): Boolean = synchronized(lock) {
+            if (!lifecycle.isConnecting(value)) false else {
+                callbacks.register(value, callback)
+                true
+            }
+        }
 
-        /** Called once with (fd, stopFd, null) or (null, null, error) after a start request. */
-        @Volatile
-        var onEstablished: ((Int?, Int?, String?) -> Unit)? = null
+        fun takeCallback(value: Long): ((Int?, Int?, Long, String?) -> Unit)? = synchronized(lock) {
+            callbacks.take(value)
+        }
+
+        fun refresh(context: android.content.Context) {
+            TileService.requestListeningState(context, ComponentName(context, VpnTileService::class.java))
+        }
+        fun reserve(context: android.content.Context): Long? {
+            val value = synchronized(lock) { lifecycle.reserve() }
+            if (value != null) refresh(context)
+            return value
+        }
+
+        fun cancel(context: android.content.Context, expected: Long? = null): Boolean {
+            var callback: ((Int?, Int?, Long, String?) -> Unit)? = null
+            val stopped = synchronized(lock) {
+                val old = lifecycle.cancel(expected) ?: return false
+                callback = takeCallback(old)
+                isActive = false
+                current?.closeTunLocked()
+                old
+            }
+            callback?.invoke(null, null, stopped, "Запуск VPN отменён")
+            refresh(context)
+            worker.execute {
+                try {
+                    NativeVpn.stop(stopped)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "native stop failed", e)
+                }
+            }
+            return true
+        }
+
+        fun markConnected(context: android.content.Context, value: Long): Boolean {
+            val success = synchronized(lock) { lifecycle.connected(value) }
+            if (success) refresh(context)
+            return success
+        }
     }
-
+    private var ownedGeneration: Long? = null
     private var tun: ParcelFileDescriptor? = null
-    /** Write end of the stop pipe; the engine holds the read end. */
     private var stopSignal: ParcelFileDescriptor? = null
 
+    @Keep fun isGenerationCurrent(value: Long): Boolean = synchronized(lock) {
+        lifecycle.isConnecting(value)
+    }
+
+    @Keep fun establishFromNative(value: Long, argsJson: String): IntArray {
+        val args = JSONObject(argsJson)
+        return establish(value, args.optInt("mtu", 1500), args.optString("address", "10.199.233.1"),
+            args.optInt("prefix", 30), args.optString("dns", "10.199.233.2"), args.optString("session", "Unbihex"))
+    }
+
+    private fun establish(value: Long, mtu: Int, address: String, prefix: Int, dns: String, session: String): IntArray {
+        val builder = Builder().setSession(session).setMtu(mtu).addAddress(address, prefix)
+            .addRoute("0.0.0.0", 0).addDnsServer(dns)
+        try { builder.addAddress("fdb5:2f3c:9a17::1", 126); builder.addRoute("::", 0) }
+        catch (e: Exception) { Log.w(TAG, "IPv6 is not available", e) }
+        builder.addDisallowedApplication(packageName)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
+        synchronized(lock) {
+            check(lifecycle.isConnecting(value)) { "VPN start cancelled" }
+            val pfd = builder.establish() ?: throw IllegalStateException("система не создала VPN-интерфейс")
+            var pipe: Array<ParcelFileDescriptor>? = null
+            var duplicate: ParcelFileDescriptor? = null
+            try {
+                pipe = ParcelFileDescriptor.createPipe()
+                duplicate = ParcelFileDescriptor.dup(pfd.fileDescriptor)
+                closeTunLocked()
+                tun = pfd; stopSignal = pipe[1]; isActive = true
+                return intArrayOf(duplicate.detachFd(), pipe[0].detachFd())
+            } catch (e: Exception) {
+                duplicate?.close(); pipe?.forEach { it.close() }; pfd.close(); throw e
+            }
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null || intent.action == ACTION_STOP) {
-            // A null intent is a restart after the process died: the engine is gone too.
-            shutdown()
-            stopSelf()
+        if (intent == null) {
+            stopSelf(startId)
             return START_NOT_STICKY
         }
-        val callback = onEstablished
-        onEstablished = null
-        try {
-            closeTun()
-            val builder = Builder()
-                .setSession(intent.getStringExtra(EXTRA_SESSION) ?: "Unbihex")
-                .setMtu(intent.getIntExtra(EXTRA_MTU, 1500))
-                .addAddress(
-                    intent.getStringExtra(EXTRA_ADDRESS) ?: "10.199.233.1",
-                    intent.getIntExtra(EXTRA_PREFIX, 30)
-                )
-                .addRoute("0.0.0.0", 0)
-                .addDnsServer(intent.getStringExtra(EXTRA_DNS) ?: "10.199.233.2")
-            // Route IPv6 into the tunnel too, otherwise it would leak around the VPN.
+        if (intent.action == ACTION_STOP) {
+            val expected = intent.getLongExtra(EXTRA_GENERATION, -1L)
+            if (expected >= 0) cancel(this, expected)
+            synchronized(lock) {
+                if (lifecycle.state == "disconnected") {
+                    stopForegroundCompat()
+                    stopSelf(startId)
+                }
+            }
+            return START_NOT_STICKY
+        }
+        if (intent.action != ACTION_START && intent.action != ACTION_TILE_START) return START_NOT_STICKY
+        val headless = intent.action == ACTION_TILE_START
+        val value = intent.getLongExtra(EXTRA_GENERATION, -1L)
+        val callback = if (headless) null else takeCallback(value)
+        // Android requires every foreground-service launch to promote promptly, even
+        // when its reservation was cancelled before the intent was delivered.
+        if (headless) {
             try {
-                builder.addAddress("fdb5:2f3c:9a17::1", 126)
-                builder.addRoute("::", 0)
+                synchronized(lock) {
+                    goForeground("", lifecycle.foregroundConnecting())
+                }
             } catch (e: Exception) {
-                Log.w(TAG, "IPv6 is not available: ${e.message}")
+                Log.e(TAG, "foreground service refused", e)
+                if (cancel(this, value)) {
+                    showFailure("Не удалось запустить VPN")
+                    stopSelf(startId)
+                }
+                return START_NOT_STICKY
             }
-            builder.addDisallowedApplication(packageName)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                builder.setMetered(false)
+        }
+        val accepted = synchronized(lock) {
+            if (!lifecycle.isConnecting(value)) false else {
+                current = this
+                ownedGeneration = value
+                true
             }
-            val pfd = builder.establish()
-                ?: throw IllegalStateException("система не создала VPN-интерфейс (разрешение отозвано?)")
-            tun = pfd
-            val pipe = ParcelFileDescriptor.createPipe()
-            stopSignal = pipe[1]
-            isActive = true
-            if (intent.getBooleanExtra(EXTRA_NOTIFICATION, true)) {
-                goForeground(intent.getStringExtra(EXTRA_SERVER) ?: "")
-            } else {
-                stopForegroundCompat()
+        }
+        if (!accepted) {
+            callback?.invoke(null, null, value, "Запуск VPN отменён")
+            synchronized(lock) {
+                if (lifecycle.state == "disconnected") {
+                    stopForegroundCompat()
+                    stopSelf(startId)
+                }
             }
-            callback?.invoke(pfd.fd, pipe[0].detachFd(), null)
-        } catch (e: Exception) {
-            Log.e(TAG, "establish failed", e)
-            shutdown()
-            callback?.invoke(null, null, e.message ?: e.toString())
+            return START_NOT_STICKY
+        }
+        if (headless) {
+            val dns = org.json.JSONArray(AndroidContext.physicalDns(this)).toString()
+            worker.execute {
+                val error = try {
+                    NativeVpn.start(applicationInfo.dataDir, this, value, dns)
+                } catch (e: Throwable) {
+                    e.message ?: e.toString()
+                }
+                Handler(Looper.getMainLooper()).post {
+                    if (error == null) {
+                        // Recheck and publish together on the main thread so STOP cannot
+                        // be followed by a late "connected" notification.
+                        synchronized(lock) {
+                            if (lifecycle.isConnecting(value) && current === this) {
+                                if (markConnected(this, value)) {
+                                    try {
+                                        goForeground("")
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "notification update failed", e)
+                                    }
+                                }
+                            }
+                        }
+                    } else if (cancel(this, value)) {
+                        Log.e(TAG, "VPN start failed: $error")
+                        showFailure("Не удалось подключить VPN: $error")
+                        stopSelf(startId)
+                    }
+                }
+            }
+        } else {
+            var fds: IntArray? = null
+            try {
+                fds = establish(
+                    value, intent.getIntExtra(EXTRA_MTU, 1500),
+                    intent.getStringExtra(EXTRA_ADDRESS) ?: "10.199.233.1",
+                    intent.getIntExtra(EXTRA_PREFIX, 30),
+                    intent.getStringExtra(EXTRA_DNS) ?: "10.199.233.2",
+                    intent.getStringExtra(EXTRA_SESSION) ?: "Unbihex"
+                )
+                synchronized(lock) {
+                    check(lifecycle.isConnecting(value)) { "VPN start cancelled" }
+                    if (intent.getBooleanExtra(EXTRA_NOTIFICATION, true)) {
+                        goForeground(intent.getStringExtra(EXTRA_SERVER) ?: "")
+                    } else {
+                        stopForegroundCompat()
+                    }
+                }
+                if (callback == null) throw IllegalStateException("VPN callback missing")
+                callback.invoke(fds[0], fds[1], value, null)
+                fds = null
+            } catch (e: Exception) {
+                fds?.forEach {
+                    try { ParcelFileDescriptor.adoptFd(it).close() } catch (_: Exception) { }
+                }
+                if (cancel(this, value)) stopSelf(startId)
+                callback?.invoke(null, null, value, e.message ?: e.toString())
+            }
         }
         return START_NOT_STICKY
     }
 
+    private fun showFailure(message: String) {
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
     /** Shows the "VPN is on" notification and keeps the process alive in the background. */
-    private fun goForeground(server: String) {
+    private fun goForeground(server: String, connecting: Boolean = false) {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(CHANNEL_ID, "VPN", NotificationManager.IMPORTANCE_LOW)
@@ -121,7 +266,8 @@ class UnbihexVpnService : VpnService() {
             PendingIntent.getActivity(this, 0, it, flags)
         }
         val stop = PendingIntent.getService(
-            this, 1, Intent(this, UnbihexVpnService::class.java).setAction(ACTION_STOP), flags
+            this, 1, Intent(this, UnbihexVpnService::class.java).setAction(ACTION_STOP)
+                .putExtra(EXTRA_GENERATION, synchronized(lock) { lifecycle.generation }), flags
         )
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
@@ -131,7 +277,7 @@ class UnbihexVpnService : VpnService() {
         }
         builder
             .setSmallIcon(R.drawable.ic_unbihex_vpn)
-            .setContentTitle("VPN включён")
+            .setContentTitle(if (connecting) "Подключение" else "VPN включён")
             .setContentText(if (server.isEmpty()) "Unbihex" else server)
             .setOngoing(true)
             .setShowWhen(false)
@@ -157,8 +303,7 @@ class UnbihexVpnService : VpnService() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
-            // The VPN still works; it is just not protected from being closed in the background.
-            Log.e(TAG, "foreground service refused", e)
+            throw e
         }
     }
 
@@ -171,34 +316,31 @@ class UnbihexVpnService : VpnService() {
         }
     }
 
-    private fun closeTun() {
-        try {
-            tun?.close()
-        } catch (_: Exception) {
-        }
-        tun = null
-        // EOF on the engine's end: it stops and drops its copy of the TUN descriptor.
-        try {
-            stopSignal?.close()
-        } catch (_: Exception) {
-        }
+    private fun closeTunLocked() {
+        try { stopSignal?.close() } catch (_: Exception) { }
         stopSignal = null
-    }
-
-    private fun shutdown() {
-        isActive = false
-        closeTun()
-        stopForegroundCompat()
+        try { tun?.close() } catch (_: Exception) { }
+        tun = null
     }
 
     override fun onRevoke() {
-        // Another VPN took over or the user switched us off in Settings.
-        shutdown()
+        val value = synchronized(lock) { if (current === this) ownedGeneration else null }
+        if (value != null) cancel(this, value)
+        stopForegroundCompat()
         stopSelf()
     }
 
     override fun onDestroy() {
-        shutdown()
+        val value = synchronized(lock) {
+            // Resources belong to this instance even if another service is current.
+            closeTunLocked()
+            ownedGeneration
+        }
+        if (value != null) cancel(this, value)
+        synchronized(lock) {
+            if (current === this) current = null
+        }
+        stopForegroundCompat()
         super.onDestroy()
     }
 }

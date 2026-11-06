@@ -21,5 +21,15 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="vpn" />
         </service>
+        <service android:name="com.unbihex.vpn.VpnTileService" android:exported="true"
+            android:icon="@drawable/ic_unbihex_vpn" android:label="Unbihex"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+            <meta-data android:name="android.service.quicksettings.ACTIVE_TILE" android:value="true" />
+        </service>
+        <activity android:name="com.unbihex.vpn.VpnConsentActivity" android:exported="false" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.unbihex.vpn.VpnTilePreferencesActivity" android:exported="true" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+        </activity>
     </application>
 </manifest>

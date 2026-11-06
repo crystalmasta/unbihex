@@ -74,25 +74,36 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun launch(invoke: Invoke, args: StartArgs) {
+        val generation = UnbihexVpnService.reserve(activity.applicationContext)
+        if (generation == null) {
+            invoke.reject("VPN уже подключён или подключается")
+            return
+        }
         if (args.notification) {
             askNotificationPermission()
         }
         // Snapshot before establish(): afterwards the default network may be the
         // VPN, whose fake DNS cannot bootstrap the proxy server itself.
-        val bootstrapDns = physicalDns()
-        UnbihexVpnService.onEstablished = { fd, stopFd, error ->
+        val bootstrapDns = AndroidContext.physicalDns(activity)
+        val registered = UnbihexVpnService.registerCallback(generation) { fd, stopFd, generation, error ->
             if (fd != null) {
                 val res = JSObject()
                 res.put("fd", fd)
                 res.put("stopFd", stopFd)
+                res.put("generation", generation)
                 res.put("bootstrapDns", JSONArray(bootstrapDns))
                 invoke.resolve(res)
             } else {
                 invoke.reject(error ?: "Не удалось запустить VPN")
             }
         }
+        if (!registered) {
+            invoke.reject("Запуск VPN отменён")
+            return
+        }
         val intent = Intent(activity, UnbihexVpnService::class.java).apply {
             action = UnbihexVpnService.ACTION_START
+            putExtra(UnbihexVpnService.EXTRA_GENERATION, generation)
             putExtra(UnbihexVpnService.EXTRA_MTU, args.mtu)
             putExtra(UnbihexVpnService.EXTRA_ADDRESS, args.address)
             putExtra(UnbihexVpnService.EXTRA_PREFIX, args.prefix)
@@ -106,38 +117,9 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             // which is gone once the app was swiped away with the VPN on.
             activity.applicationContext.startService(intent)
         } catch (e: Exception) {
-            UnbihexVpnService.onEstablished = null
-            invoke.reject("Не удалось запустить VPN-сервис: ${e.message}")
-        }
-    }
-
-    // By dubr1k (github.com/dubr1k), PR #36.
-    private fun physicalDns(): List<String> {
-        val cm = activity.applicationContext.getSystemService(ConnectivityManager::class.java)
-            ?: return emptyList()
-        return try {
-            // Prefer the active Wi-Fi/mobile network; never pick another VPN's
-            // DNS, even while replacing an existing VPN connection.
-            val networks = (listOfNotNull(cm.activeNetwork) + cm.allNetworks.toList()).distinct()
-            val physical = networks.firstOrNull { network ->
-                val caps = cm.getNetworkCapabilities(network)
-                caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            }
-            physical?.let { cm.getLinkProperties(it)?.dnsServers }
-                ?.mapNotNull { address ->
-                    val host = address.hostAddress?.substringBefore('%') ?: return@mapNotNull null
-                    if (address is Inet6Address) {
-                        val scope = if (address.scopeId > 0) "%${address.scopeId}" else ""
-                        "[$host$scope]:53"
-                    } else {
-                        "$host:53"
-                    }
-                }
-                ?.distinct() ?: emptyList()
-        } catch (_: SecurityException) {
-            // Preserve the existing system/public-DNS fallback on restricted devices.
-            emptyList()
+            val callback = UnbihexVpnService.takeCallback(generation)
+            UnbihexVpnService.cancel(activity.applicationContext, generation)
+            callback?.invoke(null, null, generation, "Не удалось запустить VPN-сервис: ${e.message}")
         }
     }
 
@@ -159,10 +141,16 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    @InvokeArg
+    class StopArgs { var generation: Long? = null }
+
     @Command
     fun stop(invoke: Invoke) {
+        val args = invoke.parseArgs(StopArgs::class.java)
+        if (!UnbihexVpnService.cancel(activity.applicationContext, args.generation)) { invoke.resolve(); return }
         val intent = Intent(activity, UnbihexVpnService::class.java).apply {
             action = UnbihexVpnService.ACTION_STOP
+            putExtra(UnbihexVpnService.EXTRA_GENERATION, args.generation ?: -1L)
         }
         try {
             // The application context: this activity may be gone already.
@@ -171,6 +159,16 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             // The service is not running: nothing to stop.
         }
         invoke.resolve()
+    }
+
+    @InvokeArg
+    class GenerationArgs { var generation: Long = 0 }
+
+    @Command
+    fun markConnected(invoke: Invoke) {
+        val args = invoke.parseArgs(GenerationArgs::class.java)
+        if (UnbihexVpnService.markConnected(activity.applicationContext, args.generation)) invoke.resolve()
+        else invoke.reject("VPN start cancelled")
     }
 
     /** The read end of [UiSignal]'s pipe, once; the Rust side owns it after this. */
@@ -183,10 +181,10 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun status(invoke: Invoke) {
-        val active = UnbihexVpnService.isActive
+        val active = UnbihexVpnService.state == "connected"
         val res = JSObject()
         res.put("active", active)
-        res.put("state", if (active) "connected" else "disconnected")
+        res.put("state", UnbihexVpnService.state)
         invoke.resolve(res)
     }
 }

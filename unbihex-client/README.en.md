@@ -40,6 +40,8 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   login and password from the settings (the password is random; the "New password" button changes it).
   Programs on this computer and the system proxy connect without a password.
 - Android and iOS: the system VPN (TUN).
+- Android: add the **Unbihex** tile in Quick Settings. Tap it to connect to the selected server or disconnect;
+  the main screen stays closed. Long-press opens the app. Android asks for VPN permission on first use.
 - Routing: "Everything through VPN", "Russia direct" (.ru/.su/.рф and major Russian services),
   "Only selected sites", "Only blocked sites" (by the geosite/geoip databases),
   plus your own "through VPN / direct / block" lists. Rule databases: geosite.dat / geoip.dat (v2fly) and `.srs`

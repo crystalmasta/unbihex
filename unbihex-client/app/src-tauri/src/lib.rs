@@ -1,5 +1,7 @@
 //! Unbihex client app: Tauri commands over `unbihex-client-core`.
 
+#[cfg(target_os = "android")]
+mod android_vpn;
 mod logs;
 
 use std::sync::Arc;
@@ -20,10 +22,46 @@ struct AppState {
     logs: logs::LogBuffer,
     level: Option<logs::LevelHandle>,
     /// Serializes connect/disconnect so double clicks cannot race.
-    op: tokio::sync::Mutex<()>,
+    op: Arc<tokio::sync::Mutex<()>>,
     /// A message for the UI to show once, such as a failed auto-connect at
     /// login: the window may not have existed when it happened.
     notice: parking_lot::Mutex<Option<String>>,
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_start_error(tun: bool, signal: bool, generation: Option<u64>) -> Option<&'static str> {
+    if !tun { Some("VPN-сервис не вернул дескриптор TUN") }
+    else if !signal { Some("VPN-сервис не вернул stop pipe") }
+    else if !generation.is_some_and(|g| g > 0 && g <= i64::MAX as u64) { Some("VPN-сервис не вернул поколение") }
+    else { None }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn android_generation_matches(active: Option<u64>, requested: u64) -> bool {
+    requested > 0 && active == Some(requested)
+}
+
+#[cfg(test)]
+mod android_session_tests {
+    use super::{android_generation_matches, android_start_error};
+
+    #[test]
+    fn stale_stop_does_not_match_new_session_even_when_server_is_unchanged() {
+        assert!(android_generation_matches(Some(42), 42));
+        assert!(!android_generation_matches(Some(42), 41));
+        assert!(!android_generation_matches(None, 42));
+        assert!(!android_generation_matches(Some(0), 0));
+    }
+
+    #[test]
+    fn start_requires_both_owned_descriptors_and_a_valid_generation() {
+        assert!(android_start_error(true, true, Some(42)).is_none());
+        assert!(android_start_error(false, true, Some(42)).is_some());
+        assert!(android_start_error(true, false, Some(42)).is_some());
+        assert!(android_start_error(true, true, None).is_some());
+        assert!(android_start_error(true, true, Some(0)).is_some());
+        assert!(android_start_error(true, true, Some(u64::MAX)).is_some());
+    }
 }
 
 /// Everything the UI needs in one call.
@@ -76,7 +114,9 @@ async fn do_connect(_app: &AppHandle, client: &Client) -> Result<ConnectionInfo,
 #[cfg(mobile)]
 async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, ClientError> {
     use tauri_plugin_unbihex_vpn::{StartArgs, UnbihexVpnExt};
-    use unbihex_client_core::plan::{TUN_ADDRESS, TUN_DNS, TUN_PREFIX, Target, build_config_json, tun_mtu};
+    use unbihex_client_core::plan::{
+        TUN_ADDRESS, TUN_DNS, TUN_PREFIX, Target, build_config_json, tun_mtu,
+    };
 
     if client.controller.is_connected().await {
         return Err(ClientError::State("уже подключено".into()));
@@ -110,58 +150,64 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
         return Ok(client.controller.mark_external(&server).await);
     }
     #[cfg(target_os = "android")]
-    let stop_signal = resp.stop_fd.map(|fd| {
-        use std::os::fd::FromRawFd;
-        // SAFETY: the VPN service detached this descriptor for us; nothing else owns it.
-        unsafe { std::fs::File::from_raw_fd(fd) }
-    });
-    let fd = resp
+    let (fd, stop_signal, generation) = {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        // Both descriptors are transferred by the service; adopt before fallible work.
+        let tun = resp
+            .fd
+            .filter(|fd| *fd >= 0)
+            .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+        let signal = resp
+            .stop_fd
+            .filter(|fd| *fd >= 0 && Some(*fd) != resp.fd)
+            .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+        if let Some(message) = android_start_error(tun.is_some(), signal.is_some(), resp.generation) {
+            if let Some(generation) = resp.generation.filter(|g| *g > 0 && *g <= i64::MAX as u64) {
+                stop_vpn_generation(app, generation).await;
+            } else {
+                stop_vpn_service(app).await;
+            }
+            return Err(ClientError::State(message.into()));
+        }
+        // The validation above established that all three values exist.
+        (tun.unwrap(), signal.unwrap(), resp.generation.unwrap())
+    };
+    #[cfg(target_os = "android")]
+    let raw_fd = std::os::fd::AsRawFd::as_raw_fd(&fd);
+    #[cfg(not(target_os = "android"))]
+    let raw_fd = resp
         .fd
         .ok_or_else(|| ClientError::State("VPN-сервис не вернул дескриптор TUN".into()))?;
     match client
         .controller
-        .connect_tun_fd_with_dns(&servers, &settings, &geo, fd, None, &resp.bootstrap_dns)
+        .connect_tun_fd_with_dns(&servers, &settings, &geo, raw_fd, None, &resp.bootstrap_dns)
         .await
     {
         Ok(info) => {
             #[cfg(target_os = "android")]
-            if let Some(signal) = stop_signal {
-                watch_vpn_stop(app.clone(), signal, info.clone());
+            {
+                let handle = app.clone();
+                let confirmed = tauri::async_runtime::spawn_blocking(move || {
+                    handle.unbihex_vpn().mark_connected(generation)
+                })
+                .await;
+                if !matches!(confirmed, Ok(Ok(()))) {
+                    client.disconnect().await;
+                    stop_vpn_generation(app, generation).await;
+                    return Err(ClientError::State("VPN-сессия отменена".into()));
+                }
+                android_vpn::activate(generation, stop_signal.into());
             }
             Ok(info)
         }
         Err(e) => {
+            #[cfg(target_os = "android")]
+            stop_vpn_generation(app, generation).await;
+            #[cfg(not(target_os = "android"))]
             stop_vpn_service(app).await;
             Err(e)
         }
     }
-}
-
-/// Android: the VPN service closes its end of the stop pipe when the VPN goes away
-/// without us (the notification's "Отключить", another VPN, Settings). Stops the
-/// engine then, also while the app has no window and nothing polls `status`.
-#[cfg(target_os = "android")]
-fn watch_vpn_stop(app: AppHandle, mut signal: std::fs::File, session: ConnectionInfo) {
-    tauri::async_runtime::spawn_blocking(move || {
-        use std::io::Read;
-        let mut byte = [0u8; 1];
-        let _ = signal.read(&mut byte); // EOF once the service closes its end
-        tauri::async_runtime::block_on(async move {
-            let state = app.state::<AppState>();
-            let _op = state.op.lock().await;
-            let current = state.client.controller.status().await.info;
-            // Only the session this pipe belongs to: a newer one has its own.
-            if current.is_some_and(|c| c.since == session.since && c.server_id == session.server_id) {
-                tracing::info!("the VPN was switched off outside the app");
-                state.client.disconnect().await;
-                notify(&app);
-                // Swiped away earlier: nothing keeps the process any more.
-                if app.get_webview_window("main").is_none() {
-                    app.exit(0);
-                }
-            }
-        });
-    });
 }
 
 /// Android: creates the window again when the app is opened after it was swiped
@@ -199,6 +245,16 @@ fn watch_activities(app: AppHandle) {
     });
 }
 
+#[cfg(target_os = "android")]
+async fn stop_vpn_generation(app: &AppHandle, generation: u64) {
+    use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+    let handle = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        handle.unbihex_vpn().stop_generation(generation)
+    })
+    .await;
+}
+
 #[cfg(mobile)]
 async fn stop_vpn_service(app: &AppHandle) {
     use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
@@ -208,6 +264,8 @@ async fn stop_vpn_service(app: &AppHandle) {
 
 async fn do_disconnect(_app: &AppHandle, client: &Client) {
     client.disconnect().await;
+    #[cfg(target_os = "android")]
+    android_vpn::clear();
     #[cfg(mobile)]
     stop_vpn_service(_app).await;
 }
@@ -773,7 +831,9 @@ fn start_background(app: AppHandle) {
             let _op = state.op.lock().await;
             #[cfg(desktop)]
             set_tray_transition(&app, true);
-            if let Err(e) = do_connect(&app, &state.client).await {
+            if !state.client.controller.is_connected().await
+                && let Err(e) = do_connect(&app, &state.client).await
+            {
                 tracing::warn!("auto-connect: {e}");
                 // Not silently: started at login the app sits in the tray, and in
                 // TUN mode without administrator rights the VPN never comes up.
@@ -831,7 +891,14 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir().join("unbihex"));
+            #[cfg(target_os = "android")]
+            let owner = android_vpn::owner(&dir).map_err(std::io::Error::other)?;
+            #[cfg(target_os = "android")]
+            let client = owner.client.clone();
+            #[cfg(not(target_os = "android"))]
             let client = Arc::new(Client::open(dir));
+            #[cfg(target_os = "android")]
+            android_vpn::attach(owner, app.handle().clone());
             logs::set_level(&level, &client.settings().log_level);
             tracing::info!(
                 "Unbihex {} (engine {}) on {}",
@@ -847,7 +914,10 @@ pub fn run() {
                 client,
                 logs: log_buffer.clone(),
                 level: level.clone(),
-                op: tokio::sync::Mutex::new(()),
+                #[cfg(target_os = "android")]
+                op: owner.op.clone(),
+                #[cfg(not(target_os = "android"))]
+                op: Arc::new(tokio::sync::Mutex::new(())),
                 notice: parking_lot::Mutex::new(notice),
             });
             #[cfg(desktop)]
