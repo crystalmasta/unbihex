@@ -2,7 +2,7 @@
 [package]
 name = "unbihex-engine"
 description = "Unbihex network engine: routing, protocols, TUN (SPEC.md)"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.88"
 license = "BUSL-1.1"
