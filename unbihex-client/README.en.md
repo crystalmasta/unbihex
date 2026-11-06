@@ -206,6 +206,32 @@ without subscriptions and the data folder. This mode never touches routes or DNS
 Building for Linux from Windows: `cargo zigbuild --release -p unbihex-cli --target x86_64-unknown-linux-musl`
 (needs [zig](https://ziglang.org) and `cargo install cargo-zigbuild`); on Linux itself, `cargo build --release -p unbihex-cli`.
 
+## Building for macOS (Apple Silicon)
+
+An unofficial build: releases have no macOS files (issue #3).
+You need an Apple Silicon Mac, Xcode with command-line tools, Rust with the
+`aarch64-apple-darwin` target, Node.js and npm. From the repository root:
+
+```sh
+rustup target add aarch64-apple-darwin
+unbihex-client/installer/build-macos.sh
+```
+
+The script temporarily installs Tauri CLI 2.11.4, builds for macOS 11.0 and checks the architecture,
+minimum system version and signature. Output is in `unbihex-client/dist/macos-arm64/`:
+`Unbihex-<version>-macos-arm64.zip`, `SHA256SUMS.txt`, `BUILD.md`, `LICENSE` and `LICENSE.ru.md`.
+Move the output directory before rebuilding if it already exists. `BUILD.md` records the source version,
+commit and tool versions; bit-for-bit reproducibility is not guaranteed.
+
+The ad-hoc signature is not a Developer ID signature, Apple has not notarized the app, and Gatekeeper will
+not open it with a double click. On macOS 15 and later a right click → "Open" no longer helps: try to open
+the app, then use System Settings → Privacy & Security → "Open Anyway". Or remove the quarantine in Terminal:
+`xattr -dr com.apple.quarantine /Applications/Unbihex.app`. TUN mode needs root and the app does not get it
+by itself (it asks to be started with `sudo`), so a normal start works in system proxy mode. Intel, older
+macOS versions and VPN functionality are not tested by this procedure. The `macOS ARM64 build` workflow runs
+manually (Actions → macOS ARM64 build → Run workflow) and on `v*` tags; its output is a workflow artifact,
+and no release is published automatically.
+
 ## Building on Windows
 
 1. Install Rust (https://rustup.rs) with the MSVC toolchain and "Build Tools for Visual Studio" (C++).
