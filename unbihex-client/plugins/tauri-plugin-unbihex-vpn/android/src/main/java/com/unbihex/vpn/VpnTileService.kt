@@ -3,10 +3,14 @@ package com.unbihex.vpn
 import android.app.Activity
 import android.app.PendingIntent
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
+import android.graphics.drawable.Icon
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.widget.Toast
@@ -25,12 +29,42 @@ private fun startHeadless(context: Context) {
 }
 
 class VpnTileService : TileService() {
-    override fun onStartListening() { super.onStartListening(); update() }
+    companion object {
+        private val main = Handler(Looper.getMainLooper())
+        // Accessed only on the main thread; cleared when SystemUI stops listening.
+        private var listening: VpnTileService? = null
+
+        fun refresh(context: Context) {
+            val app = context.applicationContext
+            main.post {
+                // requestListeningState alone does not re-enter an already listening tile.
+                listening?.update()
+                requestListeningState(app, ComponentName(app, VpnTileService::class.java))
+            }
+        }
+    }
+    override fun onStartListening() {
+        super.onStartListening()
+        listening = this
+        update()
+    }
+    override fun onStopListening() {
+        if (listening === this) listening = null
+        super.onStopListening()
+    }
+    override fun onDestroy() {
+        if (listening === this) listening = null
+        super.onDestroy()
+    }
     private fun update() {
+        val vpnState = UnbihexVpnService.state
         qsTile?.apply {
-            state = if (UnbihexVpnService.state == "connected") Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+            val connected = vpnState == "connected"
+            state = if (connected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+            icon = Icon.createWithResource(this@VpnTileService,
+                if (connected) R.drawable.ic_unbihex_vpn else R.drawable.ic_unbihex_vpn_outline)
             label = "Unbihex"
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) subtitle = when (UnbihexVpnService.state) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) subtitle = when (vpnState) {
                 "connecting" -> "Подключение"; "connected" -> "Подключено"; else -> "Отключено"
             }
             updateTile()

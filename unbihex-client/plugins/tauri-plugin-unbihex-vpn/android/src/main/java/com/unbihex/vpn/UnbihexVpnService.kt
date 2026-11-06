@@ -2,7 +2,6 @@ package com.unbihex.vpn
 
 import android.app.*
 import android.content.Intent
-import android.content.ComponentName
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
@@ -10,7 +9,6 @@ import android.os.ParcelFileDescriptor
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
-import android.service.quicksettings.TileService
 import android.util.Log
 import androidx.annotation.Keep
 import org.json.JSONObject
@@ -58,7 +56,7 @@ class UnbihexVpnService : VpnService() {
         }
 
         fun refresh(context: android.content.Context) {
-            TileService.requestListeningState(context, ComponentName(context, VpnTileService::class.java))
+            VpnTileService.refresh(context)
         }
         fun reserve(context: android.content.Context): Long? {
             val value = synchronized(lock) { lifecycle.reserve() }
