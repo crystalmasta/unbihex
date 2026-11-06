@@ -247,11 +247,38 @@ function serverHtml(s) {
   const del = s.subscription_id
     ? ""
     : `<button class="icon-btn" data-del-server="${s.id}" title="Удалить"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg></button>`;
-  return `<div class="server${sel ? " selected" : ""}${s.unsupported ? " unsupported" : ""}" data-server="${s.id}">
+  const off = autoOff(s);
+  return `<div class="server${sel ? " selected" : ""}${s.unsupported ? " unsupported" : ""}${off ? " auto-off" : ""}" data-server="${s.id}">
     <span class="radio"></span>
     <div class="s-main"><div class="s-name">${esc(s.name)}</div><div class="s-meta"><span class="badge">${esc(s.protocol)}</span>${meta}</div></div>
-    ${pingHtml(s)}${del || "<span></span>"}
+    ${pingHtml(s)}${autoHtml(s)}${del || "<span></span>"}
   </div>`;
+}
+
+// Auto-select group (issue #46): the subscription minus the excluded servers, or only the marked ones.
+const autoMarked = () => S.data.settings.auto_group === "marked";
+
+// The server is outside the auto-select group (the selected one is always in it).
+function autoOff(s) {
+  if (S.data.settings.auto_select === "off" || s.unsupported) return false;
+  return autoMarked() ? !s.auto_marked : s.auto_excluded;
+}
+
+function autoHtml(s) {
+  if (S.data.settings.auto_select === "off" || s.unsupported) return "<span></span>";
+  const on = autoMarked() ? s.auto_marked : !s.auto_excluded;
+  const title = autoMarked()
+    ? on ? "Отмечен для автовыбора — снять отметку" : "Отметить для автовыбора"
+    : on ? "В автовыборе — исключить" : "Исключён из автовыбора — вернуть";
+  return `<button class="icon-btn auto-btn${on ? " on" : ""}" data-auto-server="${s.id}" title="${title}"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3M18 3v4h-4M6 21v-4h4"/></svg></button>`;
+}
+
+async function toggleAuto(id) {
+  const s = S.data.servers.find((x) => x.id === id);
+  if (!s) return;
+  const args = autoMarked() ? { id, marked: !s.auto_marked } : { id, excluded: !s.auto_excluded };
+  await call("set_server_auto", args).catch(() => {});
+  await refresh();
 }
 
 function renderServers() {
@@ -405,6 +432,7 @@ function fillSettings() {
   f.mtu.value = s.mtu;
   f.user_agent.value = s.user_agent;
   f.auto_select.value = s.auto_select || "off";
+  f.auto_group.value = s.auto_group || "subscription";
   f.send_hwid.checked = s.send_hwid;
   f.device_name.value = s.device_name || "";
   f.device_name.placeholder = S.device_name || "";
@@ -494,6 +522,7 @@ function readSettings() {
     mtu: Math.min(9000, Math.max(1280, parseInt(f.mtu.value, 10) || 1500)),
     user_agent: f.user_agent.value.trim(),
     auto_select: f.auto_select.value,
+    auto_group: f.auto_group.value,
     send_hwid: f.send_hwid.checked,
     device_name: f.device_name.value.trim(),
     auto_start: f.auto_start.checked,
@@ -571,7 +600,7 @@ function bind() {
   );
 
   document.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-open],[data-goto],[data-server],[data-del-server],[data-toggle-group],[data-update-sub],[data-edit-sub],[data-href]");
+    const t = e.target.closest("[data-open],[data-goto],[data-server],[data-del-server],[data-auto-server],[data-toggle-group],[data-update-sub],[data-edit-sub],[data-href]");
     if (!t) return;
     if (t.dataset.open === "add") {
       $("#add-text").value = "";
@@ -581,6 +610,9 @@ function bind() {
     } else if (t.dataset.delServer) {
       e.stopPropagation();
       call("remove_server", { id: t.dataset.delServer }).then(refresh).catch(() => {});
+    } else if (t.dataset.autoServer) {
+      e.stopPropagation();
+      toggleAuto(t.dataset.autoServer);
     } else if (t.dataset.server) {
       selectServer(t.dataset.server);
     } else if (t.dataset.toggleGroup) {

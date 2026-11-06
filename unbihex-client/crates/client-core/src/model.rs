@@ -112,6 +112,12 @@ pub struct Server {
     pub ping_ms: Option<u32>,
     /// Last ping error.
     pub ping_error: Option<String>,
+    /// Left out of the auto-select group in [`AutoGroup::Subscription`] mode.
+    #[serde(default)]
+    pub auto_excluded: bool,
+    /// Taken into the auto-select group in [`AutoGroup::Marked`] mode.
+    #[serde(default)]
+    pub auto_marked: bool,
 }
 
 impl Server {
@@ -149,8 +155,8 @@ pub enum RoutingMode {
     BlockedOnly,
 }
 
-/// Auto-select (issue #46): the selected server and the other servers of its
-/// subscription become one balancer in the engine (SPEC §11.16).
+/// Auto-select (issue #46): the selected server and the rest of its group
+/// ([`AutoGroup`]) become one balancer in the engine (SPEC §11.16).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoSelect {
@@ -161,6 +167,17 @@ pub enum AutoSelect {
     Fallback,
     /// The working server with the lowest delay.
     LeastPing,
+}
+
+/// Which servers join the selected one in the auto-select group.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoGroup {
+    /// The other servers of its subscription, except the excluded ones.
+    #[default]
+    Subscription,
+    /// The marked servers of any subscription.
+    Marked,
 }
 
 /// How the server delay is measured.
@@ -268,8 +285,10 @@ pub struct Settings {
     pub fragment_interval: String,
     /// How "Проверить пинг" measures the delay.
     pub ping_method: PingMethod,
-    /// Auto-select among the servers of the selected one's subscription.
+    /// Auto-select among the servers of the group (see `auto_group`).
     pub auto_select: AutoSelect,
+    /// Which servers make up the auto-select group.
+    pub auto_group: AutoGroup,
 }
 
 /// Default proxy login for LAN devices.
@@ -317,6 +336,7 @@ impl Default for Settings {
             fragment_interval: "10-20".into(),
             ping_method: PingMethod::default(),
             auto_select: AutoSelect::default(),
+            auto_group: AutoGroup::default(),
         }
     }
 }
@@ -424,6 +444,8 @@ impl AppData {
                 s.id = o.id;
                 s.ping_ms = o.ping_ms;
                 s.ping_error = o.ping_error.clone();
+                s.auto_excluded = o.auto_excluded;
+                s.auto_marked = o.auto_marked;
             }
             s.subscription_id = Some(sub_id);
             self.servers.push(s);

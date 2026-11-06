@@ -10,7 +10,7 @@ use crate::controller::{Controller, Status};
 use crate::error::{ClientError, Result};
 use crate::geo::Geo;
 use crate::links::{b64_decode, is_share_link, parse_server};
-use crate::model::{AppData, Server, Settings, Subscription, now_secs};
+use crate::model::{AppData, AutoGroup, Server, Settings, Subscription, now_secs};
 use crate::ping::{describe_error, measure};
 use crate::subscription::{Device, FetchOptions, JSON_USER_AGENT, fallback_name, fetch};
 
@@ -452,23 +452,51 @@ impl Client {
         results
     }
 
-    /// The selected server and, with auto-select on, the other servers of its
-    /// subscription the engine supports (manual servers: the other manual
-    /// ones), in list order, up to `plan::MAX_GROUP` in all.
+    /// The selected server and, with auto-select on, the rest of its group the
+    /// engine supports, in list order, up to `plan::MAX_GROUP` in all. The group
+    /// ([`AutoGroup`]) is the other servers of its subscription (manual servers:
+    /// the other manual ones) except the excluded ones, or the marked servers of
+    /// any subscription. The selected server always comes first, even when it is
+    /// excluded or not marked.
     pub fn connect_servers(&self) -> Result<Vec<Server>> {
         let first = self.selected_server()?;
         let mut out = vec![first.clone()];
         let d = self.data.read();
         if d.settings.auto_select != crate::model::AutoSelect::Off {
+            let mode = d.settings.auto_group;
             out.extend(
                 d.servers
                     .iter()
-                    .filter(|s| s.id != first.id && s.subscription_id == first.subscription_id && s.is_supported())
+                    .filter(|s| s.id != first.id && s.is_supported())
+                    .filter(|s| match mode {
+                        AutoGroup::Subscription => s.subscription_id == first.subscription_id && !s.auto_excluded,
+                        AutoGroup::Marked => s.auto_marked,
+                    })
                     .take(crate::plan::MAX_GROUP - 1)
                     .cloned(),
             );
         }
         Ok(out)
+    }
+
+    /// Excludes a server from the auto-select group of its subscription
+    /// (`excluded`) or marks it for the group of marked servers (`marked`);
+    /// `None` leaves that flag as it is.
+    pub fn set_server_auto(&self, id: Uuid, excluded: Option<bool>, marked: Option<bool>) -> Result<Server> {
+        self.mutate(|d| {
+            let s = d
+                .servers
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or_else(|| ClientError::NotFound("сервер".into()))?;
+            if let Some(v) = excluded {
+                s.auto_excluded = v;
+            }
+            if let Some(v) = marked {
+                s.auto_marked = v;
+            }
+            Ok(s.clone())
+        })?
     }
 
     /// Desktop: connects to the selected server (or its auto-select group).
@@ -743,6 +771,52 @@ mod tests {
         d.replace_servers(sub, vec![link("a.com", "%2Fone", "3", "A")]);
         assert_eq!(d.servers[0].id, ids[0]);
         assert_eq!(d.selected, None);
+    }
+
+    #[test]
+    fn auto_group_follows_exclusions_and_marks() {
+        let link = |host: &str| parse_server(&format!("vless://{UUID}@{host}:443?security=tls&sid=1#{host}")).unwrap();
+        let c = Client::open(tmp());
+        let (s1, s2) = (Uuid::new_v4(), Uuid::new_v4());
+        let ids = c
+            .mutate(|d| {
+                d.replace_servers(s1, vec![link("a.com"), link("b.com"), link("c.com")]);
+                let mut x = parse_server("hysteria://p@x.com:443#X").unwrap();
+                x.subscription_id = Some(s2);
+                d.servers.push(x);
+                d.servers.push(Server { subscription_id: Some(s2), ..link("d.com") });
+                d.settings.auto_select = crate::model::AutoSelect::LeastPing;
+                d.servers.iter().map(|s| s.id).collect::<Vec<_>>()
+            })
+            .unwrap();
+        let group = |c: &Client| c.connect_servers().unwrap().iter().map(|s| s.id).collect::<Vec<_>>();
+        c.select(ids[1]).unwrap();
+        assert_eq!(group(&c), [ids[1], ids[0], ids[2]]);
+        // Excluded: out of the group, but still first while selected.
+        c.set_server_auto(ids[0], Some(true), None).unwrap();
+        assert_eq!(group(&c), [ids[1], ids[2]]);
+        c.set_server_auto(ids[1], Some(true), None).unwrap();
+        assert_eq!(group(&c), [ids[1], ids[2]]);
+        // Marked: across subscriptions, unsupported ones left out.
+        c.mutate(|d| d.settings.auto_group = AutoGroup::Marked).unwrap();
+        assert_eq!(group(&c), [ids[1]]);
+        for i in [0, 3, 4] {
+            c.set_server_auto(ids[i], None, Some(true)).unwrap();
+        }
+        assert_eq!(group(&c), [ids[1], ids[0], ids[4]]);
+        // The flags survive an update with rewritten links.
+        let fresh = |host: &str| parse_server(&format!("vless://{UUID}@{host}:443?security=tls&sid=2#{host}")).unwrap();
+        c.mutate(|d| d.replace_servers(s1, vec![fresh("c.com"), fresh("a.com"), fresh("b.com")])).unwrap();
+        let d = c.snapshot();
+        let a = d.server(ids[0]).unwrap();
+        assert!(a.auto_excluded && a.auto_marked);
+        assert!(!d.server(ids[2]).unwrap().auto_marked);
+        // Updated servers go after the other subscription's: list order.
+        assert_eq!(group(&c), [ids[1], ids[4], ids[0]]);
+        // Off: only the selected server.
+        c.mutate(|d| d.settings.auto_select = crate::model::AutoSelect::Off).unwrap();
+        assert_eq!(group(&c), [ids[1]]);
+        assert!(c.set_server_auto(Uuid::new_v4(), Some(true), None).is_err());
     }
 
     #[test]

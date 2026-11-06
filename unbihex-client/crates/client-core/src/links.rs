@@ -99,6 +99,8 @@ fn blank(protocol: &str) -> Server {
         unsupported: None,
         ping_ms: None,
         ping_error: None,
+        auto_excluded: false,
+        auto_marked: false,
     }
 }
 

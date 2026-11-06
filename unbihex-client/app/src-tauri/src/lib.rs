@@ -477,6 +477,24 @@ fn remove_server(app: AppHandle, state: State<'_, AppState>, id: Uuid) -> Result
     r
 }
 
+/// Excludes a server from auto-select or marks it for it; a running group is
+/// rebuilt right away.
+#[tauri::command]
+async fn set_server_auto(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: Uuid,
+    excluded: Option<bool>,
+    marked: Option<bool>,
+) -> Result<Option<ConnectionInfo>, String> {
+    state.client.set_server_auto(id, excluded, marked).map_err(err)?;
+    notify(&app);
+    if state.client.settings().auto_select == unbihex_client_core::AutoSelect::Off {
+        return Ok(None);
+    }
+    reconnect_if_connected(&app, &state).await
+}
+
 #[tauri::command]
 async fn select_server(
     app: AppHandle,
@@ -978,6 +996,7 @@ pub fn run() {
             edit_subscription,
             remove_subscription,
             remove_server,
+            set_server_auto,
             select_server,
             save_settings,
             set_ping_method,
