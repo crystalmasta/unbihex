@@ -284,8 +284,8 @@ percent-decoded, the host may be IPv6 in brackets.
   `tcp`/`raw` without header camouflage, `ws`, `httpupgrade` (§11.10); `host` is the first of a comma list; without
   `sni` the TLS name comes from `host`, then the server (as in v2rayN). `headers` and `ua` as with VLESS (in v2rayN
   JSON `headers` is an object or the same JSON as a string). Refused: other transports (`grpc`, `h2`,
-  `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, `allowInsecure=1`, the `none`/`zero`
-  ciphers.
+  `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, `allowInsecure=1`, an unknown cipher
+  (the error names it); `scy=none`/`zero` mean `auto` (§11.9).
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, `tls` by default; `sni` / `peer` /
   `serverName`, `alpn`, `fp`, and `pbk`, `sid` for REALITY; `type=tcp|raw|ws|httpupgrade` with `path`, `host`,
   `headers` and `ua` (as with VLESS: without `sni` the WebSocket's TLS name comes from `host`). Refused: `security=none` and others, other
@@ -763,7 +763,9 @@ What Xray's client sends, byte for byte (Xray sources `proxy/vmess/{aead,encodin
 
 - The AEAD header only (alterId 0; `aid` in links is ignored, as Xray does). `security`: `auto` (AES-128-GCM on
   x86-64 and ARM64, otherwise ChaCha20-Poly1305, as Xray picks), `aes-128-gcm`, `chacha20-poly1305`; `none` and
-  `zero` (unauthenticated bodies) are `Unsupported`, today's Xray client cannot send them either.
+  `zero` are `auto` too: Xray's client sends them so since 26.7 (XTLS/Xray-core#6303), and its server refuses an
+  unencrypted body; the client picks the cipher and the server takes any. Other values are `Unsupported`, naming the
+  cipher.
 - **Request:** `auth_id(16) | sealed len(2+16) | nonce(8) | sealed header(+16)`. The user key is
   `MD5(uuid ‖ "c48619fe-8f02-49e0-b9e9-edf763e17e21")`; `auth_id` = AES-128(KDF(key, "AES Auth ID Encryption"),
   time(8) ‖ random(4) ‖ CRC32); the length and the header use AES-128-GCM with keys and nonces from the KDF (salts
@@ -1004,7 +1006,7 @@ Running: `cargo test`, `cargo test --features server`, `cargo clippy --all-targe
   `xray_interop.rs` — Vision and REALITY, XHTTP in all modes, the XHTTP CDN format (GET packet-up, tokenish, custom
   session IDs) over HTTP/2+TLS, HTTP/1.1+TLS and HTTP/1.1 without TLS, VLESS over WebSocket and HTTPUpgrade with and
   without TLS (`Host` and `User-Agent` from `headers`, a wrong `Host` refused, behind an nginx-like gate that lets one
-  User-Agent through, where ours gets a `200`), VMess with both ciphers over TCP, WebSocket and HTTPUpgrade with and without TLS, Trojan over TLS (TCP,
+  User-Agent through, where ours gets a `200`), VMess with both ciphers (and `none`/`zero`) over TCP, WebSocket and HTTPUpgrade with and without TLS, Trojan over TLS (TCP,
   WebSocket, HTTPUpgrade) and REALITY with fragmentation and a wrong password (TCP and UDP everywhere);
   `singbox_interop.rs` — VLESS over sing-box's WebSocket and HTTPUpgrade with `headers`, directly and behind the same
   gate; `hysteria2_interop.rs` — Hysteria 2 (the

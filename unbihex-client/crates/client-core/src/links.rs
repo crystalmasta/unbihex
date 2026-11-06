@@ -282,8 +282,16 @@ pub fn explain_engine_error(msg: &str) -> String {
         return explain_trusttunnel(&m, msg);
     }
     if m.contains("vmess") {
-        if m.contains("vmess security=") && !m.contains("reality") && !m.contains("tls") {
-            return "шифрование VMess не поддерживается (есть auto, aes-128-gcm, chacha20-poly1305)".into();
+        if let Some(at) = m.find("vmess security=")
+            && !m.contains("reality")
+            && !m.contains("tls")
+        {
+            // The mode as the link names it, so the user sees what is refused.
+            let rest = &msg[at + "vmess security=".len()..];
+            let mode = rest.split_whitespace().next().unwrap_or(rest);
+            return format!(
+                "шифрование VMess «{mode}» не поддерживается (есть auto, aes-128-gcm, chacha20-poly1305, none, zero)"
+            );
         }
         if m.contains("insecure") {
             return "VMess без проверки сертификата не поддерживается".into();
@@ -495,8 +503,14 @@ mod tests {
         assert!(s.is_supported(), "{:?}", s.unsupported);
         let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","net":"grpc"}}"#))).unwrap();
         assert!(s.unsupported.unwrap().contains("grpc"));
-        let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","scy":"none"}}"#))).unwrap();
-        assert!(s.unsupported.unwrap().contains("шифрование VMess"));
+        // Like Xray's client, `none` and `zero` work (issue #49); an unknown mode is named.
+        for scy in ["none", "zero"] {
+            let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","scy":"{scy}"}}"#))).unwrap();
+            assert!(s.is_supported(), "{scy}: {:?}", s.unsupported);
+        }
+        let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","scy":"aes-256-cfb"}}"#))).unwrap();
+        let why = s.unsupported.unwrap();
+        assert!(why.contains("шифрование VMess «aes-256-cfb»"), "{why}");
     }
 
     #[test]

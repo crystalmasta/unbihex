@@ -71,11 +71,13 @@ pub enum Security {
 }
 
 impl Security {
-    /// `auto` picks AES where the CPU has it, as Xray does; `none` and `zero`
-    /// (unauthenticated bodies) are refused.
+    /// `auto` picks AES where the CPU has it, as Xray does. `none` and `zero` are
+    /// `auto` too: Xray's client sends them so since 26.7 (XTLS/Xray-core#6303), and
+    /// its server refuses an unencrypted body; any server takes a cipher the client
+    /// picks.
     pub fn parse(s: &str) -> Result<Security> {
         match s.to_ascii_lowercase().as_str() {
-            "" | "auto" => Ok(
+            "" | "auto" | "none" | "zero" => Ok(
                 if cfg!(any(
                     target_arch = "x86_64",
                     target_arch = "aarch64",
@@ -912,6 +914,15 @@ mod tests {
             plain_id[12..]
         );
         (head, 42 + n + TAG)
+    }
+
+    #[test]
+    fn none_and_zero_are_auto_and_unknown_ciphers_are_named() {
+        for name in ["none", "Zero", "auto", ""] {
+            assert_eq!(Security::parse(name).unwrap(), Security::parse("auto").unwrap());
+        }
+        let e = Security::parse("aes-256-cfb").unwrap_err().to_string();
+        assert!(e.contains("aes-256-cfb"), "{e}");
     }
 
     #[test]

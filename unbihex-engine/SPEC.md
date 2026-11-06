@@ -280,7 +280,8 @@ IPv6 в скобках:
   `tcp`/`raw` без маскировки заголовка, `ws`, `httpupgrade` (§11.10); `host` — первый из списка через запятую; без
   `sni` имя для TLS берётся из `host`, затем сервера (как в v2rayN). `headers` и `ua` — как у VLESS (в JSON v2rayN
   `headers` — объект или та же JSON-строка). Отклоняются: другие транспорты (`grpc`, `h2`,
-  `xhttp`, …), `headerType` кроме `none`, `security` кроме `tls`, `allowInsecure=1`, шифры `none`/`zero`.
+  `xhttp`, …), `headerType` кроме `none`, `security` кроме `tls`, `allowInsecure=1`, незнакомый шифр (ошибка
+  называет его); `scy=none`/`zero` — это `auto` (§11.9).
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, по умолчанию `tls`; `sni` / `peer` /
   `serverName`, `alpn`, `fp`, для REALITY — `pbk`, `sid`; `type=tcp|raw|ws|httpupgrade` с `path`, `host`, `headers` и
   `ua` (как у VLESS, без `sni` имя для TLS у WebSocket — из `host`). Отклоняются: `security=none` и другие, другие транспорты,
@@ -746,7 +747,8 @@ VLESS внутри обычных на вид HTTP-запросов, совме�
 
 - Только AEAD-заголовок (alterId 0; `aid` в ссылках игнорируется, как в Xray). `security`: `auto` (AES-128-GCM на
   x86-64 и ARM64, иначе ChaCha20-Poly1305 — как выбирает Xray), `aes-128-gcm`, `chacha20-poly1305`; `none` и `zero`
-  (тело без аутентификации) — `Unsupported`, современный клиент Xray их тоже не умеет.
+  — тоже `auto`: так их отправляет клиент Xray с 26.7 (XTLS/Xray-core#6303), а его сервер тело без шифрования
+  отклоняет; шифр выбирает клиент, сервер принимает любой. Другие значения — `Unsupported` с названием шифра.
 - **Запрос:** `auth_id(16) | sealed len(2+16) | nonce(8) | sealed header(+16)`. Ключ пользователя —
   `MD5(uuid ‖ "c48619fe-8f02-49e0-b9e9-edf763e17e21")`; `auth_id` = AES-128(KDF(key, "AES Auth ID Encryption"),
   время(8) ‖ random(4) ‖ CRC32); длина и заголовок — AES-128-GCM с ключами и nonce из KDF (соли
@@ -973,7 +975,7 @@ const char *unbihex_version(void);
 - **Против настоящих серверов**, если заданы `XRAY_BIN` / `SINGBOX_BIN` / `HYSTERIA_BIN` (иначе тесты сразу выходят): `xray_interop.rs`
   — Vision и REALITY, XHTTP во всех режимах, CDN-формат XHTTP (GET packet-up, tokenish, свои session ID) по HTTP/2+TLS,
   HTTP/1.1+TLS и HTTP/1.1 без TLS, VLESS поверх WebSocket и HTTPUpgrade с TLS и без (`Host` и `User-Agent` из
-  `headers`, неверный `Host` отклоняется, за шлюзом вроде nginx, пропускающим один User-Agent, — наш получает `200`), VMess обоими шифрами поверх TCP,
+  `headers`, неверный `Host` отклоняется, за шлюзом вроде nginx, пропускающим один User-Agent, — наш получает `200`), VMess обоими шифрами (и `none`/`zero`) поверх TCP,
   WebSocket и HTTPUpgrade с TLS и без, Trojan поверх TLS (TCP, WebSocket, HTTPUpgrade) и REALITY с фрагментацией и
   неверным паролем (везде TCP и UDP); `singbox_interop.rs` — VLESS поверх WebSocket и HTTPUpgrade sing-box с
   `headers` напрямую и за тем же шлюзом;

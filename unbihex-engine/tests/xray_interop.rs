@@ -4,8 +4,8 @@
 //! `XRAY_BIN=/path/to/xray cargo test --test xray_interop`.
 //! Covers VLESS + TLS + Vision and VLESS + REALITY + Vision with plain TCP and with
 //! inner TLS 1.3 (which makes the server switch to direct copy), XHTTP, VLESS over
-//! WebSocket and HTTPUpgrade, VMess over TCP, WebSocket and HTTPUpgrade with and
-//! without TLS, and Trojan over TLS (TCP, WebSocket, HTTPUpgrade) and REALITY.
+//! WebSocket and HTTPUpgrade, VMess (with `none` and `zero` too) over TCP, WebSocket
+//! and HTTPUpgrade with and without TLS, and Trojan over TLS (TCP, WebSocket, HTTPUpgrade) and REALITY.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -796,7 +796,8 @@ async fn vmess_wrap_and_close(ob: &dyn Outbound, echo: SocketAddr) {
 
 /// VMess (AEAD header, masked and padded chunks) against Xray's VMess inbound:
 /// both ciphers over TCP, WebSocket and HTTPUpgrade, each with and without TLS;
-/// TCP and UDP echo through every one.
+/// TCP and UDP echo through every one. `none` and `zero` go as `auto`, as Xray's
+/// client sends them (its server refuses an unencrypted body).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn vmess_against_xray() {
     use unbihex_engine::config::{TlsConfig, VmessConfig};
@@ -839,7 +840,7 @@ async fn vmess_against_xray() {
                 "outbounds": [loopback_freedom()]
             });
             let _xray = start_xray(&bin, config).await;
-            for security in ["aes-128-gcm", "chacha20-poly1305", "auto"] {
+            for security in ["aes-128-gcm", "chacha20-poly1305", "auto", "none", "zero"] {
                 let cfg = VmessConfig {
                     tag: "vm".into(),
                     server: "127.0.0.1".into(),
