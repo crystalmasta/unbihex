@@ -181,7 +181,8 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun status(invoke: Invoke) {
-        val active = UnbihexVpnService.state == "connected"
+        // A live TUN also covers the interval before the engine is confirmed.
+        val active = UnbihexVpnService.isActive
         val res = JSObject()
         res.put("active", active)
         res.put("state", UnbihexVpnService.state)
