@@ -198,6 +198,28 @@ without subscriptions and the data folder. This mode never touches routes or DNS
 Building for Linux from Windows: `cargo zigbuild --release -p unbihex-cli --target x86_64-unknown-linux-musl`
 (needs [zig](https://ziglang.org) and `cargo install cargo-zigbuild`); on Linux itself, `cargo build --release -p unbihex-cli`.
 
+## Building for macOS (Apple Silicon)
+
+You need an Apple Silicon Mac, Xcode with command-line tools, Rust with the
+`aarch64-apple-darwin` target, Node.js and npm. From the repository root:
+
+```sh
+rustup target add aarch64-apple-darwin
+unbihex-client/installer/build-macos.sh
+```
+
+The script temporarily installs Tauri CLI 2.11.4, builds for macOS 11.0 and checks the architecture,
+minimum system version and signature. Output is in `unbihex-client/dist/macos-arm64/`:
+`Unbihex-<version>-macos-arm64.zip`, `SHA256SUMS.txt`, `BUILD.md`, `LICENSE` and `LICENSE.ru.md`.
+Move the output directory before rebuilding if it already exists. `BUILD.md` records the source version,
+commit and tool versions; bit-for-bit reproducibility is not guaranteed.
+
+The ad-hoc signature is not a Developer ID signature and Apple has not notarized the app; Gatekeeper may
+block it. Intel, older macOS versions and VPN functionality are not tested by this procedure.
+The `macOS ARM64 build` workflow runs on PRs with relevant changes, pushes to `main` or `code/macos-build`,
+pushes of `v*` tags, and manually via Actions → macOS ARM64 build → Run workflow. Its output is a workflow
+artifact; it does not automatically publish a release.
+
 ## Building on Windows
 
 1. Install Rust (https://rustup.rs) with the MSVC toolchain and "Build Tools for Visual Studio" (C++).

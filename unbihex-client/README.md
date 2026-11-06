@@ -194,6 +194,28 @@ sysctl -w net.ipv4.ip_forward=1
 Сборка под Linux из Windows: `cargo zigbuild --release -p unbihex-cli --target x86_64-unknown-linux-musl`
 (нужны [zig](https://ziglang.org) и `cargo install cargo-zigbuild`); на самом Linux — `cargo build --release -p unbihex-cli`.
 
+## Сборка для macOS (Apple Silicon)
+
+Нужны Mac с Apple Silicon, Xcode с установленными command-line tools, Rust с целью
+`aarch64-apple-darwin`, Node.js и npm. Из корня репозитория:
+
+```sh
+rustup target add aarch64-apple-darwin
+unbihex-client/installer/build-macos.sh
+```
+
+Скрипт временно устанавливает Tauri CLI 2.11.4, собирает приложение для macOS 11.0 и проверяет
+архитектуру, минимальную версию системы и подпись. Результат — `unbihex-client/dist/macos-arm64/`:
+`Unbihex-<версия>-macos-arm64.zip`, `SHA256SUMS.txt`, `BUILD.md`, `LICENSE` и `LICENSE.ru.md`.
+Если каталог результата уже существует, переместите его перед повторной сборкой. `BUILD.md` содержит
+версию исходников, коммит и версии инструментов; побайтовая воспроизводимость не гарантируется.
+
+Подпись ad-hoc не является Developer ID-подписью, приложение не нотариализовано Apple; Gatekeeper может
+заблокировать его открытие. Intel, старые версии macOS и работа VPN этой процедурой не проверены.
+Workflow `macOS ARM64 build` выполняется на PR с соответствующими изменениями, при push в `main` или
+`code/macos-build`, при push тега `v*` и вручную через Actions → macOS ARM64 build → Run workflow.
+Результат доступен как артефакт workflow; автоматической публикации релиза нет.
+
 ## Сборка на Windows
 
 1. Установите Rust (https://rustup.rs) с тулчейном MSVC и «Build Tools for Visual Studio» (C++).
