@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::outbound::{BoxStream, Outbound, PacketStream};
 use crate::relay::{relay_tcp, relay_udp};
 use crate::router::{Router, is_private_ip};
-use crate::session::Session;
+use crate::session::{Network, Session};
 use crate::stats::Counters;
 
 /// Destinations the direct outbound must not dial.
@@ -270,6 +270,21 @@ impl Dispatcher {
             .is_some_and(|o| o.is_block())
     }
 
+    /// The outbound a TCP session to the name `domain` (port 443) from `inbound`
+    /// would start with: decides where the DNS server sends a query for the name
+    /// when the config has a "home" DNS (SPEC §8.2).
+    pub(crate) fn name_outbound(&self, domain: &str, inbound: &str) -> Result<Arc<dyn Outbound>> {
+        let table = self.table.load();
+        let probe = Session {
+            network: Network::Tcp,
+            source: None,
+            target: crate::address::TargetAddr { addr: Address::Domain(domain.to_string()), port: 443 },
+            inbound_tag: inbound.to_string(),
+            sniffed: None,
+        };
+        table.outbound(table.router.pick(&probe))
+    }
+
     /// Picks the outbound. A session that would go direct is resolved here; when no
     /// domain rule decided it, the rules are matched again against its addresses
     /// (like Xray's IPIfNonMatch), so IP rules also hold for names. Sessions routed
@@ -420,16 +435,21 @@ impl Dispatcher {
     }
 
     /// Opens a routed TCP stream for traffic the engine itself originates (forwarded
-    /// DNS), counted against `max_connections` while the permit lives.
+    /// DNS), counted against `max_connections` while the permit lives. `via` skips
+    /// the rules: the stream goes through that (proxy) outbound.
     pub(crate) async fn open_tcp_flow(
         &self,
         sess: &Session,
+        via: Option<&Arc<dyn Outbound>>,
     ) -> Result<(tokio::sync::OwnedSemaphorePermit, BoxStream)> {
         let permit = self
             .acquire()
             .ok_or_else(|| Error::protocol("connection limit reached"))?;
         let connect = async {
-            let route = self.route(sess).await?;
+            let route = match via {
+                Some(o) => Route { outbound: o.clone(), ips: None },
+                None => self.route(sess).await?,
+            };
             match &route.ips {
                 Some(ips) => route.outbound.connect_tcp_resolved(sess, ips).await,
                 None => route.outbound.connect_tcp(sess).await,
@@ -443,12 +463,18 @@ impl Dispatcher {
     pub(crate) async fn open_udp_flow(
         &self,
         sess: &Session,
+        via: Option<&Arc<dyn Outbound>>,
     ) -> Result<(tokio::sync::OwnedSemaphorePermit, Box<dyn PacketStream>)> {
         let permit = self
             .acquire()
             .ok_or_else(|| Error::protocol("connection limit reached"))?;
-        let (_, flow) =
-            tokio::time::timeout(self.handshake_timeout(), self.open_udp(sess)).await??;
+        let flow = async {
+            match via {
+                Some(o) => o.connect_udp(sess).await,
+                None => self.open_udp(sess).await.map(|(_, flow)| flow),
+            }
+        };
+        let flow = tokio::time::timeout(self.handshake_timeout(), flow).await??;
         Ok((permit, flow))
     }
 

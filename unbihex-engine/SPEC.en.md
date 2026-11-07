@@ -234,7 +234,8 @@ Outbound fields are described in §11, rules in §6, DNS in §8.
 - `route.default_interface` is not empty; `route.default_mark` is not 0 and Linux only.
 - `dns.upstream` is not empty; an entry is `ip`, `ip:port`, `udp://ip[:port]`, `tcp://ip[:port]`, `tls://host[:port]`
   or `https://host[:port][/path]` (§8.3),
-  anything else is an error. `dns.bootstrap` holds only servers given by IP address.
+  anything else is an error. `dns.bootstrap` holds only servers given by IP address. `dns.direct` (the "home" DNS,
+  §8.3) takes the same forms and may be empty.
 - `limits.socket_buffer` is 0 (the OS tunes the buffers: on Linux an explicit size turns autotuning off; on a 50 ms
   path with MTU 1500 autotuning gave 64 MB/s against 55, without the drops to 1 MB/s seen with 4 MiB) or
   65,536…16,777,216 bytes; it is a ceiling for `SO_RCVBUF`/`SO_SNDBUF`, and the OS caps it by `net.core.{r,w}mem_max`.
@@ -421,6 +422,11 @@ impl Dispatcher {
      its name or address and port: the name goes to the outbound as is (a proxy resolves it on its side, direct through
      the bootstrap), and rules see it as any domain. The ID is replaced with a random one and restored in the answer;
      only an answer with the same ID, the QR flag and the same question is accepted.
+     With `dns.direct`, forwarding is split by the queried name: the outbound is picked as for a TCP session to that
+     name on port 443. Direct: the query goes straight to the `dns.direct` servers (the §8.3 client, not through the
+     Dispatcher); block: SERVFAIL; anything else: to `dns.upstream` through **that** outbound, whatever the rules say
+     about the DNS server's own address. So a name that goes through a proxy never reaches the home DNS, and the
+     remote DNS is asked only through the proxy.
   6. A malformed packet → FORMERR if the ID can be read, otherwise the packet is dropped.
 - When a TCP or UDP session from the TUN arrives at a fake IP, `Session.target` becomes `Domain(lookup_ip)` with the
   same port. Without a mapping (it expired) TCP is reset and the UDP packet dropped, with a `debug` line.
@@ -439,6 +445,12 @@ impl Dispatcher {
   server is given by address; the ClientHello is rustls's own (a browser one would offer ALPN a DoT server may reject).
   Connections are kept: DoT up to 4 idle ones per server, for at most 10 s; DoH one HTTP/2 connection for all queries,
   closed after 60 s without queries. A connection the server closed is replaced within the same query, with no error.
+- `dns.direct` is the "home" DNS: servers in the same forms as `dns.upstream`, for names that go direct. When set, the
+  direct outbound's resolver and the Dispatcher (§6.1) ask it (directly, with SocketFactory sockets) instead of
+  `dns.upstream` and the system resolver, and forwarding from the TUN is split by name (§8.2, step 5). Sessions
+  through a proxy are never resolved locally, so names of proxied sites never reach the home DNS; fake IPs (§8.1) stay
+  as they are. Empty: as before, `dns.upstream` also answers for direct names. A change needs a restart (hot reload
+  refuses it).
 - The name of a DoT/DoH server is resolved through the bootstrap: `dns.bootstrap` when set, else the servers of
   `dns.upstream` given by IP address, and without any, `https://1.1.1.1/dns-query`, `https://8.8.8.8/dns-query` (the
   name does not leave in the clear). The bootstrap is the same client with all the rules below; answers are cached by TTL.

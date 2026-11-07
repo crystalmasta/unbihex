@@ -168,7 +168,7 @@
           </fieldset>
           <fieldset>
             <legend>Сеть</legend>
-            <label>DNS-серверы ядра<input name="dns_upstream" placeholder="1.1.1.1, 8.8.8.8" /></label>
+            <label>Удалённый DNS (для сайтов через VPN)<input name="dns_upstream" placeholder="1.1.1.1, 8.8.8.8" /></label>
             <label>Готовый набор
               <select id="dns-preset">
                 <option value="">— выбрать —</option>
@@ -180,7 +180,20 @@
                 <option value="tls://1.1.1.1, tls://1.0.0.1">Cloudflare, DNS через TLS</option>
               </select>
             </label>
-            <p class="hint">Адрес <code>1.1.1.1</code> — обычный DNS (порт 53); свой порт — <code>1.1.1.1:5353</code> или <code>udp://1.1.1.1:5353</code>, IPv6 — <code>[::1]:5353</code>; <code>tcp://1.1.1.1:53</code> — только по TCP; <code>https://сервер/dns-query</code> — DNS через HTTPS (<code>https://сервер:8443/путь</code>), <code>tls://сервер</code> — DNS через TLS (<code>tls://сервер:853</code>, сертификат проверяется). Зашифрованные запросы идут тем же маршрутом, что и обычные: при «Всё через VPN» — через сервер. Имя DoH/DoT-сервера узнаётся у серверов из списка, заданных IP-адресом, а без них — у Cloudflare и Google через HTTPS.</p>
+            <label>Домашний DNS (для сайтов напрямую)<input name="dns_direct" placeholder="пусто — удалённый DNS, напрямую" /></label>
+            <label>Готовый набор
+              <select id="dns-direct-preset">
+                <option value="">— выбрать —</option>
+                <option value="-">Нет: спрашивать удалённый DNS напрямую</option>
+                <option value="77.88.8.8, 77.88.8.1">Яндекс DNS</option>
+                <option value="https://77.88.8.8/dns-query, https://77.88.8.1/dns-query">Яндекс, DNS через HTTPS</option>
+                <option value="1.1.1.1, 8.8.8.8">Обычный DNS: Cloudflare и Google</option>
+                <option value="https://1.1.1.1/dns-query, https://8.8.8.8/dns-query">Cloudflare и Google, DNS через HTTPS</option>
+                <option value="https://9.9.9.9/dns-query, https://149.112.112.112/dns-query">Quad9, DNS через HTTPS</option>
+                <option value="https://94.140.14.14/dns-query, https://94.140.15.15/dns-query">AdGuard, DNS через HTTPS</option>
+              </select>
+            </label>
+            <p class="hint">Адрес <code>1.1.1.1</code> — обычный DNS (порт 53); свой порт — <code>1.1.1.1:5353</code> или <code>udp://1.1.1.1:5353</code>, IPv6 — <code>[::1]:5353</code>; <code>tcp://1.1.1.1:53</code> — только по TCP; <code>https://сервер/dns-query</code> — DNS через HTTPS (<code>https://сервер:8443/путь</code>), <code>tls://сервер</code> — DNS через TLS (<code>tls://сервер:853</code>, сертификат проверяется). Без домашнего DNS удалённый отвечает за все сайты: запросы идут по тем же правилам, что и трафик (при «Всё через VPN» — через сервер), а адреса сайтов «напрямую» узнаются у него напрямую. С домашним DNS сайты, которые по правилам идут напрямую, спрашиваются у домашнего напрямую, а все остальные — у удалённого и только через VPN; имена сайтов через VPN домашний DNS не видит. Имя DoH/DoT-сервера узнаётся у серверов из списка, заданных IP-адресом, а без них — у Cloudflare и Google через HTTPS.</p>
             <label>MTU туннеля<input name="mtu" type="number" min="1280" max="9000" /></label>
           </fieldset>
           <fieldset>

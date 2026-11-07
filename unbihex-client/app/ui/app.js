@@ -429,6 +429,7 @@ function fillSettings() {
   f.lan_password.value = s.lan_password;
   $("#lan-auth").hidden = !s.allow_lan;
   f.dns_upstream.value = s.dns_upstream.join(", ");
+  f.dns_direct.value = (s.dns_direct || []).join(", ");
   f.mtu.value = s.mtu;
   f.user_agent.value = s.user_agent;
   f.auto_select.value = s.auto_select || "off";
@@ -519,6 +520,7 @@ function readSettings() {
     lan_username: f.lan_username.value,
     lan_password: f.lan_password.value,
     dns_upstream: f.dns_upstream.value.split(/[\s,;]+/).filter(Boolean),
+    dns_direct: f.dns_direct.value.split(/[\s,;]+/).filter(Boolean),
     mtu: Math.min(9000, Math.max(1280, parseInt(f.mtu.value, 10) || 1500)),
     user_agent: f.user_agent.value.trim(),
     auto_select: f.auto_select.value,
@@ -745,10 +747,12 @@ function bind() {
     }
   });
 
-  $("#dns-preset").addEventListener("change", (e) => {
-    if (e.target.value) $("#settings-form").dns_upstream.value = e.target.value;
-    e.target.value = "";
-  });
+  for (const [preset, field] of [["#dns-preset", "dns_upstream"], ["#dns-direct-preset", "dns_direct"]]) {
+    $(preset).addEventListener("change", (e) => {
+      if (e.target.value) $("#settings-form")[field].value = e.target.value === "-" ? "" : e.target.value;
+      e.target.value = "";
+    });
+  }
   $("#settings-form").auto_start.addEventListener("change", (e) => {
     $("#settings-form").auto_start_admin.disabled = !e.target.checked;
   });

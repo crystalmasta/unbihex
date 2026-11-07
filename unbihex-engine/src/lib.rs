@@ -134,6 +134,15 @@ impl Instance {
             Resolver::Upstream(dns_client.clone())
         });
         let system = Arc::new(Resolver::System);
+        // "Home" DNS: names of direct sessions, asked directly (SPEC §8.3).
+        let direct_client = match config.dns.direct.is_empty() {
+            true => None,
+            false => Some(Arc::new(DnsClient::with_upstreams(
+                config.dns.direct.clone(),
+                &config.dns.bootstrap,
+                sockets.clone(),
+            )?)),
+        };
         // By dubr1k (github.com/dubr1k), PR #36.
         let server_resolver = if mobile && !hooks.bootstrap_dns.is_empty() {
             Arc::new(dns::bootstrap_resolver(
@@ -158,10 +167,10 @@ impl Instance {
         let ctx = OutboundContext {
             sockets: sockets.clone(),
             // With a TUN the system resolver answers with fake IPs, so use our own client.
-            resolver: if tun_cfg.is_some() {
-                upstream.clone()
-            } else {
-                system.clone()
+            resolver: match (&direct_client, tun_cfg.is_some()) {
+                (Some(c), _) => Arc::new(Resolver::Upstream(c.clone())),
+                (None, true) => upstream.clone(),
+                (None, false) => system.clone(),
             },
             // Server names are resolved before traffic is captured; mobile has no such window.
             server_resolver,
@@ -290,6 +299,7 @@ impl Instance {
                         (true, Some(pool)) => Some(Arc::new(
                             DnsServer::new(pool, dns_client.clone(), config.dns.ttl)
                                 .with_dispatcher(dispatcher.clone(), c.tag.clone())
+                                .with_direct(direct_client.clone())
                                 .with_fakeip_exclude(fakeip_exclude.clone()),
                         )),
                         _ => None,

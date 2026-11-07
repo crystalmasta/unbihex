@@ -1155,6 +1155,11 @@ pub struct DnsConfig {
     /// [`DEFAULT_BOOTSTRAP`]. Only servers given by IP address.
     #[serde(default)]
     pub bootstrap: Vec<DnsUpstream>,
+    /// "Home" DNS (SPEC §8.3): servers for names whose sessions go direct, asked
+    /// directly; names routed to a proxy never reach them. Empty: `upstream` serves
+    /// both, as before.
+    #[serde(default)]
+    pub direct: Vec<DnsUpstream>,
     /// TTL of fake answers, in seconds.
     #[serde(default = "default_dns_ttl")]
     pub ttl: u32,
@@ -1375,6 +1380,7 @@ impl Default for DnsConfig {
             fakeip_range: default_fakeip_range(),
             upstream: default_upstream(),
             bootstrap: Vec::new(),
+            direct: Vec::new(),
             ttl: default_dns_ttl(),
             fakeip_exclude: default_fakeip_exclude(),
             allow_private_answers: Vec::new(),

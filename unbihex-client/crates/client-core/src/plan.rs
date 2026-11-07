@@ -403,6 +403,7 @@ pub fn build_config_json(
     if upstream.is_empty() {
         upstream = vec!["1.1.1.1:53".into(), "8.8.8.8:53".into()];
     }
+    let direct: Vec<String> = settings.dns_direct.iter().filter_map(|s| parse_dns(s)).map(|a| a.to_string()).collect();
     let level = match settings.log_level.as_str() {
         l @ ("error" | "warn" | "info" | "debug" | "trace") => l,
         _ => "info",
@@ -415,7 +416,7 @@ pub fn build_config_json(
         "inbounds": inbounds,
         "outbounds": outbounds,
         "route": route,
-        "dns": { "upstream": upstream, "allow_private_answers": private_names(settings) },
+        "dns": { "upstream": upstream, "direct": direct, "allow_private_answers": private_names(settings) },
     });
     let text = serde_json::to_string(&config)?;
     Config::from_json(&text)?;
@@ -586,6 +587,12 @@ mod tests {
         assert!(matches!(&cfg.inbounds[0], InboundConfig::Mixed(h) if h.listen.ip().is_unspecified()));
         assert_eq!(cfg.dns.upstream.len(), 4);
         assert_eq!(cfg.dns.upstream[2].to_string(), "https://dns.google:443/dns-query");
+        assert!(cfg.dns.direct.is_empty(), "no home DNS by default");
+        let home = Settings { dns_direct: vec!["77.88.8.8".into(), "https://77.88.8.8/dns-query".into()], ..s.clone() };
+        let home = build_config(&[server()], &home, &Geo::default(), Target::DesktopTun).unwrap();
+        assert_eq!(home.dns.direct.len(), 2);
+        assert_eq!(home.dns.direct[0].to_string(), "77.88.8.8:53");
+        assert_eq!(home.dns.upstream.len(), 4, "the old servers stay the remote DNS");
         for i in &cfg.inbounds {
             let (InboundConfig::Mixed(p) | InboundConfig::Http(p)) = i else {
                 panic!("unexpected inbound {i:?}");

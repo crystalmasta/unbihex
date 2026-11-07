@@ -356,7 +356,7 @@ impl Client {
             )));
         }
         // A mistyped DNS server would be dropped silently when connecting.
-        for dns in s.dns_upstream.iter().filter(|d| !d.trim().is_empty()) {
+        for dns in s.dns_upstream.iter().chain(&s.dns_direct).filter(|d| !d.trim().is_empty()) {
             if let Err(e) = dns.trim().parse::<unbihex_engine::config::DnsUpstream>() {
                 return Err(ClientError::Input(format!(
                     "DNS-сервер «{dns}» не распознан: нужен ip, ip:порт, udp://ip:порт, tcp://ip:порт, tls://сервер или https://сервер/путь ({e})"

@@ -24,6 +24,7 @@ use super::fakeip::FakeIpPool;
 use super::secure::SecureUpstream;
 use crate::address::normalize_domain;
 use crate::dispatcher::Dispatcher;
+use crate::outbound::Outbound;
 use crate::error::{Error, Result};
 use crate::session::{Network, Session};
 
@@ -47,6 +48,8 @@ pub struct DnsServer {
     preferred: AtomicUsize,
     /// Connections to DoT/DoH upstream servers for routed queries; `None` for plain ones.
     secure: Vec<Option<SecureUpstream>>,
+    /// "Home" DNS (`dns.direct`): asked directly for names whose sessions go direct.
+    direct: Option<Arc<DnsClient>>,
 }
 
 impl DnsServer {
@@ -60,7 +63,17 @@ impl DnsServer {
             via: None,
             exclude: HashSet::new(),
             preferred: AtomicUsize::new(0),
+            direct: None,
         }
+    }
+
+    /// Splits forwarded queries by the query name (needs [`DnsServer::with_dispatcher`]):
+    /// a name whose sessions go direct is asked of `direct`, straight from here;
+    /// any other one goes to `upstream` through the name's own (proxy) outbound,
+    /// whatever the rules say about the upstream server's address.
+    pub fn with_direct(mut self, direct: Option<Arc<DnsClient>>) -> Self {
+        self.direct = direct;
+        self
     }
 
     /// Forwards A/AAAA/HTTPS/SVCB queries for these normalized suffixes (and their
@@ -194,9 +207,26 @@ impl DnsServer {
     }
 
     async fn forward(&self, msg: &Message, packet: &[u8]) -> Option<Vec<u8>> {
-        let r = match &self.via {
-            Some((d, tag)) => self.forward_routed(d, tag, msg, packet).await,
-            None => self.upstream.exchange(packet).await,
+        let r = match (&self.via, &self.direct) {
+            (Some((d, tag)), Some(direct)) => {
+                let name = msg.queries[0].name().to_ascii();
+                let name = name.trim_end_matches('.');
+                let name = normalize_domain(name).unwrap_or_else(|_| name.to_ascii_lowercase());
+                match d.name_outbound(&name, tag) {
+                    Ok(o) if o.is_block() => Err(Error::Blocked),
+                    Ok(o) if o.is_direct() => {
+                        tracing::debug!("dns {name}: home DNS");
+                        direct.exchange(packet).await
+                    }
+                    Ok(o) => {
+                        tracing::debug!("dns {name}: remote DNS via {}", o.tag());
+                        self.forward_routed(d, tag, Some(&o), msg, packet).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            (Some((d, tag)), None) => self.forward_routed(d, tag, None, msg, packet).await,
+            (None, _) => self.upstream.exchange(packet).await,
         };
         match r {
             Ok(r) => Some(r),
@@ -211,6 +241,7 @@ impl DnsServer {
         &self,
         d: &Dispatcher,
         tag: &str,
+        via: Option<&Arc<dyn Outbound>>,
         msg: &Message,
         packet: &[u8],
     ) -> Result<Vec<u8>> {
@@ -235,8 +266,8 @@ impl DnsServer {
                 let wire = &wire;
                 let one = async move {
                     match secure {
-                        Some(s) => secure_routed_exchange(d, s, sess, msg, wire).await,
-                        None => routed_exchange(d, sess, msg, wire, tcp_only).await,
+                        Some(s) => secure_routed_exchange(d, via, s, sess, msg, wire).await,
+                        None => routed_exchange(d, via, sess, msg, wire, tcp_only).await,
                     }
                 };
                 async move {
@@ -256,6 +287,7 @@ impl DnsServer {
 /// outbound. A name goes to the outbound as is: a proxy resolves it on its side.
 async fn secure_routed_exchange(
     d: &Dispatcher,
+    via: Option<&Arc<dyn Outbound>>,
     s: &SecureUpstream,
     mut sess: Session,
     msg: &Message,
@@ -265,7 +297,7 @@ async fn secure_routed_exchange(
     let sess = &sess;
     s.exchange(
         move || async move {
-            let (permit, flow) = d.open_tcp_flow(sess).await?;
+            let (permit, flow) = d.open_tcp_flow(sess, via).await?;
             Ok((Some(permit), flow))
         },
         msg,
@@ -278,6 +310,7 @@ async fn secure_routed_exchange(
 /// answer is truncated or the outbound has no UDP (SOCKS5); only TCP for `tcp_only`.
 async fn routed_exchange(
     d: &Dispatcher,
+    via: Option<&Arc<dyn Outbound>>,
     mut sess: Session,
     msg: &Message,
     wire: &[u8],
@@ -286,7 +319,7 @@ async fn routed_exchange(
     let udp = if tcp_only {
         Err(Error::Unsupported("tcp:// upstream".into()))
     } else {
-        d.open_udp_flow(&sess).await
+        d.open_udp_flow(&sess, via).await
     };
     match udp {
         Ok((_permit, flow)) => {
@@ -320,7 +353,7 @@ async fn routed_exchange(
         Err(e) => return Err(e),
     }
     sess.network = Network::Tcp;
-    let (_permit, mut s) = d.open_tcp_flow(&sess).await?;
+    let (_permit, mut s) = d.open_tcp_flow(&sess, via).await?;
     exchange_tcp(&mut s, msg, wire).await
 }
 
@@ -790,6 +823,123 @@ mod tests {
             1,
             "a fake address for names the rule does not cover"
         );
+    }
+
+    /// A DNS-over-TCP stub answering every query; counts them.
+    async fn tcp_upstream() -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let h = h.clone();
+                tokio::spawn(async move {
+                    while let Ok(n) = s.read_u16().await {
+                        let mut buf = vec![0u8; n as usize];
+                        if s.read_exact(&mut buf).await.is_err() {
+                            return;
+                        }
+                        h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let r = response(&Message::from_vec(&buf).unwrap()).to_vec().unwrap();
+                        let _ = s.write_u16(r.len() as u16).await;
+                        let _ = s.write_all(&r).await;
+                    }
+                });
+            }
+        });
+        (addr, hits)
+    }
+
+    /// A SOCKS5 proxy (no auth, CONNECT only) that records the targets it is asked for.
+    async fn socks_stub() -> (std::net::SocketAddr, Arc<parking_lot::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = l.accept().await {
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut head = [0u8; 2];
+                    c.read_exact(&mut head).await.unwrap();
+                    let mut methods = vec![0u8; head[1] as usize];
+                    c.read_exact(&mut methods).await.unwrap();
+                    c.write_all(&[5, 0]).await.unwrap();
+                    let mut req = [0u8; 4];
+                    c.read_exact(&mut req).await.unwrap();
+                    assert_eq!((req[1], req[3]), (1, 1), "CONNECT to an IPv4 address");
+                    let mut a = [0u8; 6];
+                    c.read_exact(&mut a).await.unwrap();
+                    let target = std::net::SocketAddr::from(([a[0], a[1], a[2], a[3]], u16::from_be_bytes([a[4], a[5]])));
+                    log.lock().push(target.to_string());
+                    let mut up = tokio::net::TcpStream::connect(target).await.unwrap();
+                    c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut c, &mut up).await;
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    /// With a "home" DNS, a name that goes direct is asked there, straight; any other
+    /// one goes to the remote DNS through the proxy, even though a rule sends the
+    /// remote server's own address direct.
+    #[tokio::test]
+    async fn home_dns_answers_direct_names_and_remote_dns_goes_through_the_proxy() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (home, home_hits) = fake_upstream().await;
+        let (remote, remote_hits) = tcp_upstream().await;
+        let (socks, targets) = socks_stub().await;
+        let cfg = crate::config::Config::from_json(&format!(
+            r#"{{"outbounds":[{{"type":"socks","tag":"proxy","server":"127.0.0.1","port":{}}},
+                              {{"type":"direct","tag":"direct"}},{{"type":"block","tag":"block"}}],
+                 "route":{{"rules":[{{"domain_suffix":["home.example"],"outbound":"direct"}},
+                                    {{"ip_cidr":["127.0.0.0/8"],"outbound":"direct"}}],
+                           "final":"proxy"}}}}"#,
+            socks.port()
+        ))
+        .unwrap();
+        let sockets: Arc<crate::net::SocketFactory> = Arc::default();
+        let resolver = Arc::new(crate::dns::Resolver::System);
+        let ctx = crate::outbound::OutboundContext {
+            sockets: sockets.clone(),
+            resolver: resolver.clone(),
+            server_resolver: resolver,
+            fakeip: None,
+        };
+        let mut outbounds = Vec::new();
+        for o in &cfg.outbounds {
+            outbounds.push(crate::outbound::build_outbound(o, &ctx).await.unwrap());
+        }
+        let dispatcher = Arc::new(Dispatcher::new(
+            crate::router::Router::new(&cfg).unwrap(),
+            outbounds,
+            cfg.limits.clone(),
+            None,
+            Arc::default(),
+        ));
+        let pool = Arc::new(FakeIpPool::new("198.18.0.0/15".parse().unwrap()));
+        let up = |s: String| -> Arc<DnsClient> {
+            Arc::new(DnsClient::with_upstreams(vec![s.parse().unwrap()], &[], Arc::default()).unwrap())
+        };
+        let s = DnsServer::new(pool, up(format!("tcp://{remote}")), 10)
+            .with_dispatcher(dispatcher, "tun-in".into())
+            .with_direct(Some(up(home.to_string())));
+
+        let ok = |r: Vec<u8>| Message::from_vec(&r).unwrap().metadata.response_code;
+        assert_eq!(ok(s.handle(&query("mail.home.example.", RecordType::MX)).await.unwrap()), ResponseCode::NoError);
+        assert_eq!((home_hits.load(SeqCst), remote_hits.load(SeqCst)), (1, 0));
+        assert!(targets.lock().is_empty(), "the home DNS is asked directly");
+
+        assert_eq!(ok(s.handle(&query("example.com.", RecordType::TXT)).await.unwrap()), ResponseCode::NoError);
+        assert_eq!((home_hits.load(SeqCst), remote_hits.load(SeqCst)), (1, 1));
+        assert_eq!(*targets.lock(), [remote.to_string()]);
+        // Proxied names get fake addresses as before and reach no DNS server.
+        assert_eq!(code(&s, "example.com.", RecordType::A).await, (ResponseCode::NoError, 1));
+        assert_eq!((home_hits.load(SeqCst), remote_hits.load(SeqCst)), (1, 1));
     }
 
     #[tokio::test]

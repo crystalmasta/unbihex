@@ -230,8 +230,13 @@ pub struct Settings {
     pub lan_username: String,
     /// Proxy password for devices in the LAN; random by default.
     pub lan_password: String,
-    /// DNS servers the engine uses itself (`ip` or `ip:port`).
+    /// "Remote" DNS: servers the engine uses itself (`ip`, `ip:port`, `udp://`,
+    /// `tcp://`, `tls://`, `https://`); with a home DNS, only for names that go
+    /// through the proxy, and through it.
     pub dns_upstream: Vec<String>,
+    /// "Home" DNS: servers for names that go direct, asked directly. Empty: the
+    /// remote servers answer those too (asked directly), as before.
+    pub dns_direct: Vec<String>,
     /// TUN MTU.
     pub mtu: u16,
     /// TUN mode: route all traffic of the machine into the TUN and point the system
@@ -312,6 +317,7 @@ impl Default for Settings {
             lan_username: DEFAULT_LAN_USERNAME.into(),
             lan_password: Uuid::new_v4().simple().to_string(),
             dns_upstream: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+            dns_direct: Vec::new(),
             mtu: unbihex_engine::config::default_mtu(),
             tun_routes: true,
             tun_name: crate::plan::TUN_NAME.into(),

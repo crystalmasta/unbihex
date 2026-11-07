@@ -68,8 +68,13 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
 - The engine's DNS: plain (`1.1.1.1`, with a port `1.1.1.1:5353` or `udp://1.1.1.1:5353`, IPv6
   `[2606:4700::1111]:53`), TCP only (`tcp://1.1.1.1:53`), DNS over HTTPS (`https://1.1.1.1/dns-query`, a port as
   `https://server:8443/path`) and over TLS (`tls://1.1.1.1`, `tls://server:853`) with the certificate checked; a
-  mistyped address is not saved; presets for Cloudflare, Google, Quad9, AdGuard. Queries to them follow the same
-  routing rules (through the server with "Everything through VPN").
+  mistyped address is not saved.
+  Two sets, like the "remote" and "home" DNS of Happ: the remote one for sites through the VPN (asked only through
+  the server), the home one for sites the rules send direct (asked directly; it never sees names of sites through the
+  VPN). The home DNS is empty by default: then direct sites are asked of the remote DNS too, directly, as before, and
+  queries to it follow the same routing rules (through the server with "Everything through VPN"). Earlier servers
+  become the remote DNS on update. Presets: Cloudflare, Google, Quad9, AdGuard, and Yandex (`77.88.8.8`) for the home
+  DNS.
 - Auto-select (off by default): the selected server and the other servers of its subscription (up to 20) form a
   group. A server can be left out of it with the button in its row, and in the "Only marked" mode the group is the
   marked servers of any subscriptions; the marks survive subscription updates, and the selected server always comes
