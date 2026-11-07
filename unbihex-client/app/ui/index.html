@@ -180,7 +180,7 @@
                 <option value="tls://1.1.1.1, tls://1.0.0.1">Cloudflare, DNS через TLS</option>
               </select>
             </label>
-            <p class="hint">Адрес <code>1.1.1.1</code> или <code>1.1.1.1:53</code> — обычный DNS, <code>https://сервер/dns-query</code> — DNS через HTTPS, <code>tls://сервер</code> — DNS через TLS (сертификат проверяется). Зашифрованные запросы идут тем же маршрутом, что и обычные: при «Всё через VPN» — через сервер. Имя DoH/DoT-сервера узнаётся у серверов из списка, заданных IP-адресом, а без них — у Cloudflare и Google через HTTPS.</p>
+            <p class="hint">Адрес <code>1.1.1.1</code> — обычный DNS (порт 53); свой порт — <code>1.1.1.1:5353</code> или <code>udp://1.1.1.1:5353</code>, IPv6 — <code>[::1]:5353</code>; <code>tcp://1.1.1.1:53</code> — только по TCP; <code>https://сервер/dns-query</code> — DNS через HTTPS (<code>https://сервер:8443/путь</code>), <code>tls://сервер</code> — DNS через TLS (<code>tls://сервер:853</code>, сертификат проверяется). Зашифрованные запросы идут тем же маршрутом, что и обычные: при «Всё через VPN» — через сервер. Имя DoH/DoT-сервера узнаётся у серверов из списка, заданных IP-адресом, а без них — у Cloudflare и Google через HTTPS.</p>
             <label>MTU туннеля<input name="mtu" type="number" min="1280" max="9000" /></label>
           </fieldset>
           <fieldset>

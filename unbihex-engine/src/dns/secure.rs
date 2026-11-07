@@ -71,7 +71,7 @@ impl SecureUpstream {
         roots: &[CertificateDer<'static>],
     ) -> Result<Option<SecureUpstream>> {
         let (host, alpn, kind) = match u {
-            DnsUpstream::Plain(_) => return Ok(None),
+            DnsUpstream::Plain(_) | DnsUpstream::Tcp(_) => return Ok(None),
             DnsUpstream::Tls { host, .. } => (host, Vec::new(), Kind::Tls),
             DnsUpstream::Https { host, port, path } => {
                 let authority = match host.parse::<std::net::Ipv6Addr>() {

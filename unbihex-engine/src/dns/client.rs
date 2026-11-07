@@ -213,6 +213,10 @@ impl DnsClient {
         let server = match (&self.upstream[i], &self.secure[i]) {
             (_, Some(s)) => return s.exchange(move || self.connect_secure(i), parsed, query).await,
             (DnsUpstream::Plain(a), None) => *a,
+            (DnsUpstream::Tcp(a), None) => {
+                let mut tcp = self.sockets.tcp_connect(*a).await?;
+                return exchange_tcp(&mut tcp, parsed, query).await;
+            }
             (u, None) => return Err(Error::Dns(format!("{u}: no TLS client"))),
         };
         let sock = self.sockets.udp_bind(server.is_ipv6()).await?;
@@ -443,6 +447,33 @@ mod tests {
         assert!(t.elapsed() < STAGGER, "took {:?}", t.elapsed());
         assert_eq!(silent_hits.load(Ordering::SeqCst), 1);
         assert_eq!(good_hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn tcp_upstream_asks_over_tcp_only() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        // A UDP socket on the same port must stay unasked.
+        let udp = tokio::net::UdpSocket::bind(addr).await.unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let n = s.read_u16().await.unwrap() as usize;
+            let mut buf = vec![0u8; n];
+            s.read_exact(&mut buf).await.unwrap();
+            let q = Message::from_vec(&buf).unwrap();
+            let mut r = Message::response(q.metadata.id, OpCode::Query);
+            r.add_queries(q.queries.iter().cloned());
+            let r = r.to_vec().unwrap();
+            s.write_u16(r.len() as u16).await.unwrap();
+            s.write_all(&r).await.unwrap();
+        });
+        let up = vec![format!("tcp://{addr}").parse().unwrap()];
+        let c = DnsClient::with_upstreams(up, &[], Arc::new(SocketFactory::new(None, None))).unwrap();
+        let r = c.exchange(&query()).await.unwrap();
+        assert_eq!(Message::from_vec(&r).unwrap().metadata.id, 0x4321);
+        let mut buf = [0u8; 16];
+        assert!(udp.try_recv(&mut buf).is_err());
     }
 
     #[tokio::test]

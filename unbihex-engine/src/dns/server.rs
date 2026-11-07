@@ -231,11 +231,12 @@ impl DnsServer {
                     sniffed: None,
                 };
                 let secure = self.secure.get(i).and_then(Option::as_ref);
+                let tcp_only = matches!(server, crate::config::DnsUpstream::Tcp(_));
                 let wire = &wire;
                 let one = async move {
                     match secure {
                         Some(s) => secure_routed_exchange(d, s, sess, msg, wire).await,
-                        None => routed_exchange(d, sess, msg, wire).await,
+                        None => routed_exchange(d, sess, msg, wire, tcp_only).await,
                     }
                 };
                 async move {
@@ -274,14 +275,20 @@ async fn secure_routed_exchange(
 }
 
 /// One query to `sess.target` through the routed outbound: UDP first, TCP when the
-/// answer is truncated or the outbound has no UDP (SOCKS5).
+/// answer is truncated or the outbound has no UDP (SOCKS5); only TCP for `tcp_only`.
 async fn routed_exchange(
     d: &Dispatcher,
     mut sess: Session,
     msg: &Message,
     wire: &[u8],
+    tcp_only: bool,
 ) -> Result<Vec<u8>> {
-    match d.open_udp_flow(&sess).await {
+    let udp = if tcp_only {
+        Err(Error::Unsupported("tcp:// upstream".into()))
+    } else {
+        d.open_udp_flow(&sess).await
+    };
+    match udp {
         Ok((_permit, flow)) => {
             flow.send(wire).await?;
             let mut buf = vec![0u8; 65_535];

@@ -232,7 +232,8 @@ impl Instance {
 - Не больше одного tun-inbound-а; `ipv4` — /30 или короче; `mtu` ≥ 576. Mobile (`tun_fd`): `name`, `auto_route` и
   адреса игнорируются, ими управляет ОС; без tun-inbound-а `tun_fd` — ошибка.
 - `route.default_interface` не пустой; `route.default_mark` не 0 и только на Linux.
-- `dns.upstream` не пуст; элемент — `ip`, `ip:port`, `tls://host[:port]` или `https://host[:port][/path]` (§8.3), иначе
+- `dns.upstream` не пуст; элемент — `ip`, `ip:port`, `udp://ip[:port]`, `tcp://ip[:port]`, `tls://host[:port]` или
+  `https://host[:port][/path]` (§8.3), иначе
   ошибка. `dns.bootstrap` — только серверы, заданные IP-адресом.
 - `limits.socket_buffer` — 0 (буферы подстраивает ядро ОС: на Linux явный размер отключает автонастройку, на пути
   50 мс с MTU 1500 автонастройка дала 64 MB/s против 55 и без провалов до 1 MB/s, которые бывали с 4 МиБ) или
@@ -420,7 +421,9 @@ impl Dispatcher {
 ### 8.3 DNS-клиент к upstream и резолверы
 
 - Клиент: сокеты **из SocketFactory** (§9), случайный ID, проверка ID и вопроса в ответе. Серверы `dns.upstream`:
-  - `ip` / `ip:port` (порт 53) — обычный DNS по UDP;
+  - `ip` / `ip:port` / `udp://ip[:port]` (порт 53; IPv6 — `[::1]:5353`) — обычный DNS по UDP;
+  - `tcp://ip[:port]` (порт 53) — обычный DNS только по TCP (u16-префикс длины, RFC 1035 §4.2.2), без UDP — и
+    напрямую, и при пересылке из TUN через Dispatcher (§8.2);
   - `tls://host[:853]` — DNS over TLS (RFC 7858): сообщения с u16-префиксом длины поверх TLS;
   - `https://host[:443][/path]` — DNS over HTTPS (RFC 8484) поверх HTTP/2 (ALPN `h2`): `POST` на `path` (по умолчанию
     `/dns-query`), `content-type`/`accept: application/dns-message`, ответ — 200 с DNS-сообщением до 64 КиБ.

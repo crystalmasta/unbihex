@@ -232,7 +232,8 @@ Outbound fields are described in §11, rules in §6, DNS in §8.
 - At most one tun inbound; `ipv4` is /30 or shorter; `mtu` ≥ 576. Mobile (`tun_fd`): `name`, `auto_route` and the
   addresses are ignored, the OS manages them; `tun_fd` without a tun inbound is an error.
 - `route.default_interface` is not empty; `route.default_mark` is not 0 and Linux only.
-- `dns.upstream` is not empty; an entry is `ip`, `ip:port`, `tls://host[:port]` or `https://host[:port][/path]` (§8.3),
+- `dns.upstream` is not empty; an entry is `ip`, `ip:port`, `udp://ip[:port]`, `tcp://ip[:port]`, `tls://host[:port]`
+  or `https://host[:port][/path]` (§8.3),
   anything else is an error. `dns.bootstrap` holds only servers given by IP address.
 - `limits.socket_buffer` is 0 (the OS tunes the buffers: on Linux an explicit size turns autotuning off; on a 50 ms
   path with MTU 1500 autotuning gave 64 MB/s against 55, without the drops to 1 MB/s seen with 4 MiB) or
@@ -428,7 +429,9 @@ impl Dispatcher {
 
 - The client: sockets **from the SocketFactory** (§9), a random ID, the ID and question checked in the answer. Servers
   of `dns.upstream`:
-  - `ip` / `ip:port` (port 53): plain DNS over UDP;
+  - `ip` / `ip:port` / `udp://ip[:port]` (port 53; IPv6 as `[::1]:5353`): plain DNS over UDP;
+  - `tcp://ip[:port]` (port 53): plain DNS over TCP only (u16 length prefix, RFC 1035 §4.2.2), never UDP, both
+    directly and when forwarded from the TUN through the Dispatcher (§8.2);
   - `tls://host[:853]`: DNS over TLS (RFC 7858), messages with a u16 length prefix over TLS;
   - `https://host[:443][/path]`: DNS over HTTPS (RFC 8484) over HTTP/2 (ALPN `h2`): `POST` to `path` (`/dns-query` by
     default), `content-type`/`accept: application/dns-message`, the answer is a 200 with a DNS message of up to 64 KiB.

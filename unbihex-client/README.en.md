@@ -63,8 +63,10 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   In TUN and on Android blocked names get NXDOMAIN. Sites in the "through VPN / direct" lists are not blocked.
   The console client: `connect --adblock`.
   IPv6 also goes into the tunnel in TUN mode, and on Windows an NRPT rule sends all DNS queries to the tunnel's DNS only.
-- The engine's DNS: plain (`1.1.1.1`), DNS over HTTPS (`https://1.1.1.1/dns-query`) and over TLS (`tls://1.1.1.1`)
-  with the certificate checked; presets for Cloudflare, Google, Quad9, AdGuard. Queries to them follow the same
+- The engine's DNS: plain (`1.1.1.1`, with a port `1.1.1.1:5353` or `udp://1.1.1.1:5353`, IPv6
+  `[2606:4700::1111]:53`), TCP only (`tcp://1.1.1.1:53`), DNS over HTTPS (`https://1.1.1.1/dns-query`, a port as
+  `https://server:8443/path`) and over TLS (`tls://1.1.1.1`, `tls://server:853`) with the certificate checked; a
+  mistyped address is not saved; presets for Cloudflare, Google, Quad9, AdGuard. Queries to them follow the same
   routing rules (through the server with "Everything through VPN").
 - Auto-select (off by default): the selected server and the other servers of its subscription (up to 20) form a
   group. A server can be left out of it with the button in its row, and in the "Only marked" mode the group is the

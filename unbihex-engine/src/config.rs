@@ -1175,12 +1175,14 @@ pub struct DnsConfig {
 pub const DEFAULT_BOOTSTRAP: [&str; 2] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"];
 
 /// One upstream DNS server (SPEC §8.3), written as a string:
-/// `ip` / `ip:port` (port 53), `tls://host[:853]`, `https://host[:443][/path]`
-/// (path `/dns-query` by default).
+/// `ip` / `ip:port` / `udp://ip[:port]` (port 53), `tcp://ip[:port]`,
+/// `tls://host[:853]`, `https://host[:443][/path]` (path `/dns-query` by default).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DnsUpstream {
     /// Plain DNS: UDP, TCP when the answer is truncated.
     Plain(SocketAddr),
+    /// Plain DNS over TCP only (RFC 1035 §4.2.2), for servers or networks without UDP.
+    Tcp(SocketAddr),
     /// DNS over TLS (RFC 7858).
     Tls {
         /// IP literal (no brackets) or normalized domain.
@@ -1203,7 +1205,7 @@ impl DnsUpstream {
     /// The server's IP address, when it is given by one.
     pub fn host_ip(&self) -> Option<IpAddr> {
         match self {
-            DnsUpstream::Plain(a) => Some(a.ip()),
+            DnsUpstream::Plain(a) | DnsUpstream::Tcp(a) => Some(a.ip()),
             DnsUpstream::Tls { host, .. } | DnsUpstream::Https { host, .. } => host.parse().ok(),
         }
     }
@@ -1216,7 +1218,7 @@ impl DnsUpstream {
     /// Host and port, as a routing target.
     pub fn target(&self) -> crate::address::TargetAddr {
         match self {
-            DnsUpstream::Plain(a) => (*a).into(),
+            DnsUpstream::Plain(a) | DnsUpstream::Tcp(a) => (*a).into(),
             DnsUpstream::Tls { host, port } | DnsUpstream::Https { host, port, .. } => {
                 let addr = match host.parse() {
                     Ok(ip) => crate::address::Address::Ip(ip),
@@ -1234,16 +1236,24 @@ impl std::str::FromStr for DnsUpstream {
     fn from_str(s: &str) -> Result<DnsUpstream> {
         let s = s.trim();
         let bad = |why: &str| Error::config(format!("dns server {s:?}: {why}"));
-        let Some((scheme, _)) = s.split_once("://") else {
-            if let Ok(a) = s.parse::<SocketAddr>() {
-                return Ok(DnsUpstream::Plain(a));
-            }
-            let ip = s.trim_start_matches('[').trim_end_matches(']');
-            return ip
-                .parse::<IpAddr>()
-                .map(|ip| DnsUpstream::Plain(SocketAddr::new(ip, 53)))
-                .map_err(|_| bad("expected ip, ip:port, tls://host or https://host/path"));
+        // `ip`, `ip:port`, `[v6]`, `[v6]:port`; port 53 by default.
+        let plain = |a: &str| {
+            let a = a.strip_suffix('/').unwrap_or(a);
+            a.parse::<SocketAddr>().ok().or_else(|| {
+                let ip = a.strip_prefix('[').and_then(|a| a.strip_suffix(']')).unwrap_or(a);
+                ip.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 53))
+            })
         };
+        let Some((scheme, rest)) = s.split_once("://") else {
+            return plain(s)
+                .map(DnsUpstream::Plain)
+                .ok_or_else(|| bad("expected ip, ip:port, tcp://ip:port, tls://host or https://host/path"));
+        };
+        match scheme.to_ascii_lowercase().as_str() {
+            "udp" => return plain(rest).map(DnsUpstream::Plain).ok_or_else(|| bad("expected udp://ip[:port]")),
+            "tcp" => return plain(rest).map(DnsUpstream::Tcp).ok_or_else(|| bad("expected tcp://ip[:port]")),
+            _ => {}
+        }
         let url = url::Url::parse(s).map_err(|e| bad(&e.to_string()))?;
         if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
             return Err(bad("no user name, password or #fragment"));
@@ -1277,7 +1287,7 @@ impl std::str::FromStr for DnsUpstream {
                 }
                 Ok(DnsUpstream::Https { host, port: url.port_or_known_default().unwrap_or(443), path })
             }
-            _ => Err(bad("supported: plain ip[:port], tls:// (DoT) and https:// (DoH)")),
+            _ => Err(bad("supported: ip[:port], udp://, tcp://, tls:// (DoT) and https:// (DoH)")),
         }
     }
 }
@@ -1290,6 +1300,7 @@ impl fmt::Display for DnsUpstream {
         };
         match self {
             DnsUpstream::Plain(a) => write!(f, "{a}"),
+            DnsUpstream::Tcp(a) => write!(f, "tcp://{a}"),
             DnsUpstream::Tls { host: h, port } => write!(f, "tls://{}:{port}", host(h)),
             DnsUpstream::Https { host: h, port, path } => write!(f, "https://{}:{port}{path}", host(h)),
         }
@@ -1760,6 +1771,12 @@ mod tests {
         assert_eq!(p("9.9.9.9").unwrap(), DnsUpstream::Plain("9.9.9.9:53".parse().unwrap()));
         assert_eq!(p("[2606:4700::1111]").unwrap().to_string(), "[2606:4700::1111]:53");
         assert_eq!(p("1.1.1.1:5353").unwrap().to_string(), "1.1.1.1:5353");
+        assert_eq!(p("udp://1.1.1.1:5353").unwrap(), p("1.1.1.1:5353").unwrap());
+        assert_eq!(p("UDP://[::1]").unwrap().to_string(), "[::1]:53");
+        assert_eq!(p("[::1]:5353").unwrap().to_string(), "[::1]:5353");
+        assert_eq!(p("tcp://9.9.9.9").unwrap(), DnsUpstream::Tcp("9.9.9.9:53".parse().unwrap()));
+        assert_eq!(p("tcp://[2606:4700::1111]:5353/").unwrap().to_string(), "tcp://[2606:4700::1111]:5353");
+        assert_eq!(p("tcp://1.1.1.1:5353").unwrap().host_ip(), Some("1.1.1.1".parse().unwrap()));
         assert_eq!(
             p("tls://Dns.Google").unwrap(),
             DnsUpstream::Tls { host: "dns.google".into(), port: 853 }
@@ -1776,7 +1793,16 @@ mod tests {
         assert_eq!(p("https://[2620:fe::fe]/").unwrap().host_ip(), Some("2620:fe::fe".parse().unwrap()));
         assert!(p("https://dns.google/dns-query").unwrap().needs_bootstrap());
         assert!(!p("tls://9.9.9.9").unwrap().needs_bootstrap());
-        for bad in ["dns.google", "quic://dns.adguard.com", "tls://a.b/path", "https://u:p@a.b/", "https://"] {
+        for bad in [
+            "dns.google",
+            "quic://dns.adguard.com",
+            "tls://a.b/path",
+            "https://u:p@a.b/",
+            "https://",
+            "tcp://dns.google",
+            "udp://1.1.1.1:99999",
+            "tcp://1.1.1.1/x",
+        ] {
             assert!(p(bad).is_err(), "{bad}");
         }
     }
