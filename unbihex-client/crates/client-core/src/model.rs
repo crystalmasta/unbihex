@@ -239,6 +239,9 @@ pub struct Settings {
     pub dns_direct: Vec<String>,
     /// TUN MTU.
     pub mtu: u16,
+    /// Multiplex UDP destinations over one Mux.Cool connection; off for servers
+    /// that do not implement Mux.Cool.
+    pub mux: bool,
     /// TUN mode: route all traffic of the machine into the TUN and point the system
     /// DNS at it. Off: only the interface comes up, routing is the admin's (routers, servers).
     pub tun_routes: bool,
@@ -319,6 +322,7 @@ impl Default for Settings {
             dns_upstream: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             dns_direct: Vec::new(),
             mtu: unbihex_engine::config::default_mtu(),
+            mux: true,
             tun_routes: true,
             tun_name: crate::plan::TUN_NAME.into(),
             default_interface: None,

@@ -482,6 +482,11 @@ pub struct XhttpClient {
     query: String,
     dialer: Dialer,
     pool: Arc<pool::H2Pool>,
+    /// UDP sessions get their own connections: they share one h2 stream per
+    /// source socket instead of dialing a tunnel each, and keeping them off the
+    /// TCP pool means a bulk download cannot stall UDP datagrams in the same
+    /// connection window.
+    udp_pool: Arc<pool::H2Pool>,
     fingerprint: Option<Fingerprint>,
 }
 
@@ -540,6 +545,8 @@ impl XhttpClient {
             .as_ref()
             .and_then(RealityClient::fingerprint)
             .or_else(|| tls.as_ref().and_then(TlsClient::fingerprint));
+        // UDP flows get their own connections, under the same `maxConnections`.
+        let (tcp_pool, udp_pool) = pool::H2Pool::pair(cfg.xmux.clone().unwrap_or_else(XmuxConfig::xray_default));
         Ok(XhttpClient {
             mode,
             http,
@@ -547,9 +554,8 @@ impl XhttpClient {
             host,
             path: cfg.normalized_path(),
             query: cfg.query().to_string(),
-            pool: Arc::new(pool::H2Pool::new(
-                cfg.xmux.clone().unwrap_or_else(XmuxConfig::xray_default),
-            )),
+            pool: Arc::new(tcp_pool),
+            udp_pool: Arc::new(udp_pool),
             cfg: cfg.clone(),
             dialer: Dialer {
                 server,
@@ -753,10 +759,11 @@ impl XhttpClient {
         pings: Option<h2::PingPong>,
         closed: &Arc<AtomicBool>,
         heard: ReadClock,
+        pool: &Arc<pool::H2Pool>,
     ) -> Option<Arc<AtomicBool>> {
         let mut pings = pings?;
         let period = self.keep_alive();
-        let pool = Arc::downgrade(&self.pool);
+        let pool = Arc::downgrade(pool);
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let closed = closed.clone();
@@ -822,7 +829,10 @@ impl XhttpClient {
         self.h2_request_shape(method, shape, Some(0))
     }
 
-    async fn dial_h2(&self) -> Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)> {
+    async fn dial_h2(
+        &self,
+        pool: Arc<pool::H2Pool>,
+    ) -> Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)> {
         let clock = ReadClock::new();
         let io = Heard {
             io: self.dialer.dial().await?,
@@ -841,12 +851,32 @@ impl XhttpClient {
             }
             flag.store(true, Ordering::Relaxed);
         });
-        let ping = self.spawn_keep_alive(pings, &closed, clock);
+        let ping = self.spawn_keep_alive(pings, &closed, clock, &pool);
         Ok((send, closed, ping))
     }
 
     /// Opens a new XHTTP session.
     pub async fn open(self: &Arc<Self>) -> Result<BoxStream> {
+        let pool = self.pool.clone();
+        self.open_with(false, &pool).await
+    }
+
+    /// Opens a new XHTTP session that may share a connection already carrying
+    /// another session. UDP flows are short and numerous (one per destination,
+    /// and new destinations appear while the application runs), so dialing a fresh
+    /// TLS connection for each costs a handshake per flow; an h2 stream on a
+    /// live connection costs nothing. These flows use their own pool, so a
+    /// bulk TCP download cannot share their connection window.
+    pub async fn open_shared(self: &Arc<Self>) -> Result<BoxStream> {
+        let pool = self.udp_pool.clone();
+        self.open_with(true, &pool).await
+    }
+
+    async fn open_with(
+        self: &Arc<Self>,
+        share: bool,
+        pool: &Arc<pool::H2Pool>,
+    ) -> Result<BoxStream> {
         // Stream-one, stream-up and auto let the caller use the h2 streams
         // directly; packet-up needs batching state and h1 is a different path.
         if self.http == Http::H2
@@ -855,13 +885,13 @@ impl XhttpClient {
                 XhttpMode::StreamOne | XhttpMode::StreamUp | XhttpMode::Auto
             )
         {
-            return self.open_bridge().await;
+            return self.open_bridge(share, pool).await;
         }
         let (user, inner) = tokio::io::duplex(PIPE);
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
         match self.http {
-            Http::H2 => self.open_h2(inner, cancelled).await?,
-            Http::H1 => self.open_h1(inner, cancelled).await?,
+            Http::H2 => self.open_h2(inner, cancelled, share, pool).await?,
+            Http::H1 => self.open_h1(inner, cancelled, share).await?,
         }
         Ok(Box::new(PacketPipe {
             inner: user,
@@ -870,8 +900,13 @@ impl XhttpClient {
     }
 
     /// Opens a streaming h2 session as one duplex stream, without the pipe.
-    async fn open_bridge(self: &Arc<Self>) -> Result<BoxStream> {
-        let lease = self.pool.get(|| self.dial_h2()).await?;
+    async fn open_bridge(
+        self: &Arc<Self>,
+        share: bool,
+        pool: &Arc<pool::H2Pool>,
+    ) -> Result<BoxStream> {
+        let dial_pool = pool.clone();
+        let lease = pool.get(share, || self.dial_h2(dial_pool)).await?;
         match self.mode {
             XhttpMode::StreamOne | XhttpMode::Auto => {
                 let req = self.h2_request(self.uplink_method(), None, None, true, None)?;
@@ -929,8 +964,11 @@ impl XhttpClient {
         self: &Arc<Self>,
         inner: DuplexStream,
         cancelled: tokio::sync::oneshot::Receiver<()>,
+        share: bool,
+        pool: &Arc<pool::H2Pool>,
     ) -> Result<()> {
-        let lease = self.pool.get(|| self.dial_h2()).await?;
+        let dial_pool = pool.clone();
+        let lease = pool.get(share, || self.dial_h2(dial_pool)).await?;
         let (r, w) = tokio::io::split(inner);
         let session = self.cfg.new_session_id();
         let get = self.h2_request(http::Method::GET, Some(&session), None, false, None)?;
@@ -1052,6 +1090,7 @@ impl XhttpClient {
         self: &Arc<Self>,
         inner: DuplexStream,
         cancelled: tokio::sync::oneshot::Receiver<()>,
+        _share: bool,
     ) -> Result<()> {
         let session = self.cfg.new_session_id();
         let io = self.dialer.dial().await?;
@@ -1432,7 +1471,7 @@ mod tests {
             let _ = conn.await;
         });
         let lease = pool
-            .get(|| async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
+            .get(false, || async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
             .await
             .unwrap();
         let req = http::Request::builder()
@@ -1490,7 +1529,7 @@ mod tests {
             let _ = conn.await;
         });
         let lease = pool
-            .get(|| async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
+            .get(false, || async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
             .await
             .unwrap();
         let req = http::Request::builder()
@@ -1549,7 +1588,7 @@ mod tests {
         // Seed the pool so the session reuses this connection instead of dialing.
         let seed = c
             .pool
-            .get(|| async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
+            .get(false, || async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
             .await
             .unwrap();
         drop(seed);
@@ -1582,7 +1621,7 @@ mod tests {
             let pool = pool.clone();
             let dials = dials.clone();
             tasks.push(tokio::spawn(async move {
-                pool.get(move || async move {
+                pool.get(false, move || async move {
                     dials.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     let (server_io, client_io) = tokio::io::duplex(16 * 1024);

@@ -8,6 +8,7 @@ pub mod dns;
 pub mod error;
 pub mod inbound;
 pub mod link;
+mod mux;
 /// Outgoing sockets and stream helpers.
 pub mod net;
 pub mod outbound;

@@ -9,7 +9,7 @@ use unbihex_engine::config::DnsUpstream;
 
 use crate::error::{ClientError, Result};
 use crate::geo::Geo;
-use crate::links::outbound_json;
+use crate::links::outbound_json_with;
 use crate::model::{AutoSelect, RoutingMode, Server, Settings};
 
 /// Where the config will run.
@@ -309,7 +309,7 @@ fn proxy_outbounds(servers: &[Server], settings: &Settings) -> Result<Vec<Value>
 }
 
 fn proxy_outbound(server: &Server, settings: &Settings) -> Result<Value> {
-    let mut ob = outbound_json(server)?;
+    let mut ob = outbound_json_with(server, settings.mux)?;
     let tls_like = server.transport.contains("tls") || server.transport.contains("reality");
     if settings.fragment && server.protocol == "vless" && tls_like {
         ob["fragment"] = json!({

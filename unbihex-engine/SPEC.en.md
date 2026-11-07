@@ -210,7 +210,7 @@ up, the system resolver answers with fake IPs). Loaded geosite/geoip data is reu
   },
   "dns": { "fakeip_range": "198.18.0.0/15", "upstream": ["1.1.1.1:53", "8.8.8.8:53"], "ttl": 10,
            "allow_private_answers": ["plex.direct"] },
-  "limits": { "max_connections": 4096, "tcp_idle_secs": 300, "udp_idle_secs": 60,
+  "limits": { "max_connections": 4096, "tcp_idle_secs": 300, "udp_idle_secs": 300,
               "handshake_timeout_secs": 10, "socket_buffer": 0 }
 }
 ```
@@ -582,7 +582,7 @@ Public specification: https://xtls.github.io/en/development/protocols/vless.html
 { "type": "vless", "tag": "proxy", "server": "example.com", "port": 443, "uuid": "<uuid>",
   "tls": { "sni": "example.com", "alpn": ["h2"], "fingerprint": "chrome", "pinned_sha256": [] },
   "reality": null, "flow": "xtls-rprx-vision", "xhttp": null, "ws": null, "fragment": null,
-  "allow_plaintext": false }
+  "mux": true, "allow_plaintext": false }
 ```
 
 The client request, once at the start of the stream:
@@ -601,8 +601,20 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
   as a write has sent the header with data; only connections where the client writes nothing wait the whole time.
 - The server response `version | addons len (N) | addons (N B)` is read lazily on the first read; version ≠ 0 is an
   error.
-- UDP (command 0x02): every packet in both directions is `length u16 BE | payload`; one VLESS stream is one destination.
-  With Vision, UDP goes as XUDP (§11.4).
+- UDP: every packet in both directions is `length u16 BE | payload` (command 0x02); one VLESS stream is one
+  destination. So that UDP flows to several destinations do not pay three TCP+TLS handshakes, UDP travels
+  through one shared **Mux.Cool connection** (command 0x03) per outbound: one session per local socket, with the
+  destination named on every frame. A new IP destination costs microseconds, and the server keeps one NAT mapping per
+  socket; the session's global ID comes from the socket, so after a reconnect Xray reuses its UDP socket for another
+  minute. A domain destination gets a session of its own: the server resolves the name and answers from an IP that
+  cannot pick the flow. Datagrams from a peer the client never sent to are not delivered yet: that needs a TUN-level
+  NAT rather than a flow per destination. The one exception is a session with a single domain flow: its reply comes
+  from the resolved IP, and nothing tells it apart from a stranger's datagram. XHTTP multiplexes through its own h2 pool for UDP (§11.5) instead; with Vision, UDP goes as
+  XUDP (§11.4). A server without Mux.Cool is remembered for 10 minutes, and the flow is retried over plain VLESS UDP
+  starting with the very datagram that found the rejection; behind a balancer (§11.16) the member that carried the
+  flow decides. `"mux": false` turns the shared connection off up front. Vision has no plain UDP (Xray rejects a UDP
+  request that carries the Vision flow), so the format stays XUDP and `"mux"` picks one shared Mux.Cool connection
+  (`true`) or a stream per destination (`false`); Vision never falls back to plain UDP.
 - Transport: TCP through the SocketFactory, then TLS (§11.2) or REALITY (§11.3); XHTTP (§11.5) may replace the raw TCP,
   and WebSocket or HTTPUpgrade (§11.10) may run over TCP or TLS (without Vision and REALITY, as in Xray).
   Without TLS and REALITY, `allow_plaintext: true` is required, otherwise it is a config error: the UUID and the
@@ -664,8 +676,16 @@ characters), `alpn`, `fingerprint` (§11.2). `tls` and `reality` together are re
 - **XUDP**: UDP of Vision users, as Xray sends it: the VLESS Mux command, the target `v1.mux.cool:666`, then Mux.Cool
   frames `meta_len(be16) | session_id(be16)=0 | status | option | [network | port(be16) | atyp | addr] [global_id(8)]`,
   `[data_len(be16) | data]` when option has bit 0x01. status: 1 new (first packet, with the destination and the global
-  ID), 2 keep, 3 end, 4 keep-alive (ignored). The 8-byte global ID names the client's UDP socket, so the server keeps
-  one NAT mapping for it (full-cone NAT: games, voice calls).
+  ID), 2 keep, 3 end, 4 keep-alive (ignored). In Xray the 8-byte global ID names the client's UDP socket and gives it
+  one NAT mapping (full-cone). On the shared Mux.Cool path our client takes the ID from the socket: one session per
+  socket, the destination on every frame, so IP destinations go through one server-side UDP socket (a domain gets its
+  own session, because the reply carries the resolved IP). On the fallback
+  path (`mux: false`) a stream carries one destination and the ID also mixes that destination in, because Xray moves
+  the link of an ID to the latest frame. `mux` works on Vision too: `true` shares one Mux.Cool connection, `false` opens
+  an XUDP stream per destination; only the XUDP format itself stays (Vision has no plain UDP), so Vision never falls
+  back to plain UDP. A `keep` frame whose tail does not start with the UDP network is padding and is ignored, as
+  Xray's `UnmarshalFromBuffer` does, rather than an error that ends the stream. Our server reads the ID but does not
+  keep the mapping across reconnects.
 
 ### 11.5 XHTTP (SplitHTTP)
 
@@ -688,7 +708,9 @@ accepted and unused.
   dials in flight (up to 5 s) instead of dialing their own; after that they take any live connection past
   `max_concurrency`, and with no connection yet at most two dials past the cap run at once. Without `xmux`: up to 8 connections, 600–900 requests,
   1800–3000 s (Xray's default without `xmux` is `maxConnections` 3; 8 is our choice, so eight parallel downloads do
-  not share three tunnels). A connection without sessions for over 120 s is closed, the two freshest stay.
+  not share three tunnels). A connection without sessions for over 120 s is closed, the two freshest stay. UDP
+  sessions take connections from a pool of their own (a bulk TCP download does not share their h2 window) and by
+  default join any live one; an explicit `max_concurrency` holds there too. `max_connections` caps both pools together.
   `h_keep_alive_period` (`hKeepAlivePeriod`): an HTTP/2 PING after that many seconds without incoming frames, like
   Xray's `ReadIdleTimeout` (0 is 45 s, negative disables PINGs); no answer within 15 s retires the connection.
 - In `stream-one` and `stream-up` writes go straight into the HTTP/2 request body and a separate task reads the

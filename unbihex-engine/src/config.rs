@@ -801,6 +801,10 @@ pub struct VlessConfig {
     /// WebSocket or HTTPUpgrade transport (TLS or none; not REALITY or Vision).
     #[serde(default)]
     pub ws: Option<crate::outbound::ws::WsConfig>,
+    /// Multiplex UDP destinations over one Mux.Cool connection. Turn it off
+    /// for a server that does not implement Mux.Cool.
+    #[serde(default = "default_mux")]
+    pub mux: bool,
 }
 
 /// The only flow the engine implements.
@@ -1010,6 +1014,10 @@ pub struct LinkConfig {
     /// link with TLS or a `tt://` one without its own anti-DPI (see [`VlessConfig::fragment`]).
     #[serde(default)]
     pub fragment: Option<crate::outbound::fragment::FragmentConfig>,
+    /// Mux.Cool for UDP inside a `vless://` link (see [`VlessConfig::mux`]);
+    /// `None` keeps the parsed link's value.
+    #[serde(default)]
+    pub mux: Option<bool>,
 }
 
 /// Routing: ordered rules and a fallback outbound.
@@ -1461,8 +1469,13 @@ fn default_max_connections() -> usize {
 fn default_tcp_idle() -> u64 {
     300
 }
+fn default_mux() -> bool {
+    true
+}
 fn default_udp_idle() -> u64 {
-    60
+    // Like Xray's ConnectionIdle: a game or a voice call pauses for minutes in
+    // a lobby, and tearing the flow down replaces its NAT mapping mid-session.
+    300
 }
 fn default_handshake_timeout() -> u64 {
     10
@@ -1494,6 +1507,7 @@ impl Config {
                     url: Secret(url.to_string()),
                     allow_plaintext: false,
                     fragment: None,
+                    mux: None,
                 }),
                 OutboundConfig::Direct(TagOnly {
                     tag: "direct".into(),
@@ -1742,6 +1756,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_link_can_turn_the_udp_mux_off() {
+        let untouched: LinkConfig =
+            serde_json::from_str(r#"{"tag":"proxy","url":"vless://x@h:1"}"#).unwrap();
+        assert_eq!(untouched.mux, None, "no field keeps the parsed link's value");
+        let off: LinkConfig =
+            serde_json::from_str(r#"{"tag":"proxy","url":"vless://x@h:1","mux":false}"#).unwrap();
+        assert_eq!(off.mux, Some(false));
+    }
+
+    #[test]
     fn balancers() {
         let cfg = |b: &str| {
             Config::from_json(&format!(
@@ -1861,6 +1885,14 @@ mod tests {
         } else {
             assert!(marked.is_err());
         }
+    }
+
+    /// A game or a voice call can sit in a lobby for minutes. Tearing the UDP
+    /// flow down replaces its NAT mapping mid-session, so the default is Xray's
+    /// 300 s, not the old 60 s.
+    #[test]
+    fn udp_flows_live_long_enough_for_a_lobby() {
+        assert_eq!(Limits::default().udp_idle_secs, 300);
     }
 
     #[test]

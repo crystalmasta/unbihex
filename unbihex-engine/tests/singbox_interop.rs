@@ -134,6 +134,8 @@ async fn vless_websocket_headers_against_sing_box() {
             reality: None,
             fragment: None,
             xhttp: None,
+            // This test exercises the WebSocket transport over TCP, not UDP mux.
+            mux: false,
             ws: Some(WsConfig {
                 path: "/p".into(),
                 host: None,

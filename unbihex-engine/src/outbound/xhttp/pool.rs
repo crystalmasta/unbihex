@@ -119,6 +119,10 @@ pub struct H2Pool {
     overflow: AtomicUsize,
     /// Signalled whenever a dial lands or fails.
     landed: Notify,
+    /// Live connections of this pool, for the other pool of the pair.
+    live: Arc<AtomicUsize>,
+    /// Live connections of the other pool of the pair: `maxConnections` caps both.
+    peer: Option<Arc<AtomicUsize>>,
 }
 
 fn pick(r: Option<Range>) -> u32 {
@@ -135,8 +139,32 @@ impl H2Pool {
             dialing: AtomicUsize::new(0),
             overflow: AtomicUsize::new(0),
             landed: Notify::new(),
+            live: Arc::default(),
+            peer: None,
             xmux,
         }
+    }
+
+    /// Two pools (TCP and UDP sessions) with the same limits; `maxConnections`
+    /// caps their connections together, as one pool of Xray.
+    pub fn pair(xmux: XmuxConfig) -> (H2Pool, H2Pool) {
+        let mut a = H2Pool::new(xmux.clone());
+        let mut b = H2Pool::new(xmux);
+        // The same draw of a `maxConnections` range for both.
+        b.connections = a.connections;
+        a.peer = Some(b.live.clone());
+        b.peer = Some(a.live.clone());
+        (a, b)
+    }
+
+    /// Connections held by the other pool of the pair.
+    fn others(&self) -> usize {
+        self.peer.as_ref().map_or(0, |p| p.load(Ordering::Relaxed))
+    }
+
+    /// Publishes the number of live connections to the other pool.
+    fn publish(&self, conns: &[Arc<PooledConn>]) {
+        self.live.store(conns.len(), Ordering::Relaxed);
     }
 
     /// Reserves one of the few dials allowed past the cap.
@@ -155,7 +183,7 @@ impl H2Pool {
     fn reserve(&self) -> bool {
         let conns = self.conns.lock();
         if self.connections > 0
-            && conns.len() + self.dialing.load(Ordering::Relaxed) >= self.connections
+            && conns.len() + self.dialing.load(Ordering::Relaxed) + self.others() >= self.connections
         {
             return false;
         }
@@ -189,20 +217,19 @@ impl H2Pool {
         let mut conns = self.conns.lock();
         conns.retain(|c| c.usable());
         self.retire_idle(&mut conns);
+        self.publish(&conns);
     }
 
-    fn take(&self) -> Option<Lease> {
-        self.take_with(false)
-    }
-
-    /// `share`: past the wait, any live connection will do, even one already
-    /// carrying `maxConcurrency` sessions.
-    fn take_with(&self, share: bool) -> Option<Lease> {
+    /// Leases a live connection. `share`: by default any one is shared (UDP
+    /// flows); an explicit `maxConcurrency` still applies. `any`: share whatever
+    /// there is, full or not (waited too long for a dial).
+    fn take_with(&self, share: bool, any: bool) -> Option<Lease> {
         let mut conns = self.conns.lock();
         conns.retain(|c| c.usable());
         self.retire_idle(&mut conns);
+        self.publish(&conns);
         let load = |c: &Arc<PooledConn>| c.open.load(Ordering::Relaxed);
-        let pickable: Vec<&Arc<PooledConn>> = if share {
+        let pickable: Vec<&Arc<PooledConn>> = if any || (share && self.concurrency == 0) {
             conns.iter().collect()
         } else if self.concurrency > 0 {
             // An explicit `maxConcurrency` works as in Xray: a new connection
@@ -216,7 +243,7 @@ impl H2Pool {
             // single stream never uses. At the cap, or with no cap at all,
             // the least loaded connection is shared.
             let room = self.connections > 0
-                && conns.len() + self.dialing.load(Ordering::Relaxed) < self.connections;
+                && conns.len() + self.dialing.load(Ordering::Relaxed) + self.others() < self.connections;
             if room && conns.iter().all(|c| load(c) > 0) {
                 return None;
             }
@@ -239,7 +266,7 @@ impl H2Pool {
     }
 
     /// Leases a connection, dialing a new one when none can be reused.
-    pub async fn get<F, Fut>(&self, dial: F) -> Result<Lease>
+    pub async fn get<F, Fut>(&self, share: bool, dial: F) -> Result<Lease>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)>>,
@@ -252,7 +279,7 @@ impl H2Pool {
             tokio::pin!(landed);
             // Registered before looking, so a dial landing in between is not missed.
             landed.as_mut().enable();
-            if let Some(l) = self.take() {
+            if let Some(l) = self.take_with(share, false) {
                 return Ok(l);
             }
             if self.reserve() {
@@ -264,7 +291,7 @@ impl H2Pool {
             }
             // Waited long enough: share a full connection, or dial past the
             // cap rather than stall the session, but only a few at a time.
-            if let Some(l) = self.take_with(true) {
+            if let Some(l) = self.take_with(share, true) {
                 return Ok(l);
             }
             if self.reserve_overflow() {
@@ -289,8 +316,9 @@ impl H2Pool {
         // A dial that outlived the cap (the pool filled while it was in
         // flight) serves this session and is not kept.
         let mut conns = self.conns.lock();
-        if self.connections == 0 || conns.len() < self.connections {
+        if self.connections == 0 || conns.len() + self.others() < self.connections {
             conns.push(conn.clone());
+            self.publish(&conns);
         }
         drop(conns);
         Ok(Lease(conn))
@@ -356,7 +384,7 @@ mod tests {
         let pool = pool_at(8);
         let c = conn(0).await;
         pool.conns.lock().push(c);
-        assert!(pool.take().is_some());
+        assert!(pool.take_with(false, false).is_some());
     }
 
     /// While every connection carries a session, the pool grows: eight parallel
@@ -366,7 +394,7 @@ mod tests {
         let pool = pool_at(8);
         let c = conn(1).await;
         pool.conns.lock().push(c);
-        assert!(pool.take().is_none(), "a busy pool with room must dial");
+        assert!(pool.take_with(false, false).is_none(), "a busy pool with room must dial");
     }
 
     /// Connections quiet for minutes are closed in one pass: they hold sockets
@@ -380,7 +408,7 @@ mod tests {
             *c.idle_at.lock() = Instant::now().checked_sub(Duration::from_secs(age));
             pool.conns.lock().push(c);
         }
-        let _ = pool.take();
+        let _ = pool.take_with(false, false);
         assert_eq!(pool.len(), 2, "every connection past the idle limit is closed");
     }
 
@@ -393,7 +421,7 @@ mod tests {
             *c.idle_at.lock() = Instant::now().checked_sub(Duration::from_secs(age));
             pool.conns.lock().push(c);
         }
-        let _ = pool.take();
+        let _ = pool.take_with(false, false);
         assert_eq!(pool.len(), 2, "two idle connections stay warm");
     }
 
@@ -403,7 +431,7 @@ mod tests {
         let pool = pool_at(1);
         let c = conn(1).await;
         pool.conns.lock().push(c);
-        let lease = pool.take().expect("the cap is reached, so the connection is shared");
+        let lease = pool.take_with(false, false).expect("the cap is reached, so the connection is shared");
         assert_eq!(lease.0.open.load(Ordering::Relaxed), 2);
     }
 
@@ -418,9 +446,40 @@ mod tests {
         });
         let c = conn(1).await;
         pool.conns.lock().push(c);
-        let lease = pool.take().expect("one more session fits the connection");
+        let lease = pool.take_with(false, false).expect("one more session fits the connection");
         assert_eq!(lease.0.open.load(Ordering::Relaxed), 2);
-        assert!(pool.take().is_none(), "a full connection makes the pool dial");
+        assert!(pool.take_with(false, false).is_none(), "a full connection makes the pool dial");
+    }
+
+    /// The UDP pool shares a connection by default, but an explicit
+    /// `maxConcurrency` holds there too (as in Xray).
+    #[tokio::test]
+    async fn udp_sharing_respects_max_concurrency() {
+        let pool = H2Pool::new(XmuxConfig::xray_default());
+        let c = conn(5).await;
+        pool.conns.lock().push(c);
+        assert!(pool.take_with(true, false).is_some(), "no limit: any connection is shared");
+        let pool = H2Pool::new(XmuxConfig { max_concurrency: Some(Range::fixed(2)), ..XmuxConfig::default() });
+        let c = conn(2).await;
+        pool.conns.lock().push(c);
+        assert!(pool.take_with(true, false).is_none(), "a full connection makes the UDP pool dial");
+        assert!(pool.take_with(true, true).is_some(), "after the wait it is shared anyway");
+    }
+
+    /// `maxConnections` caps the TCP and the UDP pool together.
+    #[tokio::test]
+    async fn a_pair_shares_the_connection_cap() {
+        let (tcp, udp) = H2Pool::pair(XmuxConfig { max_connections: Some(Range::fixed(2)), ..XmuxConfig::default() });
+        let c = conn(1).await;
+        tcp.conns.lock().push(c);
+        tcp.retire_idle_now();
+        assert!(udp.reserve(), "one connection of two is left");
+        let c = conn(1).await;
+        udp.conns.lock().push(c);
+        udp.dialing.store(0, Ordering::Relaxed);
+        udp.retire_idle_now();
+        assert!(!tcp.reserve(), "the UDP pool holds the second one");
+        assert!(tcp.take_with(false, false).is_some(), "at the cap the TCP pool shares");
     }
 
     /// Sessions waiting at the cap wake when a dial lands instead of polling.
@@ -431,7 +490,7 @@ mod tests {
         let first = {
             let pool = pool.clone();
             tokio::spawn(async move {
-                pool.get(|| async move {
+                pool.get(false, || async move {
                     let _ = rx.await;
                     let c = conn(0).await;
                     Ok((c.send.clone(), Arc::new(AtomicBool::new(false)), None))
@@ -445,7 +504,7 @@ mod tests {
         let second = {
             let pool = pool.clone();
             tokio::spawn(async move {
-                pool.get(|| async {
+                pool.get(false, || async {
                     Err(crate::error::Error::config("the second session must not dial"))
                 })
                 .await
@@ -469,7 +528,7 @@ mod tests {
             let pool = pool.clone();
             let dials = dials.clone();
             tasks.push(tokio::spawn(async move {
-                pool.get(|| async move {
+                pool.get(false, || async move {
                     dials.fetch_add(1, Ordering::Relaxed);
                     std::future::pending::<
                         Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)>,

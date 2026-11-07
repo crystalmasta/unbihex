@@ -394,6 +394,13 @@ impl Outbound for BalancerOutbound {
         Err(last)
     }
 
+    // By Pavel Shakhmin (github.com/pshakhmin), PR #53: the retry on the plain path
+    // is the member's to allow, the one that just carried the flow.
+    fn udp_retry_legacy(&self) -> bool {
+        let b = &self.inner;
+        b.members.get(b.current.load(Ordering::Relaxed)).is_some_and(|m| m.udp_retry_legacy())
+    }
+
     fn balancer(&self) -> Option<BalancerState> {
         Some(self.inner.state())
     }
@@ -411,6 +418,7 @@ mod tests {
         to: std::net::SocketAddr,
         down: std::sync::atomic::AtomicBool,
         conns: AtomicUsize,
+        retry: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -427,6 +435,9 @@ mod tests {
         }
         async fn connect_udp(&self, _sess: &Session) -> Result<Box<dyn PacketStream>> {
             Err(Error::Unsupported("udp".into()))
+        }
+        fn udp_retry_legacy(&self) -> bool {
+            self.retry.load(Ordering::SeqCst)
         }
     }
 
@@ -455,6 +466,7 @@ mod tests {
             to,
             down: Default::default(),
             conns: AtomicUsize::new(0),
+            retry: Default::default(),
         })
     }
 
@@ -511,6 +523,21 @@ mod tests {
         lb.connect_tcp(&sess()).await.unwrap();
         assert_eq!(lb.balancer().unwrap().current.as_deref(), Some("a"));
         drop(open);
+    }
+
+    /// The plain-UDP retry after a failed Mux.Cool flow is the current member's call.
+    #[tokio::test]
+    async fn udp_retry_follows_the_current_member() {
+        let server = http(Duration::ZERO).await;
+        let (a, b) = (fake("a", server), fake("b", server));
+        b.retry.store(true, Ordering::SeqCst);
+        let members: Vec<Arc<dyn Outbound>> = vec![a.clone(), b.clone()];
+        let lb = BalancerOutbound::new(&config(BalancerStrategy::Fallback), members).unwrap();
+        lb.connect_tcp(&sess()).await.unwrap();
+        assert!(!lb.udp_retry_legacy());
+        a.down.store(true, Ordering::SeqCst);
+        lb.connect_tcp(&sess()).await.unwrap();
+        assert!(lb.udp_retry_legacy(), "b carries the flows now");
     }
 
     #[tokio::test]

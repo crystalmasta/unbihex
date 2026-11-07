@@ -409,12 +409,20 @@ fn socks_parts(link: &str) -> Result<SocksParts> {
 
 /// The engine outbound (JSON, `tag` = "proxy") for a supported server.
 pub fn outbound_json(server: &Server) -> Result<Value> {
+    outbound_json_with(server, true)
+}
+
+/// The engine outbound, with the UDP multiplexer switch for `vless://` links.
+pub fn outbound_json_with(server: &Server, mux: bool) -> Result<Value> {
     if let Some(why) = &server.unsupported {
         return Err(ClientError::Unsupported(why.clone()));
     }
+    // Only `vless://` outbounds read the switch; sending it for the rest would
+    // claim an effect the engine does not have.
+    let mux = mux && server.protocol == "vless";
     match server.protocol.as_str() {
         "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "trusttunnel" => {
-            Ok(json!({ "type": "link", "tag": "proxy", "url": server.link }))
+            Ok(json!({ "type": "link", "tag": "proxy", "url": server.link, "mux": mux }))
         }
         "socks" => {
             let p = socks_parts(&server.link)?;
@@ -436,6 +444,15 @@ mod tests {
     use super::*;
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
+
+    #[test]
+    fn the_udp_mux_switch_reaches_only_vless() {
+        let vless = parse_server(&format!("vless://{UUID}@h.com:443?security=tls#V")).unwrap();
+        assert_eq!(outbound_json_with(&vless, true).unwrap()["mux"], true);
+        assert_eq!(outbound_json_with(&vless, false).unwrap()["mux"], false);
+        let trojan = parse_server("trojan://pass@h.com:443#T").unwrap();
+        assert_eq!(outbound_json_with(&trojan, true).unwrap()["mux"], false);
+    }
 
     #[test]
     fn vless_tls_is_supported() {
