@@ -51,6 +51,12 @@ impl<R: Runtime> UnbihexVpn<R> {
             .map_err(Into::into)
     }
 
+    /// Android: apps with a launcher entry, for choosing which use the VPN.
+    #[cfg(target_os = "android")]
+    pub fn list_apps(&self) -> crate::Result<AppsResponse> {
+        self.0.run_mobile_plugin("listApps", ()).map_err(Into::into)
+    }
+
     /// Android: the quick settings tile reads its label (the server) again.
     #[cfg(target_os = "android")]
     pub fn refresh_tile(&self) -> crate::Result<()> {

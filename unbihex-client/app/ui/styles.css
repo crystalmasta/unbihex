@@ -250,6 +250,11 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
 .dlg h2 { margin: 0; font-size: 18px; }
 .dlg .hint { margin: 0; }
 .dlg-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.apps-list { max-height: min(50vh, 420px); overflow-y: auto; display: grid; gap: 2px; }
+.apps-list label { display: flex; align-items: center; gap: 10px; padding: 6px 4px; }
+.apps-list img, .apps-list .noicon { width: 32px; height: 32px; flex: none; border-radius: 8px; }
+.apps-list .app-name { display: grid; min-width: 0; }
+.apps-list .app-name small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spacer { flex: 1; }
 .toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 50; max-width: min(420px, calc(100vw - 32px)); }
 .toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 12px; box-shadow: var(--shadow); animation: slide .2s ease-out; }

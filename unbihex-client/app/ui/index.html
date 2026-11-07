@@ -229,6 +229,20 @@
               <p class="hint">С правами администратора программа стартует заданием Планировщика заданий, без запроса UAC при входе. Включить или выключить такой автозапуск может только Unbihex, запущенный от администратора, — программа предложит перезапуск. Без этих прав в режиме TUN подключиться при входе не выйдет — откроется окно с причиной. Портативную версию отключите здесь, прежде чем удалять её папку.</p>
             </div>
             <label class="check"><input name="auto_connect" type="checkbox" /> Подключаться при запуске</label>
+            <div id="android-apps">
+              <label>Приложения в VPN
+                <select name="android_apps_mode">
+                  <option value="all">Все приложения</option>
+                  <option value="only">Только выбранные</option>
+                  <option value="except">Все, кроме выбранных</option>
+                </select>
+              </label>
+              <div class="row">
+                <button type="button" class="btn" id="apps-pick">Выбрать приложения…</button>
+                <span class="hint" id="apps-count"></span>
+              </div>
+              <p class="hint">«Только выбранные» — через VPN идут только отмеченные приложения, «все, кроме» — все, кроме отмеченных. Unbihex сам всегда работает мимо VPN. Если ни одного отмеченного приложения нет на телефоне, через VPN идут все. Действует со следующего подключения.</p>
+            </div>
             <div id="android-notification">
               <label class="check"><input name="android_notification" type="checkbox" /> Уведомление «VPN включён»</label>
               <p class="hint">Держит VPN включённым, когда приложение смахнули из недавних. Без уведомления Android может закрыть VPN в фоне. Действует со следующего подключения.</p>
@@ -302,6 +316,21 @@
         <span class="spacer"></span>
         <button value="cancel" class="btn">Отмена</button>
         <button type="button" class="btn primary" id="sub-save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-apps">
+    <form method="dialog" class="dlg">
+      <h2>Приложения</h2>
+      <input id="apps-search" type="search" placeholder="Поиск по названию или пакету" />
+      <label class="check"><input id="apps-system" type="checkbox" /> Показать системные</label>
+      <div id="apps-list" class="apps-list"></div>
+      <div class="dlg-actions">
+        <span class="hint" id="apps-picked"></span>
+        <span class="spacer"></span>
+        <button value="cancel" class="btn">Отмена</button>
+        <button type="button" class="btn primary" id="apps-save">Сохранить</button>
       </div>
     </form>
   </dialog>

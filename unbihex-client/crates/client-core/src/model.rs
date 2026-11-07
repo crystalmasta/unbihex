@@ -180,6 +180,30 @@ pub enum AutoGroup {
     Marked,
 }
 
+/// Android: which apps go through the VPN (issue #16).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppsMode {
+    /// Every app (Unbihex itself stays outside, as always).
+    #[default]
+    All,
+    /// Only the chosen apps.
+    Only,
+    /// Every app except the chosen ones.
+    Except,
+}
+
+impl AppsMode {
+    /// The name the VPN service takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AppsMode::All => "all",
+            AppsMode::Only => "only",
+            AppsMode::Except => "except",
+        }
+    }
+}
+
 /// How the server delay is measured.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -273,6 +297,10 @@ pub struct Settings {
     /// Android: show a "VPN is on" notification. It keeps the VPN running in the
     /// foreground, so swiping the app away does not drop it.
     pub android_notification: bool,
+    /// Android: which apps go through the VPN; applied on connect.
+    pub android_apps_mode: AppsMode,
+    /// Android: package names for [`Settings::android_apps_mode`].
+    pub android_apps: Vec<String>,
     /// Engine log level.
     pub log_level: String,
     /// Where to download `geosite.dat`.
@@ -335,6 +363,8 @@ impl Default for Settings {
             auto_start: false,
             auto_start_admin: false,
             android_notification: true,
+            android_apps_mode: AppsMode::All,
+            android_apps: Vec::new(),
             log_level: "info".into(),
             geosite_url: crate::geo::DEFAULT_GEOSITE_URL.into(),
             geoip_url: crate::geo::DEFAULT_GEOIP_URL.into(),

@@ -3,7 +3,11 @@ package com.unbihex.vpn
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.util.Base64
 import android.net.VpnService
 import android.os.Build
 import androidx.activity.result.ActivityResult
@@ -12,6 +16,7 @@ import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
+import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
@@ -30,6 +35,9 @@ class StartArgs {
     // Used on iOS only; accepted here so both platforms share one argument type.
     var configJson: String = ""
     var serverAddress: String = ""
+    // Which apps use the VPN: "all", "only" (just [apps]) or "except" (all but [apps]).
+    var appsMode: String = "all"
+    var apps: Array<String> = arrayOf()
 }
 
 /**
@@ -111,6 +119,8 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             putExtra(UnbihexVpnService.EXTRA_SESSION, args.session)
             putExtra(UnbihexVpnService.EXTRA_SERVER, args.server)
             putExtra(UnbihexVpnService.EXTRA_NOTIFICATION, args.notification)
+            putExtra(UnbihexVpnService.EXTRA_APPS_MODE, args.appsMode)
+            putExtra(UnbihexVpnService.EXTRA_APPS, args.apps)
         }
         try {
             // The application context: Tauri keeps handing plugins the first activity,
@@ -169,6 +179,59 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.parseArgs(GenerationArgs::class.java)
         if (UnbihexVpnService.markConnected(activity.applicationContext, args.generation)) invoke.resolve()
         else invoke.reject("запуск VPN отменён")
+    }
+
+    /**
+     * Apps with a launcher entry (the manifest's `<queries>` makes them visible
+     * without QUERY_ALL_PACKAGES), Unbihex excluded, each with a small icon.
+     */
+    @Command
+    fun listApps(invoke: Invoke) {
+        val context = activity.applicationContext
+        Thread {
+            try {
+                val pm = context.packageManager
+                val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                val found = if (Build.VERSION.SDK_INT >= 33) {
+                    pm.queryIntentActivities(launcher, PackageManager.ResolveInfoFlags.of(0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    pm.queryIntentActivities(launcher, 0)
+                }
+                val seen = HashSet<String>()
+                val apps = JSArray()
+                for (info in found) {
+                    val app = info.activityInfo?.applicationInfo ?: continue
+                    if (app.packageName == context.packageName || !seen.add(app.packageName)) continue
+                    val item = JSObject()
+                    item.put("package", app.packageName)
+                    item.put("name", app.loadLabel(pm).toString())
+                    item.put("system", (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
+                        (app.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0)
+                    icon(pm, app)?.let { item.put("icon", it) }
+                    apps.put(item)
+                }
+                val res = JSObject()
+                res.put("apps", apps)
+                invoke.resolve(res)
+            } catch (e: Exception) {
+                invoke.reject("Не удалось получить список приложений: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun icon(pm: PackageManager, app: ApplicationInfo): String? = try {
+        val size = 48
+        val drawable = app.loadIcon(pm)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(Canvas(bitmap))
+        val out = java.io.ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+        bitmap.recycle()
+        "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+    } catch (_: Exception) {
+        null
     }
 
     /** The tile asks the native side for its label again (another server in use). */

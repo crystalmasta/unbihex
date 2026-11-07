@@ -23,6 +23,32 @@ pub struct StartArgs {
     pub config_json: String,
     /// iOS: server address shown in Settings → VPN.
     pub server_address: String,
+    /// Android: `all`, `only` (just `apps`) or `except` (all but `apps`).
+    pub apps_mode: String,
+    /// Android: package names for `apps_mode`.
+    pub apps: Vec<String>,
+}
+
+/// Android: an app that can be put in or out of the VPN.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AppInfo {
+    /// Package name.
+    pub package: String,
+    /// Label shown in the launcher.
+    pub name: String,
+    /// Preinstalled and never updated by the user.
+    #[serde(default)]
+    pub system: bool,
+    /// A small PNG as a `data:` URL, when it could be drawn.
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+/// Result of `list_apps`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AppsResponse {
+    /// Apps with a launcher entry, except Unbihex.
+    pub apps: Vec<AppInfo>,
 }
 
 /// Result of `start`.

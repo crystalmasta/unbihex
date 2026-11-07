@@ -447,6 +447,9 @@ function fillSettings() {
   f.auto_connect.checked = s.auto_connect;
   f.android_notification.checked = s.android_notification;
   $("#android-notification").hidden = S.platform !== "android";
+  f.android_apps_mode.value = s.android_apps_mode || "all";
+  $("#android-apps").hidden = S.platform !== "android";
+  appsCount();
   f.log_level.value = s.log_level;
   f.geosite_url.value = s.geosite_url;
   f.geoip_url.value = s.geoip_url;
@@ -535,6 +538,7 @@ function readSettings() {
     auto_start_admin: f.auto_start_admin.checked,
     auto_connect: f.auto_connect.checked,
     android_notification: f.android_notification.checked,
+    android_apps_mode: f.android_apps_mode.value,
     log_level: f.log_level.value,
     geosite_url: f.geosite_url.value.trim(),
     geoip_url: f.geoip_url.value.trim(),
@@ -548,6 +552,81 @@ function readSettings() {
     fragment_length: f.fragment_length.value.trim() || "100-200",
     fragment_interval: f.fragment_interval.value.trim() || "10-20",
   };
+}
+
+// ------------------------------------------------------------------ android apps (#16)
+
+let appsAll = null;
+let appsPicked = new Set();
+
+function appsCount() {
+  const n = (S.data.settings.android_apps || []).length;
+  $("#apps-count").textContent = n ? `выбрано: ${n}` : "ничего не выбрано";
+}
+
+function renderApps() {
+  const q = $("#apps-search").value.trim().toLowerCase();
+  const system = $("#apps-system").checked;
+  const list = (appsAll || [])
+    .filter((a) => system || !a.system || appsPicked.has(a.package))
+    .filter((a) => !q || a.name.toLowerCase().includes(q) || a.package.toLowerCase().includes(q))
+    .sort((a, b) => (appsPicked.has(b.package) - appsPicked.has(a.package)) || a.name.localeCompare(b.name));
+  $("#apps-list").innerHTML = list.length
+    ? list
+        .map(
+          (a) => `<label><input type="checkbox" data-pkg="${esc(a.package)}" ${appsPicked.has(a.package) ? "checked" : ""} />
+        ${a.icon ? `<img src="${esc(a.icon)}" alt="" />` : '<span class="noicon"></span>'}
+        <span class="app-name"><span>${esc(a.name)}</span><small>${esc(a.package)}</small></span></label>`,
+        )
+        .join("")
+    : '<p class="hint">Ничего не найдено</p>';
+  $("#apps-picked").textContent = `выбрано: ${appsPicked.size}`;
+}
+
+async function openAppsDialog() {
+  appsPicked = new Set(S.data.settings.android_apps || []);
+  $("#apps-search").value = "";
+  $("#apps-list").innerHTML = '<p class="hint">Загрузка…</p>';
+  $("#dlg-apps").showModal();
+  if (!appsAll) {
+    try {
+      appsAll = await invoke("android_apps");
+    } catch (e) {
+      $("#apps-list").innerHTML = `<p class="hint">${esc(String(e))}</p>`;
+      return;
+    }
+  }
+  renderApps();
+}
+
+async function saveApps() {
+  const before = S.data.settings;
+  const settings = { ...readSettings(), android_apps: [...appsPicked].sort() };
+  $("#dlg-apps").close();
+  try {
+    await invoke("save_settings", { settings });
+    await refresh();
+    fillSettings();
+    await offerAppsReconnect(before, settings);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+/** The VPN service takes the app list when it starts: offer a reconnect after a change. */
+async function offerAppsReconnect(before, after) {
+  const apps = (s) => JSON.stringify([...(s.android_apps || [])].sort());
+  const mode = (s) => s.android_apps_mode || "all";
+  const changed = mode(before) !== mode(after) || (mode(after) !== "all" && apps(before) !== apps(after));
+  if (!changed || !S.status.connected || S.platform !== "android") return;
+  if (!confirm("Выбор приложений применится при подключении. Переподключить VPN сейчас?")) return;
+  try {
+    await invoke("disconnect");
+    await invoke("connect");
+  } catch (e) {
+    toast(String(e), "error");
+  }
+  await refresh();
 }
 
 function renderAbout() {
@@ -737,11 +816,14 @@ function bind() {
 
   $("#settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
+    const before = S.data.settings;
     const settings = readSettings();
     busy = S.status.connected;
+    let saved = false;
     try {
       await invoke("save_settings", { settings });
       toast("Настройки сохранены", "ok");
+      saved = true;
     } catch (err) {
       toast(String(err), "error");
     } finally {
@@ -749,7 +831,20 @@ function bind() {
       await refresh();
       fillSettings();
     }
+    if (saved) await offerAppsReconnect(before, settings);
   });
+
+  $("#apps-pick").addEventListener("click", openAppsDialog);
+  $("#apps-search").addEventListener("input", renderApps);
+  $("#apps-system").addEventListener("change", renderApps);
+  $("#apps-list").addEventListener("change", (e) => {
+    const pkg = e.target.dataset && e.target.dataset.pkg;
+    if (!pkg) return;
+    if (e.target.checked) appsPicked.add(pkg);
+    else appsPicked.delete(pkg);
+    $("#apps-picked").textContent = `выбрано: ${appsPicked.size}`;
+  });
+  $("#apps-save").addEventListener("click", saveApps);
 
   for (const [preset, field] of [["#dns-preset", "dns_upstream"], ["#dns-direct-preset", "dns_direct"]]) {
     $(preset).addEventListener("change", (e) => {

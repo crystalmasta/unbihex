@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
@@ -64,6 +65,8 @@ class UnbihexVpnService : VpnService() {
         const val EXTRA_SERVER = "server"
         const val EXTRA_NOTIFICATION = "notification"
         const val EXTRA_GENERATION = "generation"
+        const val EXTRA_APPS_MODE = "appsMode"
+        const val EXTRA_APPS = "apps"
         private const val TAG = "UnbihexVpn"
         private const val CHANNEL_ID = "vpn"
         private const val NOTIFICATION_ID = 1
@@ -139,16 +142,48 @@ class UnbihexVpnService : VpnService() {
             nativeServer = args.optString("server", "")
             nativeNotification = args.optBoolean("notification", true)
         }
+        val list = args.optJSONArray("apps")
+        val apps = (0 until (list?.length() ?: 0)).mapNotNull { list?.optString(it) }
         return establish(value, args.optInt("mtu", 1500), args.optString("address", "10.199.233.1"),
-            args.optInt("prefix", 30), args.optString("dns", "10.199.233.2"), args.optString("session", "Unbihex"))
+            args.optInt("prefix", 30), args.optString("dns", "10.199.233.2"), args.optString("session", "Unbihex"),
+            args.optString("appsMode", "all"), apps)
     }
 
-    private fun establish(value: Long, mtu: Int, address: String, prefix: Int, dns: String, session: String): IntArray {
+    /**
+     * Which apps use the VPN (issue #16). Unbihex itself always stays outside, so
+     * the engine's own sockets bypass the tunnel without protect(): "only" never
+     * adds it, the other modes exclude it. "only" with none of the chosen apps
+     * installed would send every app, Unbihex too, into the VPN: it falls back
+     * to all apps.
+     */
+    private fun applyApps(builder: Builder, mode: String, apps: List<String>) {
+        val chosen = apps.filter { it.isNotBlank() && it != packageName }.distinct()
+        if (mode == "only") {
+            var added = 0
+            for (app in chosen) {
+                try { builder.addAllowedApplication(app); added++ }
+                catch (e: PackageManager.NameNotFoundException) { Log.w(TAG, "app $app is not installed") }
+            }
+            if (added > 0) return
+            Log.w(TAG, "none of the chosen apps is installed: every app uses the VPN")
+        } else if (mode == "except") {
+            for (app in chosen) {
+                try { builder.addDisallowedApplication(app) }
+                catch (e: PackageManager.NameNotFoundException) { Log.w(TAG, "app $app is not installed") }
+            }
+        }
+        builder.addDisallowedApplication(packageName)
+    }
+
+    private fun establish(
+        value: Long, mtu: Int, address: String, prefix: Int, dns: String, session: String,
+        appsMode: String, apps: List<String>,
+    ): IntArray {
         val builder = Builder().setSession(session).setMtu(mtu).addAddress(address, prefix)
             .addRoute("0.0.0.0", 0).addDnsServer(dns)
         try { builder.addAddress("fdb5:2f3c:9a17::1", 126); builder.addRoute("::", 0) }
         catch (e: Exception) { Log.w(TAG, "IPv6 is not available", e) }
-        builder.addDisallowedApplication(packageName)
+        applyApps(builder, appsMode, apps)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
         synchronized(lock) {
             check(lifecycle.isConnecting(value)) { "запуск VPN отменён" }
@@ -265,7 +300,9 @@ class UnbihexVpnService : VpnService() {
                     intent.getStringExtra(EXTRA_ADDRESS) ?: "10.199.233.1",
                     intent.getIntExtra(EXTRA_PREFIX, 30),
                     intent.getStringExtra(EXTRA_DNS) ?: "10.199.233.2",
-                    intent.getStringExtra(EXTRA_SESSION) ?: "Unbihex"
+                    intent.getStringExtra(EXTRA_SESSION) ?: "Unbihex",
+                    intent.getStringExtra(EXTRA_APPS_MODE) ?: "all",
+                    intent.getStringArrayExtra(EXTRA_APPS)?.toList() ?: emptyList()
                 )
                 synchronized(lock) {
                     check(lifecycle.isConnecting(value)) { "запуск VPN отменён" }

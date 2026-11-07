@@ -151,6 +151,8 @@ pub(crate) fn mobile_start(client: &Client) -> Result<MobileStart, ClientError> 
         session: format!("Unbihex · {}", server.name),
         server: server.name.clone(),
         notification: settings.android_notification,
+        apps_mode: settings.android_apps_mode.as_str().into(),
+        apps: settings.android_apps.clone(),
         config_json: if cfg!(target_os = "ios") { config_json } else { String::new() },
         server_address: server.host.clone(),
     };
@@ -560,6 +562,26 @@ async fn save_settings(
         }
     });
     reconnect_if_connected(&app, &state).await
+}
+
+/// Android: the apps that can be put in or out of the VPN (issue #16).
+#[tauri::command]
+async fn android_apps(app: AppHandle) -> Result<Vec<tauri_plugin_unbihex_vpn::AppInfo>, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+        let handle = app.clone();
+        tauri::async_runtime::spawn_blocking(move || handle.unbihex_vpn().list_apps())
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|r| r.apps)
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("выбор приложений есть только на Android".into())
+    }
 }
 
 /// Changes only how pings are measured; unlike save_settings, the connection is left alone.
@@ -1013,6 +1035,7 @@ pub fn run() {
             adblock_presets,
             relaunch_admin,
             store_apps_loopback,
+            android_apps,
         ]);
 
     #[cfg_attr(mobile, allow(unused_mut))]
