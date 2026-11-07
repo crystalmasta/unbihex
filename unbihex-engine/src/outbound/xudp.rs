@@ -10,8 +10,12 @@
 //!
 //! status 1 = new (first packet, with destination and global ID), 2 = keep,
 //! 3 = end, 4 = keep-alive (ignored). Address types: 1 IPv4, 2 domain, 3 IPv6.
-//! The 8-byte global ID identifies the client's UDP socket, so the server can keep
-//! one NAT mapping for it (full-cone NAT: games, voice calls).
+//! The 8-byte global ID is what Xray's server keys its XUDP table by, and a hit
+//! moves the upstream link to the frame that carried it. `source_id` names a
+//! local socket for the shared Mux.Cool session, which carries every destination
+//! of that socket. Each stream built here carries exactly one destination, so
+//! its ID also mixes the destination in: one ID per source would make the second
+//! stream detach the first one.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -30,7 +34,8 @@ const STATUS_KEEPALIVE: u8 = 4;
 const OPTION_DATA: u8 = 1;
 const NETWORK_UDP: u8 = 2;
 
-/// The Mux.Cool destination of an XUDP request.
+/// The Mux.Cool destination of an XUDP request. The port never reaches the
+/// wire: a Mux request carries no address, only the command.
 pub fn mux_target() -> TargetAddr {
     TargetAddr::new(Address::Domain("v1.mux.cool".into()), 666)
 }
@@ -40,19 +45,45 @@ fn process_key() -> &'static [u8; 32] {
     KEY.get_or_init(rand::random)
 }
 
-/// A stable ID for a local UDP socket, unlinkable across app restarts.
-pub fn global_id(source: Option<SocketAddr>) -> [u8; 8] {
-    let Some(src) = source else {
-        return [0; 8];
-    };
+fn keyed(salt: &[u8; 8], parts: &[&[u8]]) -> [u8; 8] {
     let Ok(mut mac) = <Hmac<Sha256> as Mac>::new_from_slice(process_key()) else {
         return [0; 8];
     };
-    mac.update(src.to_string().as_bytes());
+    mac.update(salt);
+    for part in parts {
+        mac.update(part);
+    }
     let out = mac.finalize().into_bytes();
     let mut id = [0u8; 8];
     id.copy_from_slice(&out[..8]);
     id
+}
+
+/// A stable ID for a local UDP socket, unlinkable across app restarts. Xray
+/// keys its XUDP table by this ID alone, so one source keeps one ID for every
+/// destination it talks to.
+pub fn source_id(source: Option<SocketAddr>, salt: &[u8; 8]) -> [u8; 8] {
+    match source {
+        Some(src) => keyed(salt, &[src.to_string().as_bytes()]),
+        None => [0; 8],
+    }
+}
+
+/// An ID for a stream that carries exactly one destination. Xray moves the
+/// link of an ID to the latest frame, so two such streams from one socket must
+/// not share an ID.
+pub fn destination_id(
+    source: Option<SocketAddr>,
+    dest: &TargetAddr,
+    salt: &[u8; 8],
+) -> [u8; 8] {
+    match source {
+        Some(src) => keyed(
+            salt,
+            &[src.to_string().as_bytes(), b"\0", dest.to_string().as_bytes()],
+        ),
+        None => [0; 8],
+    }
 }
 
 pub(crate) fn write_addr(out: &mut Vec<u8>, t: &TargetAddr) -> Result<()> {
@@ -102,11 +133,17 @@ pub struct XudpStream<S> {
 
 impl<S: AsyncRead + AsyncWrite> XudpStream<S> {
     /// Wraps a VLESS (Mux command) stream.
-    pub fn new(stream: S, dest: TargetAddr, source: Option<SocketAddr>) -> Self {
+    pub fn new(
+        stream: S,
+        dest: TargetAddr,
+        source: Option<SocketAddr>,
+        salt: &[u8; 8],
+    ) -> Self {
         let (r, w) = tokio::io::split(stream);
+        let gid = destination_id(source, &dest, salt);
         XudpStream {
             dest,
-            gid: global_id(source),
+            gid,
             w: Mutex::new((w, true)),
             r: Mutex::new(r),
         }
@@ -121,9 +158,11 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static> PacketStream for XudpStream<S> 
         }
         let mut w = self.w.lock().await;
         let frame = encode_packet(w.1, &self.dest, &self.gid, payload)?;
-        w.1 = false;
         w.0.write_all(&frame).await?;
         w.0.flush().await?;
+        // Only now is the `new` frame on the wire; a failed write must still
+        // open the session next time.
+        w.1 = false;
         Ok(())
     }
 
@@ -151,10 +190,9 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static> PacketStream for XudpStream<S> 
             if discard || len > buf.len() {
                 let mut sink = vec![0u8; len];
                 r.read_exact(&mut sink).await?;
-                if discard {
-                    continue;
-                }
-                return Err(Error::protocol("UDP packet larger than buffer"));
+                // A datagram the caller's buffer cannot hold is dropped, not a
+                // reason to tear down a flow that is otherwise healthy.
+                continue;
             }
             r.read_exact(&mut buf[..len]).await?;
             if len > 0 {
@@ -182,16 +220,30 @@ mod tests {
         let f = encode_packet(false, &"[::1]:5".parse().unwrap(), &[0; 8], b"zz").unwrap();
         assert_eq!(f[4], STATUS_KEEP);
         assert_eq!(f[9], 3);
-        assert_eq!(global_id(None), [0; 8]);
-        let a = global_id(Some("10.0.0.1:5000".parse().unwrap()));
-        assert_eq!(a, global_id(Some("10.0.0.1:5000".parse().unwrap())));
-        assert_ne!(a, global_id(Some("10.0.0.1:5001".parse().unwrap())));
+        let one: TargetAddr = "1.2.3.4:53".parse().unwrap();
+        let two: TargetAddr = "1.2.3.4:54".parse().unwrap();
+        let src = Some("10.0.0.1:5000".parse().unwrap());
+        let other = Some("10.0.0.1:5001".parse().unwrap());
+        let salt = [7; 8];
+        assert_eq!(source_id(None, &salt), [0; 8]);
+        assert_eq!(destination_id(None, &one, &salt), [0; 8]);
+        // One socket keeps one ID for every destination.
+        assert_eq!(source_id(src, &salt), source_id(src, &salt));
+        assert_ne!(source_id(src, &salt), source_id(other, &salt));
+        // Two clients that see the same source must not share an ID.
+        assert_ne!(source_id(src, &salt), source_id(src, &[8; 8]));
+        // A single-destination stream mixes the destination in.
+        let a = destination_id(src, &one, &salt);
+        assert_eq!(a, destination_id(src, &one, &salt));
+        assert_ne!(a, destination_id(other, &one, &salt));
+        assert_ne!(a, destination_id(src, &two, &salt));
+        assert_ne!(source_id(src, &salt), a);
     }
 
     #[tokio::test]
     async fn reads_frames_and_skips_keepalives() {
         let (client, mut server) = tokio::io::duplex(4096);
-        let x = XudpStream::new(client, "1.1.1.1:53".parse().unwrap(), None);
+        let x = XudpStream::new(client, "1.1.1.1:53".parse().unwrap(), None, &[7; 8]);
         let mut frames = Vec::new();
         frames.extend_from_slice(&[0, 4, 0, 0, STATUS_KEEPALIVE, 0]);
         frames.extend_from_slice(&[0, 4, 0, 0, STATUS_KEEPALIVE, OPTION_DATA, 0, 2, 7, 7]);

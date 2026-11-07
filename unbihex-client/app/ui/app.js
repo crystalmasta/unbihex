@@ -430,6 +430,9 @@ function fillSettings() {
   $("#lan-auth").hidden = !s.allow_lan;
   f.dns_upstream.value = s.dns_upstream.join(", ");
   f.mtu.value = s.mtu;
+  // An older settings object has no `mux`; the engine defaults it on, so an
+  // unticked box must not silently turn it off.
+  f.udp_mux.checked = s.mux !== false;
   f.user_agent.value = s.user_agent;
   f.auto_select.value = s.auto_select || "off";
   f.auto_group.value = s.auto_group || "subscription";
@@ -520,6 +523,7 @@ function readSettings() {
     lan_password: f.lan_password.value,
     dns_upstream: f.dns_upstream.value.split(/[\s,;]+/).filter(Boolean),
     mtu: Math.min(9000, Math.max(1280, parseInt(f.mtu.value, 10) || 1500)),
+    mux: f.udp_mux.checked,
     user_agent: f.user_agent.value.trim(),
     auto_select: f.auto_select.value,
     auto_group: f.auto_group.value,

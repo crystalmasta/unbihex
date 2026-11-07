@@ -73,7 +73,9 @@ async fn default_interface_must_exist() {
         "lo0"
     });
     if let Ok(lo) = lo {
-        let inst = Instance::start(cfg(&lo.name), PlatformHooks::default()).await.unwrap();
+        let inst = Instance::start(cfg(&lo.name), PlatformHooks::default())
+            .await
+            .unwrap();
         inst.shutdown().await;
     }
 }
@@ -140,7 +142,10 @@ async fn socks_to_vless_plain_tcp_and_udp() {
         },
         None,
         Default::default(),
-    );
+    )
+    // This mock speaks plain VLESS UDP, not Mux.Cool; the mux path is covered
+    // by the Xray interop tests and the mux unit tests.
+    .with_mux(false);
     let sess = Session {
         network: Network::Udp,
         source: None,
@@ -158,6 +163,54 @@ async fn socks_to_vless_plain_tcp_and_udp() {
             .unwrap();
         assert_eq!(&buf[..n], msg);
     }
+}
+
+#[tokio::test]
+async fn vless_udp_falls_back_when_the_server_has_no_mux() {
+    // The mock closes the Mux.Cool connection; the outbound must remember that
+    // and carry the next flow over plain VLESS UDP.
+    let vless = vless_server().await;
+    let udp_echo = udp_echo().await;
+    let ob = VlessOutbound::from_parts(
+        "proxy",
+        *uuid::Uuid::parse_str(UUID).unwrap().as_bytes(),
+        ServerEndpoint {
+            host: "127.0.0.1".into(),
+            port: vless.port(),
+            addrs: vec![vless],
+        },
+        None,
+        Default::default(),
+    );
+    let sess = Session {
+        network: Network::Udp,
+        source: None,
+        target: udp_echo.into(),
+        inbound_tag: "t".into(),
+        sniffed: None,
+    };
+    let mut buf = [0u8; 1500];
+    let first = ob.connect_udp(&sess).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_millis(500), async {
+        let _ = first.send(b"x").await;
+        first.recv(&mut buf).await
+    })
+    .await;
+    drop(first);
+
+    let mut ok = false;
+    for _ in 0..20 {
+        if let Ok(ps) = ob.connect_udp(&sess).await
+            && ps.send(b"fallback").await.is_ok()
+            && let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(2), ps.recv(&mut buf)).await
+            && &buf[..n] == b"fallback"
+        {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(ok, "plain VLESS UDP took over after the mux rejection");
 }
 
 #[tokio::test]
@@ -499,7 +552,8 @@ async fn hot_reload_keeps_open_connections_and_switches_new_ones() {
     let mut s = TcpStream::connect(proxy_addr(port)).await.unwrap();
     let target: unbihex_engine::address::TargetAddr = echo.into();
     let mut buf = [0u8; 1];
-    let refused = match unbihex_engine::outbound::socks::socks5_connect(&mut s, &target, None).await {
+    let refused = match unbihex_engine::outbound::socks::socks5_connect(&mut s, &target, None).await
+    {
         Err(_) => true,
         Ok(()) => {
             s.write_all(b"x").await.ok();
@@ -516,7 +570,11 @@ async fn hot_reload_keeps_open_connections_and_switches_new_ones() {
 
     // Changing inbounds needs a restart and leaves everything as it was.
     let other = config("block").replace(&port.to_string(), &free_port().to_string());
-    assert!(inst.reload(Config::from_json(&other).unwrap()).await.is_err());
+    assert!(
+        inst.reload(Config::from_json(&other).unwrap())
+            .await
+            .is_err()
+    );
     let mut s = socks_connect(proxy_addr(port), &echo.to_string()).await;
     assert_eq!(echo_roundtrip(&mut s, b"four").await, b"four");
     inst.shutdown().await;
@@ -567,7 +625,11 @@ async fn loopback_clients_skip_auth_only_when_allowed() {
             .unwrap();
         assert_eq!(echo_roundtrip(&mut s, b"authed").await, b"authed");
 
-        let want: &[u8] = if skip { b"HTTP/1.1 200" } else { b"HTTP/1.1 407" };
+        let want: &[u8] = if skip {
+            b"HTTP/1.1 200"
+        } else {
+            b"HTTP/1.1 407"
+        };
         assert_eq!(http_connect_status(hp, echo, "").await, want);
         let auth = "Proxy-Authorization: Basic YWxpY2U6czNjcmV0\r\n";
         assert_eq!(http_connect_status(hp, echo, auth).await, b"HTTP/1.1 200");

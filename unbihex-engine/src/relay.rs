@@ -125,40 +125,139 @@ where
     }
 }
 
-async fn pump(
+/// Which side of a pump failed: the stream being read (`Source`) or the one
+/// being written (`Sink`). A `Sink` failure upstream and a `Source` failure
+/// downstream both mean the far side is gone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Source,
+    Sink,
+}
+
+/// The last datagram written upstream. A retry sends it again, so a transport
+/// that rejects the flow does not eat the packet that discovered the rejection.
+#[derive(Default)]
+struct Inflight(parking_lot::Mutex<Option<Vec<u8>>>);
+
+/// Reads from the application and writes to the far side, remembering each
+/// datagram until the flow ends.
+async fn pump_up(
     from: &dyn PacketStream,
     to: &dyn PacketStream,
     act: &Activity,
     counter: &AtomicU64,
-) -> crate::error::Result<()> {
+    inflight: &Inflight,
+) -> Result<(), Side> {
     let mut buf = vec![0u8; UDP_BUF];
     loop {
-        let n = from.recv(&mut buf).await?;
+        let n = from.recv(&mut buf).await.map_err(|_| Side::Source)?;
         act.touch();
-        to.send(&buf[..n]).await?;
+        {
+            // Keep the datagram, reusing the buffer: a retry may need it, and a
+            // per-packet allocation would be paid on every UDP flow.
+            let mut slot = inflight.0.lock();
+            let kept = slot.get_or_insert_with(Vec::new);
+            kept.clear();
+            kept.extend_from_slice(&buf[..n]);
+        }
+        to.send(&buf[..n]).await.map_err(|_| Side::Sink)?;
         counter.fetch_add(n as u64, Ordering::Relaxed);
     }
 }
 
+async fn pump_down(
+    from: &dyn PacketStream,
+    to: &dyn PacketStream,
+    act: &Activity,
+    counter: &AtomicU64,
+) -> Result<(), Side> {
+    let mut buf = vec![0u8; UDP_BUF];
+    loop {
+        let n = from.recv(&mut buf).await.map_err(|_| Side::Source)?;
+        act.touch();
+        to.send(&buf[..n]).await.map_err(|_| Side::Sink)?;
+        counter.fetch_add(n as u64, Ordering::Relaxed);
+    }
+}
+
+/// How a UDP relay ended.
+pub struct UdpOutcome {
+    /// Bytes that came back from the far side. Zero means the far side never
+    /// answered, which is how a transport that cannot carry this flow shows up.
+    pub down_bytes: u64,
+    /// The far side failed before it answered: the flow is worth retrying over
+    /// another path.
+    pub remote_error: bool,
+    /// Nothing moved for the idle timeout.
+    pub idle: bool,
+    /// The datagram the retry must send first. Present only when the far side
+    /// failed before answering and the application's packet was never served.
+    pub replay: Option<Vec<u8>>,
+}
+
 /// Relays datagrams in both directions until either side fails or nothing moves for `idle`.
+/// `resend` is a datagram from a previous, failed attempt; it goes out first.
 pub async fn relay_udp(
     a: &dyn PacketStream,
     b: &dyn PacketStream,
     idle: Duration,
     up_count: &AtomicU64,
     down_count: &AtomicU64,
-) {
+    resend: Option<&[u8]>,
+) -> UdpOutcome {
     let act = Activity::new();
-    tokio::select! {
-        r = pump(a, b, &act, up_count) => if let Err(e) = r { tracing::trace!("udp relay up ended: {e}") },
-        r = pump(b, a, &act, down_count) => if let Err(e) = r { tracing::trace!("udp relay down ended: {e}") },
-        _ = act.wait_idle(idle) => tracing::trace!("udp relay idle"),
+    let up_local = AtomicU64::new(0);
+    let down_local = AtomicU64::new(0);
+    let inflight = Inflight::default();
+    let mut outcome = UdpOutcome {
+        down_bytes: 0,
+        remote_error: false,
+        idle: false,
+        replay: None,
+    };
+    *inflight.0.lock() = resend.map(<[u8]>::to_vec);
+    if let Some(datagram) = resend
+        && b.send(datagram).await.is_err()
+    {
+        outcome.remote_error = true;
+        outcome.replay = inflight.0.lock().take();
+        return outcome;
     }
+    tokio::select! {
+        r = pump_up(a, b, &act, &up_local, &inflight) => match r {
+            Err(Side::Source) => tracing::trace!("udp relay up ended at the application"),
+            Err(Side::Sink) => {
+                tracing::trace!("udp relay up ended at the far side");
+                outcome.remote_error = true;
+            }
+            Ok(()) => {}
+        },
+        r = pump_down(b, a, &act, &down_local) => match r {
+            Err(Side::Source) => {
+                tracing::trace!("udp relay down ended at the far side");
+                outcome.remote_error = true;
+            }
+            Err(Side::Sink) => tracing::trace!("udp relay down ended at the application"),
+            Ok(()) => {}
+        },
+        _ = act.wait_idle(idle) => {
+            tracing::trace!("udp relay idle");
+            outcome.idle = true;
+        }
+    }
+    outcome.down_bytes = down_local.load(Ordering::Relaxed);
+    if outcome.remote_error && outcome.down_bytes == 0 {
+        outcome.replay = inflight.0.lock().take();
+    }
+    up_count.fetch_add(up_local.load(Ordering::Relaxed), Ordering::Relaxed);
+    down_count.fetch_add(down_local.load(Ordering::Relaxed), Ordering::Relaxed);
+    outcome
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     static UP: AtomicU64 = AtomicU64::new(0);
     static DOWN: AtomicU64 = AtomicU64::new(0);
@@ -188,6 +287,115 @@ mod tests {
         cr.read_to_end(&mut back).await.unwrap();
         assert_eq!(back, b"pong");
         assert_eq!(relay.await.unwrap().unwrap(), (4, 4));
+    }
+
+    /// An application with one datagram to send that then waits for a reply.
+    struct OneDatagram(AtomicBool);
+
+    #[async_trait::async_trait]
+    impl PacketStream for OneDatagram {
+        async fn send(&self, _: &[u8]) -> crate::error::Result<()> {
+            Ok(())
+        }
+        async fn recv(&self, buf: &mut [u8]) -> crate::error::Result<usize> {
+            if self.0.swap(true, Ordering::Relaxed) {
+                std::future::pending::<()>().await;
+            }
+            buf[..1].copy_from_slice(b"q");
+            Ok(1)
+        }
+    }
+
+    /// A far side that takes datagrams and then closes, like a server that does
+    /// not implement the multiplexer.
+    struct Rejecting(parking_lot::Mutex<Vec<Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl PacketStream for Rejecting {
+        async fn send(&self, payload: &[u8]) -> crate::error::Result<()> {
+            self.0.lock().push(payload.to_vec());
+            Ok(())
+        }
+        async fn recv(&self, _: &mut [u8]) -> crate::error::Result<usize> {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Err(crate::error::Error::protocol("stream closed"))
+        }
+    }
+
+    /// A far side that accepts datagrams and never answers.
+    struct Silent(parking_lot::Mutex<Vec<Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl PacketStream for Silent {
+        async fn send(&self, payload: &[u8]) -> crate::error::Result<()> {
+            self.0.lock().push(payload.to_vec());
+            Ok(())
+        }
+        async fn recv(&self, _: &mut [u8]) -> crate::error::Result<usize> {
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_flow_hands_the_datagram_back() {
+        static U: AtomicU64 = AtomicU64::new(0);
+        static D: AtomicU64 = AtomicU64::new(0);
+        let app = OneDatagram(AtomicBool::new(false));
+        let remote = Rejecting(parking_lot::Mutex::new(Vec::new()));
+        let out = relay_udp(&app, &remote, Duration::from_secs(300), &U, &D, None).await;
+        assert!(out.remote_error, "the far side failed, not the application");
+        assert_eq!(out.down_bytes, 0);
+        assert_eq!(
+            out.replay.as_deref(),
+            Some(&b"q"[..]),
+            "the datagram that found the rejection must come back for the retry"
+        );
+        assert_eq!(remote.0.lock().as_slice(), [b"q".to_vec()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_application_failure_is_not_a_remote_failure() {
+        static U: AtomicU64 = AtomicU64::new(0);
+        static D: AtomicU64 = AtomicU64::new(0);
+        struct Gone;
+        #[async_trait::async_trait]
+        impl PacketStream for Gone {
+            async fn send(&self, _: &[u8]) -> crate::error::Result<()> {
+                Ok(())
+            }
+            async fn recv(&self, _: &mut [u8]) -> crate::error::Result<usize> {
+                Err(crate::error::Error::protocol("tun closed"))
+            }
+        }
+        let app = Gone;
+        let remote = Silent(parking_lot::Mutex::new(Vec::new()));
+        let out = relay_udp(&app, &remote, Duration::from_secs(300), &U, &D, None).await;
+        assert!(!out.remote_error, "a closed application is not a retry reason");
+        assert!(out.replay.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_sends_the_lost_datagram_first() {
+        static U: AtomicU64 = AtomicU64::new(0);
+        static D: AtomicU64 = AtomicU64::new(0);
+        let app = OneDatagram(AtomicBool::new(true));
+        let remote = Silent(parking_lot::Mutex::new(Vec::new()));
+        let out = relay_udp(
+            &app,
+            &remote,
+            Duration::from_millis(100),
+            &U,
+            &D,
+            Some(b"q"),
+        )
+        .await;
+        assert_eq!(
+            remote.0.lock().as_slice(),
+            [b"q".to_vec()],
+            "the plain path must receive the datagram the mux path ate"
+        );
+        assert!(out.idle);
     }
 
     #[tokio::test(start_paused = true)]

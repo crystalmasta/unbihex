@@ -182,6 +182,7 @@
             </label>
             <p class="hint">Адрес <code>1.1.1.1</code> или <code>1.1.1.1:53</code> — обычный DNS, <code>https://сервер/dns-query</code> — DNS через HTTPS, <code>tls://сервер</code> — DNS через TLS (сертификат проверяется). Зашифрованные запросы идут тем же маршрутом, что и обычные: при «Всё через VPN» — через сервер. Имя DoH/DoT-сервера узнаётся у серверов из списка, заданных IP-адресом, а без них — у Cloudflare и Google через HTTPS.</p>
             <label>MTU туннеля<input name="mtu" type="number" min="1280" max="9000" /></label>
+            <label class="check"><input name="udp_mux" type="checkbox" /> UDP через Mux.Cool — только для VLESS без Vision; в XHTTP и Vision не действует</label>
           </fieldset>
           <fieldset>
             <legend>Автовыбор сервера</legend>

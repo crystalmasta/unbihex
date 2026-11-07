@@ -351,6 +351,7 @@ impl Dispatcher {
 
     async fn dispatch_tcp_with(&self, mut sess: Session, mut inbound: BoxStream, sniff: bool) {
         let Some(_permit) = self.acquire() else {
+            tracing::debug!("{} tcp {}: connection limit reached", sess.inbound_tag, sess.target);
             return;
         };
         if let Err(e) = self.restore_fake_ip(&mut sess) {
@@ -450,44 +451,74 @@ impl Dispatcher {
     /// Handles one UDP flow until it is idle or fails.
     pub async fn dispatch_udp(&self, mut sess: Session, inbound: Box<dyn PacketStream>) {
         let Some(_permit) = self.acquire() else {
+            tracing::debug!("{} udp {}: connection limit reached", sess.inbound_tag, sess.target);
             return;
         };
         if let Err(e) = self.restore_fake_ip(&mut sess) {
             tracing::debug!("{} udp {}: {e}", sess.inbound_tag, sess.target);
             return;
         }
-        let (ob, remote) =
-            match tokio::time::timeout(self.handshake_timeout(), self.open_udp(&sess)).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    tracing::debug!("{} udp {}: {e}", sess.inbound_tag, sess.target);
-                    return;
-                }
-                Err(_) => {
-                    tracing::debug!(
-                        "{} udp {}: connect timed out",
-                        sess.inbound_tag,
-                        sess.target
-                    );
-                    return;
-                }
-            };
-        tracing::debug!(
-            "{} udp {} -> {} via {}",
-            sess.inbound_tag,
-            sess.source.map(|s| s.to_string()).unwrap_or_default(),
-            sess.target,
-            ob.tag()
-        );
-        let (up, down) = self.counters.pair(ob.is_direct());
-        relay_udp(
-            inbound.as_ref(),
-            remote.as_ref(),
-            Duration::from_secs(self.limits.udp_idle_secs),
-            up,
-            down,
-        )
-        .await;
+        let mut attempt = 0;
+        // Set when a retry must send the datagram the failed attempt ate.
+        let mut replay: Option<Vec<u8>> = None;
+        loop {
+            let setup_started = std::time::Instant::now();
+            let (ob, remote) =
+                match tokio::time::timeout(self.handshake_timeout(), self.open_udp(&sess)).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        tracing::debug!("{} udp {}: {e}", sess.inbound_tag, sess.target);
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            "{} udp {}: connect timed out",
+                            sess.inbound_tag,
+                            sess.target
+                        );
+                        return;
+                    }
+                };
+            tracing::debug!(
+                "{} udp {} -> {} via {} opened in {:?}",
+                sess.inbound_tag,
+                sess.source.map(|s| s.to_string()).unwrap_or_default(),
+                sess.target,
+                ob.tag(),
+                setup_started.elapsed()
+            );
+            let (up, down) = self.counters.pair(ob.is_direct());
+            let outcome = relay_udp(
+                inbound.as_ref(),
+                remote.as_ref(),
+                Duration::from_secs(self.limits.udp_idle_secs),
+                up,
+                down,
+                replay.as_deref(),
+            )
+            .await;
+            // A multiplexer that the server does not implement closes the far
+            // side before delivering anything; retry this flow on the plain
+            // stream path. A failure on the application side is not a reason to
+            // dial again.
+            if attempt == 0
+                && outcome.remote_error
+                && outcome.down_bytes == 0
+                && !outcome.idle
+                && ob.udp_retry_legacy()
+            {
+                attempt = 1;
+                replay = outcome.replay;
+                tracing::debug!(
+                    "{} udp {}: no reply through the multiplexer, retrying plain (replay: {})",
+                    sess.inbound_tag,
+                    sess.target,
+                    replay.as_ref().map_or(0, Vec::len)
+                );
+                continue;
+            }
+            break;
+        }
     }
 }
 

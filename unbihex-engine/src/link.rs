@@ -350,6 +350,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
         fragment,
         xhttp,
         ws,
+        mux: true,
     };
     cfg.check_flow()?;
     Ok(OutboundConfig::Vless(cfg))
