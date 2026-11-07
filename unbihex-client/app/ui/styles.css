@@ -209,7 +209,28 @@ textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consola
 .sub-links a { color: var(--accent); cursor: pointer; text-decoration: none; }
 
 /* Settings */
+.tabs {
+  display: flex; gap: 6px; overflow-x: auto; margin: 0 0 14px; padding: 2px 2px 4px;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab {
+  flex: none; border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  padding: 7px 14px; border-radius: 999px; cursor: pointer; white-space: nowrap; font-size: 13px;
+}
+.tab:hover { color: var(--text); border-color: var(--accent); }
+.tab.active { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 600; }
+.tab-off { display: none !important; }
 .settings { display: grid; gap: 14px; }
+.lbl { display: flex; align-items: center; gap: 2px; }
+.info-btn {
+  border: 0; background: none; color: var(--muted); cursor: pointer; flex: none;
+  font-size: 16px; line-height: 1; padding: 2px 6px; margin: -2px 0; border-radius: 8px;
+}
+.info-btn:hover, .info-btn[aria-expanded=true] { color: var(--accent); }
+.info-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+legend .info-btn { vertical-align: middle; }
+.info { margin: 0; background: var(--surface-2); color: var(--muted); font-size: 13px; border-radius: 10px; padding: 8px 10px; }
 fieldset { border: 0; margin: 0; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
 legend { font-weight: 600; padding: 0; float: left; width: 100%; margin-bottom: 4px; }
 fieldset > legend + * { clear: both; }
@@ -222,7 +243,7 @@ label.check input { width: 18px; height: 18px; margin: 1px 0 0; flex: none; acce
 .lan-auth { display: grid; gap: 10px; }
 .lan-auth .hint { margin: 0; }
 .lan-auth input[readonly] { background: var(--surface-2); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px; }
-.about-card { margin-top: 14px; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
+.about-card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
 .about-head { font-size: 14px; font-weight: 600; margin: 0; }
 .about-row { display: flex; align-items: flex-start; gap: 14px; }
 .about-logo { width: 48px; height: 48px; flex: none; }

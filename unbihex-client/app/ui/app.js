@@ -441,6 +441,35 @@ function openSubDialog(id) {
 
 // ------------------------------------------------------------------ settings
 
+// The open settings tab, kept between launches where the WebView allows storage.
+let settingsTab = (() => {
+  try {
+    return localStorage.getItem("settings-tab") || "general";
+  } catch {
+    return "general";
+  }
+})();
+
+// Shows one tab's sections; a hidden tab (Android-only on a desktop) falls back to the first.
+function showSettingsTab(name) {
+  const tabs = $$("#settings-tabs .tab");
+  if (!tabs.some((t) => t.dataset.tab === name && !t.hidden)) name = "general";
+  settingsTab = name;
+  try {
+    localStorage.setItem("settings-tab", name);
+  } catch {}
+  for (const t of tabs) {
+    const on = t.dataset.tab === name;
+    t.classList.toggle("active", on);
+    t.setAttribute("aria-selected", String(on));
+    if (on) t.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  for (const el of $$("#view-settings [data-tab]:not(.tab)")) {
+    el.classList.toggle("tab-off", el.dataset.tab !== name);
+  }
+  $("#settings-actions").classList.toggle("tab-off", name === "about");
+}
+
 function fillSettings() {
   const f = $("#settings-form");
   const s = S.data.settings;
@@ -476,6 +505,8 @@ function fillSettings() {
   f.android_apps_mode.value = s.android_apps_mode || "all";
   f.tls_fingerprint.value = s.tls_fingerprint || "";
   $("#android-apps").hidden = S.platform !== "android";
+  $("#tab-apps").hidden = S.platform !== "android";
+  showSettingsTab(settingsTab);
   appsCount();
   f.log_level.value = s.log_level;
   f.geosite_url.value = s.geosite_url;
@@ -844,6 +875,27 @@ function bind() {
       refresh();
     } catch {}
   });
+
+  $("#settings-tabs").addEventListener("click", (e) => {
+    const t = e.target.closest(".tab");
+    if (t) showSettingsTab(t.dataset.tab);
+  });
+  // ⓘ opens a setting's description (a tap, not a hover: phones have no hover).
+  $("#view-settings").addEventListener("click", (e) => {
+    const b = e.target.closest(".info-btn");
+    if (!b) return;
+    // Inside a label the tap must not tick its checkbox.
+    e.preventDefault();
+    const el = document.getElementById(b.dataset.info);
+    if (!el) return;
+    el.hidden = !el.hidden;
+    b.setAttribute("aria-expanded", String(!el.hidden));
+  });
+  // A field that fails validation on another tab: open that tab so it can be shown.
+  $("#settings-form").addEventListener("invalid", (e) => {
+    const section = e.target.closest("[data-tab]");
+    if (section && section.classList.contains("tab-off")) showSettingsTab(section.dataset.tab);
+  }, true);
 
   $("#settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
