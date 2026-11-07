@@ -27,6 +27,10 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   and others) give an Xray JSON, and the same device data, so no extra device shows up in the panel. If JSON comes
   back, its servers are used (with the transport `headers`), and later updates ask for it right away. A
   subscription's own User-Agent is sent as is, without the second request.
+  A subscription is fetched directly, outside the VPN. When its server cannot be reached that way (say, a mobile
+  carrier lets through only allowed addresses, the VPN server among them) and the VPN is connected, an `https://`
+  request is repeated through the current server (with auto-select, the one working now) with the same headers;
+  the log shows `subscription: fetched through the proxy …`.
   Subscriptions and rule databases are downloaded over `https://` only; `http://` is allowed just for addresses
   of this computer and the local network (`127.0.0.1`, `localhost`, `192.168.x.x` and so on), and redirects to
   `http://` on the internet are refused. A subscription response is at most 8 MB, a database file at most 256 MB

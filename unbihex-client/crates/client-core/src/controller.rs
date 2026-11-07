@@ -165,6 +165,19 @@ impl Controller {
         self.running.lock().await.is_some()
     }
 
+    /// The connected server as a way for the app's own requests (subscriptions
+    /// where only the server is reachable directly); auto-select goes through
+    /// the group's current server. `None` when nothing runs here.
+    pub async fn tunnel(&self) -> Option<crate::subscription::Tunnel> {
+        let outbound = {
+            let guard = self.running.lock().await;
+            guard.as_ref()?.instance.as_ref()?.outbound("proxy")?
+        };
+        let status = self.status().await;
+        let name = status.auto_server.or(status.info.map(|i| i.server_name)).unwrap_or_default();
+        Some(crate::subscription::Tunnel::through(outbound, name))
+    }
+
     /// Current state and traffic counters.
     pub async fn status(&self) -> Status {
         let guard = self.running.lock().await;

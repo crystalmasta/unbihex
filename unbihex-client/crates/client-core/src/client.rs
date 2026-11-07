@@ -12,7 +12,7 @@ use crate::geo::Geo;
 use crate::links::{b64_decode, is_share_link, parse_server};
 use crate::model::{AppData, AutoGroup, Server, Settings, Subscription, now_secs};
 use crate::ping::{describe_error, measure};
-use crate::subscription::{Device, FetchOptions, JSON_USER_AGENT, fallback_name, fetch};
+use crate::subscription::{Device, FetchOptions, JSON_USER_AGENT, fallback_name, fetch_with};
 
 const STATE_FILE: &str = "state.json";
 /// Shortest LAN proxy password a user may set (generated ones are 32 characters).
@@ -223,7 +223,10 @@ impl Client {
             let retry_as_json = own.is_none() && !as_json;
             (sub.url.clone(), FetchOptions { user_agent: ua, device, retry_as_json }, as_json)
         };
-        match fetch(&url, &opts).await {
+        // Mobile whitelists may let through only the VPN server: then the panel is
+        // asked again through it.
+        let tunnel = self.controller.tunnel().await;
+        match fetch_with(&url, &opts, tunnel.as_ref()).await {
             Ok(f) => {
                 let mut servers = Vec::new();
                 for link in &f.links {

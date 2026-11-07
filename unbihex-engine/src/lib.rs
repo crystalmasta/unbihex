@@ -361,6 +361,12 @@ impl Instance {
         out
     }
 
+    /// The outbound with `tag` (after the last hot reload): lets the app send its
+    /// own requests through the connected server, a balancer through its current member.
+    pub fn outbound(&self, tag: &str) -> Option<Arc<dyn outbound::Outbound>> {
+        self.dispatcher.outbound(tag)
+    }
+
     /// Live traffic counters.
     pub fn counters(&self) -> Arc<stats::Counters> {
         self.counters.clone()

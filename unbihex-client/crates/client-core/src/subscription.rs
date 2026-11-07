@@ -4,10 +4,17 @@
 //! usually base64-encoded as a whole. Panels (Marzban, Remnawave, 3x-ui, …) add
 //! headers with the title, traffic quota and update interval.
 
-use std::net::IpAddr;
+use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use unbihex_engine::address::TargetAddr;
+use unbihex_engine::outbound::{BoxStream, Outbound};
+use unbihex_engine::session::{Network, Session};
 use url::{Host, Url};
 
 use crate::error::{ClientError, Result};
@@ -280,16 +287,191 @@ fn needs_json(links: &[String]) -> bool {
     })
 }
 
-/// Downloads and parses a subscription. With `retry_as_json`, when the panel sent
-/// share links and some of them use WebSocket, HTTPUpgrade or XHTTP, asks once more
-/// with [`JSON_USER_AGENT`] and the same device headers (the panel sees the same
-/// device) and takes the answer if it is JSON; otherwise keeps the links.
+const NO_CONNECT: &str = "не удалось подключиться к серверу подписки";
+const NO_ANSWER: &str = "сервер подписки не ответил вовремя";
+
+/// Opens a TCP stream to a target through the connected server.
+pub type Dial =
+    Arc<dyn Fn(TargetAddr) -> Pin<Box<dyn Future<Output = std::result::Result<BoxStream, String>> + Send>> + Send + Sync>;
+
+/// The connected server, for a subscription host the device cannot reach
+/// directly: mobile networks in "whitelist" mode let through only allowed
+/// addresses, the VPN server among them, but not the panel.
+#[derive(Clone)]
+pub struct Tunnel {
+    /// Server name, for the log.
+    pub name: String,
+    /// Opens streams through the server.
+    pub dial: Dial,
+}
+
+impl Tunnel {
+    /// Through an engine outbound: the running instance's `proxy` (a balancer
+    /// picks its current member for each stream).
+    pub fn through(outbound: Arc<dyn Outbound>, name: String) -> Tunnel {
+        let dial: Dial = Arc::new(move |target| {
+            let outbound = outbound.clone();
+            Box::pin(async move {
+                let sess = Session {
+                    network: Network::Tcp,
+                    source: None,
+                    target,
+                    inbound_tag: "subscription".into(),
+                    sniffed: None,
+                };
+                outbound.connect_tcp(&sess).await.map_err(|e| e.to_string())
+            })
+        });
+        Tunnel { name, dial }
+    }
+}
+
+const PROXY_USER: &str = "unbihex";
+
+/// An HTTP CONNECT proxy on 127.0.0.1 for one subscription request: reqwest keeps
+/// its TLS, headers, redirects and limits, the streams go through a [`Tunnel`].
+/// A random password keeps other programs out; it stops when dropped.
+struct LocalProxy {
+    port: u16,
+    password: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LocalProxy {
+    async fn start(tunnel: Tunnel) -> std::io::Result<LocalProxy> {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let port = listener.local_addr()?.port();
+        let password = uuid::Uuid::new_v4().simple().to_string();
+        let auth = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{PROXY_USER}:{password}"))
+        );
+        let task = tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                let (tunnel, auth) = (tunnel.clone(), auth.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = serve_connect(conn, &tunnel, &auth).await {
+                        tracing::debug!("subscription: proxy through {}: {e}", tunnel.name);
+                    }
+                });
+            }
+        });
+        Ok(LocalProxy { port, password, task })
+    }
+
+    fn proxy(&self) -> reqwest::Result<reqwest::Proxy> {
+        Ok(reqwest::Proxy::all(format!("http://127.0.0.1:{}", self.port))?.basic_auth(PROXY_USER, &self.password))
+    }
+}
+
+impl Drop for LocalProxy {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// One `CONNECT host:port` from reqwest: checks the password, dials through the
+/// tunnel and relays.
+async fn serve_connect(
+    mut conn: tokio::net::TcpStream,
+    tunnel: &Tunnel,
+    auth: &str,
+) -> std::result::Result<(), String> {
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    let end = loop {
+        let n = conn.read(&mut buf).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("closed before the request".into());
+        }
+        head.extend_from_slice(&buf[..n]);
+        if let Some(i) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        if head.len() > 8192 {
+            return Err("request head too large".into());
+        }
+    };
+    let text = String::from_utf8_lossy(&head[..end]).into_owned();
+    let mut lines = text.split("\r\n");
+    let request: Vec<&str> = lines.next().unwrap_or_default().split(' ').collect();
+    let authorized = lines
+        .filter_map(|l| l.split_once(':'))
+        .any(|(k, v)| k.trim().eq_ignore_ascii_case("proxy-authorization") && v.trim() == auth);
+    let reply = |status: &str| format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let target = match request[..] {
+        ["CONNECT", target, _] if authorized => target,
+        ["CONNECT", ..] => {
+            let _ = conn.write_all(reply("407 Proxy Authentication Required").as_bytes()).await;
+            return Err("wrong proxy password".into());
+        }
+        _ => {
+            let _ = conn.write_all(reply("405 Method Not Allowed").as_bytes()).await;
+            return Err("not a CONNECT request".into());
+        }
+    };
+    let target: TargetAddr = target.parse().map_err(|e: unbihex_engine::Error| e.to_string())?;
+    let mut remote = match (tunnel.dial)(target).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = conn.write_all(reply("502 Bad Gateway").as_bytes()).await;
+            return Err(e);
+        }
+    };
+    conn.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.map_err(|e| e.to_string())?;
+    if end < head.len() {
+        remote.write_all(&head[end..]).await.map_err(|e| e.to_string())?;
+    }
+    tokio::io::copy_bidirectional(&mut conn, &mut remote).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Downloads and parses a subscription directly, see [`fetch_with`].
 pub async fn fetch(url: &str, opts: &FetchOptions) -> Result<Fetched> {
-    let first = fetch_as(url, opts, &opts.user_agent).await?;
+    fetch_with(url, opts, None).await
+}
+
+/// Downloads and parses a subscription. An https subscription the device cannot
+/// reach directly is asked again through `tunnel` (the connected server), with
+/// the same headers and the same JSON retry.
+pub async fn fetch_with(url: &str, opts: &FetchOptions, tunnel: Option<&Tunnel>) -> Result<Fetched> {
+    let direct = fetch_route(url, opts, None).await;
+    let https = url.trim().get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+    let Some(tunnel) = tunnel.filter(|_| https) else {
+        return direct;
+    };
+    match direct {
+        Err(ClientError::Subscription(e)) if e == NO_CONNECT || e == NO_ANSWER => {
+            tracing::info!("subscription: direct request failed ({e}); retrying through the proxy {}", tunnel.name);
+        }
+        other => return other,
+    }
+    let proxy = LocalProxy::start(tunnel.clone())
+        .await
+        .map_err(|e| ClientError::Subscription(format!("локальный прокси для подписки: {e}")))?;
+    match fetch_route(url, opts, Some(&proxy)).await {
+        Ok(f) => {
+            tracing::info!("subscription: fetched through the proxy {}", tunnel.name);
+            Ok(f)
+        }
+        Err(ClientError::Subscription(e)) => {
+            tracing::info!("subscription: through the proxy {} too: {e}", tunnel.name);
+            Err(ClientError::Subscription(format!("{e} (ни напрямую, ни через сервер «{}»)", tunnel.name)))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// With `retry_as_json`, when the panel sent share links and some of them use
+/// WebSocket, HTTPUpgrade or XHTTP, asks once more with [`JSON_USER_AGENT`] and
+/// the same device headers (the panel sees the same device) and takes the answer
+/// if it is JSON; otherwise keeps the links.
+async fn fetch_route(url: &str, opts: &FetchOptions, proxy: Option<&LocalProxy>) -> Result<Fetched> {
+    let first = fetch_as(url, opts, &opts.user_agent, proxy).await?;
     if !opts.retry_as_json || first.json || !needs_json(&first.links) {
         return Ok(first);
     }
-    match fetch_as(url, opts, JSON_USER_AGENT).await {
+    match fetch_as(url, opts, JSON_USER_AGENT, proxy).await {
         Ok(mut f) if f.json => {
             tracing::info!("subscription: the panel gave a JSON config for {JSON_USER_AGENT}");
             f.title = f.title.or(first.title);
@@ -307,8 +489,8 @@ pub async fn fetch(url: &str, opts: &FetchOptions) -> Result<Fetched> {
     }
 }
 
-/// One request with User-Agent `ua`.
-async fn fetch_as(url: &str, opts: &FetchOptions, ua: &str) -> Result<Fetched> {
+/// One request with User-Agent `ua`, directly or through `proxy`.
+async fn fetch_as(url: &str, opts: &FetchOptions, ua: &str, proxy: Option<&LocalProxy>) -> Result<Fetched> {
     let parsed = Url::parse(url.trim())
         .map_err(|_| ClientError::Subscription("неверный адрес подписки".into()))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -319,9 +501,12 @@ async fn fetch_as(url: &str, opts: &FetchOptions, ua: &str) -> Result<Fetched> {
     if !is_safe_url(&parsed) {
         return Err(ClientError::Subscription(INSECURE_HTTP.into()));
     }
-    let client = reqwest::Client::builder()
+    let builder = match proxy {
+        Some(p) => reqwest::Client::builder().proxy(p.proxy().map_err(|e| ClientError::Subscription(e.to_string()))?),
         // HTTP(S)_PROXY or system proxies may point at our own or a dead local port; TUN captures us when connected.
-        .no_proxy()
+        None => reqwest::Client::builder().no_proxy(),
+    };
+    let client = builder
         .user_agent(ua)
         .timeout(Duration::from_secs(25))
         .connect_timeout(Duration::from_secs(10))
@@ -347,9 +532,9 @@ async fn fetch_as(url: &str, opts: &FetchOptions, ua: &str) -> Result<Fetched> {
     }
     let resp = req.send().await.map_err(|e| {
         let msg = if e.is_timeout() {
-            "сервер подписки не ответил вовремя".to_string()
+            NO_ANSWER.to_string()
         } else if e.is_connect() {
-            "не удалось подключиться к серверу подписки".to_string()
+            NO_CONNECT.to_string()
         } else {
             request_error(&e)
         };
@@ -710,6 +895,70 @@ mod tests {
         let f = fetch(&format!("http://127.0.0.1:{port}/sub"), &o).await.unwrap();
         assert!(!f.json && f.links.len() == 1);
         assert_eq!(seen.lock().len(), 2);
+    }
+
+    /// A tunnel that records targets and sends every stream to `127.0.0.1:port`
+    /// (`None`: refuses, like a dead server).
+    fn stub_tunnel(port: Option<u16>) -> (Tunnel, Seen) {
+        let seen = Seen::default();
+        let log = seen.clone();
+        let dial: Dial = std::sync::Arc::new(move |target: TargetAddr| {
+            log.lock().push(target.to_string());
+            Box::pin(async move {
+                let port = port.ok_or_else(|| "stub refuses".to_string())?;
+                let s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.map_err(|e| e.to_string())?;
+                Ok(Box::new(s) as BoxStream)
+            })
+        });
+        (Tunnel { name: "stub".into(), dial }, seen)
+    }
+
+    #[tokio::test]
+    async fn local_proxy_connects_through_the_tunnel_only_with_its_password() {
+        let (port, seen) = panel(WS_LINK, None).await;
+        let (tunnel, targets) = stub_tunnel(Some(port));
+        let proxy = LocalProxy::start(tunnel).await.unwrap();
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!("{PROXY_USER}:{}", proxy.password));
+        for (header, ok) in [(String::new(), false), (format!("Proxy-Authorization: Basic {auth}\r\n"), true)] {
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+            let req = format!("CONNECT sub.example:443 HTTP/1.1\r\nHost: sub.example:443\r\n{header}\r\n");
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut got = Vec::new();
+            while !got.ends_with(b"\r\n\r\n") {
+                got.push(s.read_u8().await.unwrap());
+            }
+            let got = String::from_utf8_lossy(&got).into_owned();
+            if !ok {
+                assert!(got.starts_with("HTTP/1.1 407"), "{got}");
+                continue;
+            }
+            assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+            s.write_all(b"GET /sub HTTP/1.1\r\nHost: sub.example\r\nx-hwid: abc\r\n\r\n").await.unwrap();
+            let mut body = String::new();
+            s.read_to_string(&mut body).await.unwrap();
+            assert!(body.starts_with("HTTP/1.1 200") && body.contains("profile-title: Panel"), "{body}");
+        }
+        assert_eq!(*targets.lock(), ["sub.example:443"]);
+        assert!(seen.lock()[0].contains("x-hwid: abc"));
+    }
+
+    #[tokio::test]
+    async fn unreachable_https_is_retried_through_the_tunnel() {
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let url = format!("https://127.0.0.1:{closed}/sub");
+        let (tunnel, targets) = stub_tunnel(None);
+        let e = fetch_with(&url, &opts(), Some(&tunnel)).await.unwrap_err().to_string();
+        assert!(e.contains(NO_CONNECT) && e.contains("ни напрямую, ни через сервер «stub»"), "{e}");
+        assert_eq!(*targets.lock(), [format!("127.0.0.1:{closed}")]);
+        // Without a tunnel, or for plain http, nothing more is tried.
+        let e = fetch_with(&url, &opts(), None).await.unwrap_err().to_string();
+        assert_eq!(e, format!("подписка: {NO_CONNECT}"));
+        let (tunnel, targets) = stub_tunnel(None);
+        let _ = fetch_with(&format!("http://127.0.0.1:{closed}/sub"), &opts(), Some(&tunnel)).await.unwrap_err();
+        assert!(targets.lock().is_empty());
     }
 
     #[test]

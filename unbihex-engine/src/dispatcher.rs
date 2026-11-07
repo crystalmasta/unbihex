@@ -249,6 +249,11 @@ impl Dispatcher {
         self.table.load().outbounds.values().cloned().collect()
     }
 
+    /// The outbound with `tag` new sessions would use.
+    pub fn outbound(&self, tag: &str) -> Option<Arc<dyn Outbound>> {
+        self.table.load().outbounds.get(tag).cloned()
+    }
+
     /// Replaces rules and outbounds for new sessions (hot reload).
     pub fn swap_table(&self, table: Table) {
         self.table.store(Arc::new(table));
