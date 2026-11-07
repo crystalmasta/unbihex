@@ -8,7 +8,7 @@ use std::future::Future;
 use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 
@@ -72,7 +72,8 @@ pub fn encode_request_with_flow(
         None => h.push(0),
     }
     h.push(cmd);
-    // A Mux.Cool request carries no address: each frame names its own destination.
+    // Xray writes no address for Mux.Cool (`EncodeRequestHeader` skips it for
+    // Mux and Rvs): each frame carries its own destination.
     if cmd == CMD_MUX {
         return Ok(h);
     }
@@ -273,8 +274,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VlessStream<S> {
 }
 
 /// VLESS outbound.
-pub struct VlessOutbound {
-    tag: String,
+/// Everything needed to dial this outbound's transport. Kept apart from the
+/// outbound so a shared Mux.Cool connection can dial it from its own task
+/// without borrowing the outbound.
+#[derive(Clone)]
+struct Dialer {
     uuid: [u8; 16],
     server: ServerEndpoint,
     tls: Option<TlsClient>,
@@ -286,6 +290,19 @@ pub struct VlessOutbound {
     /// `Host` of the WebSocket request when the config names none.
     ws_host: String,
     sockets: Arc<SocketFactory>,
+}
+
+/// VLESS outbound: TCP and UDP through one server.
+pub struct VlessOutbound {
+    tag: String,
+    dialer: Dialer,
+    /// One Mux.Cool connection for UDP: destinations ride inside it instead of
+    /// dialing a TCP+TLS tunnel each. Created on the first UDP flow.
+    mux: OnceLock<super::mux::MuxClient>,
+    /// Whether UDP may use Mux.Cool; off for servers that do not implement it.
+    mux_enabled: bool,
+    /// Keeps global IDs of two outbounds that reach one server apart.
+    xudp_salt: [u8; 8],
 }
 
 impl VlessOutbound {
@@ -350,12 +367,20 @@ impl VlessOutbound {
             None => None,
         };
         let mut ob = Self::from_parts(&cfg.tag, *uuid.as_bytes(), server, tls, sockets);
-        ob.reality = reality;
-        ob.vision = cfg.is_vision();
-        ob.fragment = cfg.fragment.clone();
-        ob.xhttp = xhttp;
-        ob.ws = cfg.ws.clone();
-        ob.ws_host = super::ws::default_host(cfg.tls.as_ref(), &cfg.server);
+        ob.mux_enabled = cfg.mux;
+        ob.dialer.reality = reality;
+        ob.dialer.vision = cfg.is_vision();
+        if ob.dialer.vision && !cfg.mux {
+            tracing::warn!(
+                "outbound {}: Vision has no plain UDP, so `mux: false` cannot turn Mux.Cool \
+                 off for it; XUDP stays the only UDP path",
+                cfg.tag
+            );
+        }
+        ob.dialer.fragment = cfg.fragment.clone();
+        ob.dialer.xhttp = xhttp;
+        ob.dialer.ws = cfg.ws.clone();
+        ob.dialer.ws_host = super::ws::default_host(cfg.tls.as_ref(), &cfg.server);
         Ok(ob)
     }
 
@@ -368,32 +393,38 @@ impl VlessOutbound {
     ) -> Result<Self> {
         if let Some(t) = cfg.tls.as_ref().filter(|t| t.enabled) {
             let t = if cfg.ws.is_some() { super::ws::http1_tls(t) } else { t.clone() };
-            self.tls = Some(TlsClient::with_extra_roots(&t, &cfg.server, roots)?);
+            self.dialer.tls = Some(TlsClient::with_extra_roots(&t, &cfg.server, roots)?);
         }
         Ok(self)
     }
 
     /// Enables the Vision flow (used by tests).
     pub fn with_vision(mut self, vision: bool) -> Self {
-        self.vision = vision;
+        self.dialer.vision = vision;
         self
     }
 
     /// Fragments the ClientHello (used by tests).
     pub fn with_fragment(mut self, fragment: Option<super::fragment::FragmentConfig>) -> Self {
-        self.fragment = fragment;
+        self.dialer.fragment = fragment;
+        self
+    }
+
+    /// Enables or disables Mux.Cool for UDP (used by tests).
+    pub fn with_mux(mut self, enabled: bool) -> Self {
+        self.mux_enabled = enabled;
         self
     }
 
     /// Carries VLESS over XHTTP (used by tests).
     pub fn with_xhttp(mut self, xhttp: Option<Arc<XhttpClient>>) -> Self {
-        self.xhttp = xhttp;
+        self.dialer.xhttp = xhttp;
         self
     }
 
     /// Uses REALITY instead of TLS (used by tests).
     pub fn with_reality(mut self, reality: Option<RealityClient>) -> Self {
-        self.reality = reality;
+        self.dialer.reality = reality;
         self
     }
 
@@ -407,23 +438,41 @@ impl VlessOutbound {
     ) -> Self {
         VlessOutbound {
             tag: tag.to_string(),
-            uuid,
-            server,
-            tls,
-            reality: None,
-            vision: false,
-            fragment: None,
-            xhttp: None,
-            ws: None,
-            ws_host: String::new(),
-            sockets,
+            dialer: Dialer {
+                uuid,
+                server,
+                tls,
+                reality: None,
+                vision: false,
+                fragment: None,
+                xhttp: None,
+                ws: None,
+                ws_host: String::new(),
+                sockets,
+            },
+            mux: OnceLock::new(),
+            mux_enabled: true,
+            xudp_salt: rand::random(),
         }
     }
 
     async fn open(&self, cmd: u8, target: &TargetAddr) -> Result<BoxStream> {
+        self.dialer.open(cmd, target).await
+    }
+}
+
+impl Dialer {
+    async fn open(&self, cmd: u8, target: &TargetAddr) -> Result<BoxStream> {
         if let Some(x) = &self.xhttp {
             let header = encode_request(&self.uuid, cmd, target)?;
-            return Ok(Box::new(VlessStream::new(x.open().await?, header)));
+            // UDP streams are tiny and numerous; sharing the h2 connection
+            // saves a REALITY/TLS handshake per destination.
+            let stream = if cmd == CMD_UDP || cmd == CMD_MUX {
+                x.open_shared().await?
+            } else {
+                x.open().await?
+            };
+            return Ok(Box::new(VlessStream::new(stream, header)));
         }
         let tcp = self.server.connect(&self.sockets).await?;
         if let Some(ws) = &self.ws {
@@ -478,7 +527,7 @@ impl Outbound for VlessOutbound {
     }
 
     fn server(&self) -> Option<&ServerEndpoint> {
-        Some(&self.server)
+        Some(&self.dialer.server)
     }
 
     async fn connect_tcp(&self, sess: &Session) -> Result<BoxStream> {
@@ -486,13 +535,41 @@ impl Outbound for VlessOutbound {
     }
 
     async fn connect_udp(&self, sess: &Session) -> Result<Box<dyn PacketStream>> {
-        if self.vision {
+        // XHTTP already multiplexes over a pooled h2 connection; the other
+        // transports get one Mux.Cool connection per outbound, so several
+        // destinations do not each pay a transport handshake and share one
+        // server-side UDP socket.
+        if self.mux_enabled && self.dialer.xhttp.is_none() {
+            let mux = self.mux.get_or_init(|| {
+                let dialer = self.dialer.clone();
+                let salt = self.xudp_salt;
+                super::mux::MuxClient::with_salt(
+                    move || {
+                        let dialer = dialer.clone();
+                        async move { dialer.open(CMD_MUX, &super::xudp::mux_target()).await }
+                    },
+                    salt,
+                )
+            });
+            if !mux.is_broken() {
+                match mux.open_udp(sess.source, sess.target.clone()).await {
+                    Ok(flow) => return Ok(Box::new(flow)),
+                    // A transient dial failure falls back for this flow; a
+                    // server rejection is remembered and skips mux next time.
+                    Err(e) => {
+                        tracing::debug!("vless: mux unavailable ({e}), using plain UDP");
+                    }
+                }
+            }
+        }
+        if self.dialer.vision {
             // Like Xray: UDP of Vision users travels as XUDP inside Mux.Cool.
             let stream = self.open(CMD_MUX, &super::xudp::mux_target()).await?;
             return Ok(Box::new(super::xudp::XudpStream::new(
                 stream,
                 sess.target.clone(),
                 sess.source,
+                &self.xudp_salt,
             )));
         }
         let stream = self.open(CMD_UDP, &sess.target).await?;
@@ -501,6 +578,13 @@ impl Outbound for VlessOutbound {
             r: Mutex::new(r),
             w: Mutex::new(w),
         }))
+    }
+
+    fn udp_retry_legacy(&self) -> bool {
+        // Vision has no plain UDP: Xray rejects a UDP request that carries the
+        // Vision flow (`"xtls-rprx-vision doesn't support UDP"`), and its XUDP
+        // path is Mux.Cool again, so a retry would repeat the failed attempt.
+        self.mux_enabled && self.dialer.xhttp.is_none() && !self.dialer.vision
     }
 }
 

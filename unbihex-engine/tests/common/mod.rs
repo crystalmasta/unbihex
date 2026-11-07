@@ -96,6 +96,15 @@ async fn read_vless_request<S: AsyncRead + Unpin>(
     let mut skip = vec![0u8; addons];
     s.read_exact(&mut skip).await?;
     let cmd = s.read_u8().await?;
+    if cmd == 3 {
+        // Mux.Cool has no address in the request. This mock does not implement
+        // it, which is exactly what a server without Mux.Cool looks like.
+        return Ok((
+            uuid,
+            cmd,
+            TargetAddr::new(Address::Ip(std::net::Ipv4Addr::UNSPECIFIED.into()), 0),
+        ));
+    }
     let port = s.read_u16().await?;
     let addr = match s.read_u8().await? {
         1 => {
@@ -131,6 +140,10 @@ async fn handle_vless<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     }
     // Response header with a 3-byte addon block to exercise the client's skipping.
     if s.write_all(&[0, 3, 1, 2, 3]).await.is_err() {
+        return;
+    }
+    if cmd == 3 {
+        // No Mux.Cool here: drop the connection right away.
         return;
     }
     let dst = resolve(&target).await;

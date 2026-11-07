@@ -7,6 +7,7 @@ pub mod direct;
 pub mod fingerprint;
 pub mod fragment;
 pub mod hysteria2;
+pub(crate) mod mux;
 pub mod pq;
 pub mod reality;
 pub mod shadowsocks;
@@ -56,6 +57,11 @@ pub trait Outbound: Send + Sync {
     async fn connect_tcp(&self, sess: &Session) -> Result<BoxStream>;
     /// Opens a UDP flow to the session target.
     async fn connect_udp(&self, sess: &Session) -> Result<Box<dyn PacketStream>>;
+    /// Whether a UDP flow that failed before any reply may be retried on the
+    /// plain stream path (a server that does not implement the multiplexer).
+    fn udp_retry_legacy(&self) -> bool {
+        false
+    }
     /// The remote proxy server, if any (used to keep its traffic off the TUN).
     fn server(&self) -> Option<&ServerEndpoint> {
         None
@@ -250,6 +256,9 @@ pub async fn build_outbound(
                     v.allow_plaintext = c.allow_plaintext;
                     if v.fragment.is_none() {
                         v.fragment = c.fragment.clone();
+                    }
+                    if let Some(mux) = c.mux {
+                        v.mux = mux;
                     }
                 }
                 OutboundConfig::Vmess(v) if v.tls.is_some() && v.fragment.is_none() => {

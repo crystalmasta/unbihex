@@ -191,12 +191,6 @@ impl H2Pool {
         self.retire_idle(&mut conns);
     }
 
-    fn take(&self) -> Option<Lease> {
-        self.take_with(false)
-    }
-
-    /// `share`: past the wait, any live connection will do, even one already
-    /// carrying `maxConcurrency` sessions.
     fn take_with(&self, share: bool) -> Option<Lease> {
         let mut conns = self.conns.lock();
         conns.retain(|c| c.usable());
@@ -239,7 +233,7 @@ impl H2Pool {
     }
 
     /// Leases a connection, dialing a new one when none can be reused.
-    pub async fn get<F, Fut>(&self, dial: F) -> Result<Lease>
+    pub async fn get<F, Fut>(&self, share: bool, dial: F) -> Result<Lease>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)>>,
@@ -252,7 +246,7 @@ impl H2Pool {
             tokio::pin!(landed);
             // Registered before looking, so a dial landing in between is not missed.
             landed.as_mut().enable();
-            if let Some(l) = self.take() {
+            if let Some(l) = self.take_with(share) {
                 return Ok(l);
             }
             if self.reserve() {
@@ -356,7 +350,7 @@ mod tests {
         let pool = pool_at(8);
         let c = conn(0).await;
         pool.conns.lock().push(c);
-        assert!(pool.take().is_some());
+        assert!(pool.take_with(false).is_some());
     }
 
     /// While every connection carries a session, the pool grows: eight parallel
@@ -366,7 +360,7 @@ mod tests {
         let pool = pool_at(8);
         let c = conn(1).await;
         pool.conns.lock().push(c);
-        assert!(pool.take().is_none(), "a busy pool with room must dial");
+        assert!(pool.take_with(false).is_none(), "a busy pool with room must dial");
     }
 
     /// Connections quiet for minutes are closed in one pass: they hold sockets
@@ -380,7 +374,7 @@ mod tests {
             *c.idle_at.lock() = Instant::now().checked_sub(Duration::from_secs(age));
             pool.conns.lock().push(c);
         }
-        let _ = pool.take();
+        let _ = pool.take_with(false);
         assert_eq!(pool.len(), 2, "every connection past the idle limit is closed");
     }
 
@@ -393,7 +387,7 @@ mod tests {
             *c.idle_at.lock() = Instant::now().checked_sub(Duration::from_secs(age));
             pool.conns.lock().push(c);
         }
-        let _ = pool.take();
+        let _ = pool.take_with(false);
         assert_eq!(pool.len(), 2, "two idle connections stay warm");
     }
 
@@ -403,7 +397,7 @@ mod tests {
         let pool = pool_at(1);
         let c = conn(1).await;
         pool.conns.lock().push(c);
-        let lease = pool.take().expect("the cap is reached, so the connection is shared");
+        let lease = pool.take_with(false).expect("the cap is reached, so the connection is shared");
         assert_eq!(lease.0.open.load(Ordering::Relaxed), 2);
     }
 
@@ -418,9 +412,9 @@ mod tests {
         });
         let c = conn(1).await;
         pool.conns.lock().push(c);
-        let lease = pool.take().expect("one more session fits the connection");
+        let lease = pool.take_with(false).expect("one more session fits the connection");
         assert_eq!(lease.0.open.load(Ordering::Relaxed), 2);
-        assert!(pool.take().is_none(), "a full connection makes the pool dial");
+        assert!(pool.take_with(false).is_none(), "a full connection makes the pool dial");
     }
 
     /// Sessions waiting at the cap wake when a dial lands instead of polling.
@@ -431,7 +425,7 @@ mod tests {
         let first = {
             let pool = pool.clone();
             tokio::spawn(async move {
-                pool.get(|| async move {
+                pool.get(false, || async move {
                     let _ = rx.await;
                     let c = conn(0).await;
                     Ok((c.send.clone(), Arc::new(AtomicBool::new(false)), None))
@@ -445,7 +439,7 @@ mod tests {
         let second = {
             let pool = pool.clone();
             tokio::spawn(async move {
-                pool.get(|| async {
+                pool.get(false, || async {
                     Err(crate::error::Error::config("the second session must not dial"))
                 })
                 .await
@@ -469,7 +463,7 @@ mod tests {
             let pool = pool.clone();
             let dials = dials.clone();
             tasks.push(tokio::spawn(async move {
-                pool.get(|| async move {
+                pool.get(false, || async move {
                     dials.fetch_add(1, Ordering::Relaxed);
                     std::future::pending::<
                         Result<(SendRequest<Bytes>, Arc<AtomicBool>, Option<Arc<AtomicBool>>)>,

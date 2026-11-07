@@ -263,6 +263,93 @@ async fn udp_roundtrip(ob: &dyn Outbound, echo: SocketAddr) {
     }
 }
 
+/// Two destinations carried from one local socket at the same time. Xray keys
+/// its XUDP table by the global ID alone, so a client that derives that ID from
+/// the source only must still keep the destinations apart.
+async fn udp_two_destinations(ob: &dyn Outbound, one: SocketAddr, two: SocketAddr) {
+    let mk = |target: SocketAddr| Session {
+        network: Network::Udp,
+        source: Some(SocketAddr::from(([127, 0, 0, 1], 40002))),
+        target: TargetAddr::from(target),
+        inbound_tag: "test".into(),
+        sniffed: None,
+    };
+    let a = ob.connect_udp(&mk(one)).await.unwrap();
+    let b = ob.connect_udp(&mk(two)).await.unwrap();
+    let mut buf = [0u8; 2048];
+    a.send(b"first").await.unwrap();
+    b.send(b"second").await.unwrap();
+    let na = tokio::time::timeout(Duration::from_secs(5), a.recv(&mut buf))
+        .await
+        .expect("first destination timed out")
+        .unwrap();
+    assert_eq!(&buf[..na], b"first");
+    let nb = tokio::time::timeout(Duration::from_secs(5), b.recv(&mut buf))
+        .await
+        .expect("second destination timed out")
+        .unwrap();
+    assert_eq!(&buf[..nb], b"second");
+    // Both flows must stay alive after the other one opened: a shared global ID
+    // moves the upstream link, and the first destination must not be orphaned.
+    a.send(b"first again").await.unwrap();
+    let na = tokio::time::timeout(Duration::from_secs(5), a.recv(&mut buf))
+        .await
+        .expect("first destination died after the second opened")
+        .unwrap();
+    assert_eq!(&buf[..na], b"first again");
+    b.send(b"second again").await.unwrap();
+    let nb = tokio::time::timeout(Duration::from_secs(5), b.recv(&mut buf))
+        .await
+        .expect("second destination died")
+        .unwrap();
+    assert_eq!(&buf[..nb], b"second again");
+}
+
+/// Reports the source port it saw, so the test can tell whether one upstream
+/// socket served several destinations.
+async fn udp_echo_port() -> SocketAddr {
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while let Ok((_, peer)) = sock.recv_from(&mut buf).await {
+            let _ = sock.send_to(&peer.port().to_be_bytes(), peer).await;
+        }
+    });
+    addr
+}
+
+/// Full-cone: every destination of one local socket leaves through the same
+/// server-side UDP socket, so both echoes see the same source port.
+async fn udp_same_source_port(ob: &dyn Outbound, one: SocketAddr, two: SocketAddr) {
+    let source = SocketAddr::from(([127, 0, 0, 1], 40003));
+    let mk = |target: SocketAddr| Session {
+        network: Network::Udp,
+        source: Some(source),
+        target: TargetAddr::from(target),
+        inbound_tag: "test".into(),
+        sniffed: None,
+    };
+    let a = ob.connect_udp(&mk(one)).await.unwrap();
+    let b = ob.connect_udp(&mk(two)).await.unwrap();
+    let mut buf = [0u8; 64];
+    a.send(b"a").await.unwrap();
+    b.send(b"b").await.unwrap();
+    let na = tokio::time::timeout(Duration::from_secs(5), a.recv(&mut buf))
+        .await
+        .expect("first destination timed out")
+        .unwrap();
+    assert_eq!(na, 2);
+    let pa = u16::from_be_bytes([buf[0], buf[1]]);
+    let nb = tokio::time::timeout(Duration::from_secs(5), b.recv(&mut buf))
+        .await
+        .expect("second destination timed out")
+        .unwrap();
+    assert_eq!(nb, 2);
+    let pb = u16::from_be_bytes([buf[0], buf[1]]);
+    assert_eq!(pa, pb, "one server-side socket per local socket");
+}
+
 fn endpoint(port: u16) -> ServerEndpoint {
     ServerEndpoint {
         host: "127.0.0.1".into(),
@@ -355,7 +442,22 @@ async fn vision_and_reality_against_xray() {
     plain_roundtrip(&ob, echo).await;
     inner_tls_roundtrip(&ob, tls_echo_addr, &inner).await;
     let uecho = udp_echo().await;
+    let uecho2 = udp_echo().await;
     udp_roundtrip(&ob, uecho).await;
+    udp_two_destinations(&ob, uecho, uecho2).await;
+    let port1 = udp_echo_port().await;
+    let port2 = udp_echo_port().await;
+    udp_same_source_port(&ob, port1, port2).await;
+
+    // The same over XUDP, the path Vision takes when Mux.Cool is off (and the
+    // one XHTTP + Vision always uses).
+    let tls = TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![outer.cert_der.clone()])
+        .unwrap();
+    let xudp = VlessOutbound::from_parts("xudp", uuid, endpoint(tls_port), Some(tls), sockets.clone())
+        .with_vision(true)
+        .with_mux(false);
+    udp_roundtrip(&xudp, uecho).await;
+    udp_two_destinations(&xudp, uecho, uecho2).await;
 
     // VLESS + REALITY + Vision.
     let reality = |short_id: &str| {
@@ -374,6 +476,7 @@ async fn vision_and_reality_against_xray() {
     plain_roundtrip(&ob, echo).await;
     inner_tls_roundtrip(&ob, tls_echo_addr, &inner).await;
     udp_roundtrip(&ob, uecho).await;
+    udp_two_destinations(&ob, uecho, uecho2).await;
     // Several connections in parallel.
     let mut tasks = Vec::new();
     let ob = Arc::new(ob);
@@ -959,6 +1062,7 @@ async fn vless_websocket_against_xray() {
                 reality: None,
                 fragment: None,
                 xhttp: None,
+                mux: true,
                 ws: Some(WsConfig {
                     path: "/p?ed=2048".into(),
                     host: None,
