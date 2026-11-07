@@ -27,6 +27,10 @@ pub(crate) const NETWORK_TCP: u8 = 1;
 pub(crate) const NETWORK_UDP: u8 = 2;
 /// Xray refuses longer metadata as well.
 const MAX_META: usize = 512;
+/// UDP flows one Mux.Cool session may carry. The server opens a socket-backed
+/// task per flow, so it is bounded; the client shares the number and stops
+/// below it, because the server can only drop the overflow silently.
+pub(crate) const MAX_UDP_FLOWS: usize = 256;
 
 /// One parsed frame.
 #[derive(Debug, PartialEq, Eq)]

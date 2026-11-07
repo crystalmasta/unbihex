@@ -32,8 +32,8 @@ use super::{BoxStream, PacketStream};
 use crate::address::{Address, TargetAddr};
 use crate::error::{Error, Result};
 use crate::mux::{
-    STATUS_END, STATUS_KEEP, STATUS_NEW, data_frame, end_frame, keepalive_frame, new_udp_frame,
-    read_frame,
+    MAX_UDP_FLOWS, STATUS_END, STATUS_KEEP, STATUS_NEW, data_frame, end_frame, keepalive_frame,
+    new_udp_frame, read_frame,
 };
 
 /// Frames waiting for the writer. One queue for the whole connection: frames
@@ -51,9 +51,13 @@ const KEEPALIVE: Duration = Duration::from_millis(20);
 const IDLE_RETIRE: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const IDLE_RETIRE: Duration = Duration::from_millis(60);
-/// A connection that dies this soon after opening, before carrying a single
-/// reply, is treated as a server without Mux.Cool.
+/// A connection that dies this soon after its first frame, before carrying a
+/// single reply, is treated as a server without Mux.Cool.
 const REJECT_WINDOW: Duration = Duration::from_secs(5);
+/// How long that verdict lasts. A transient reset or a server restart inside
+/// the window looks the same as a rejection, so it must not disable Mux.Cool
+/// for the life of the process.
+const BROKEN_RETRY: Duration = Duration::from_secs(300);
 #[cfg(not(test))]
 const MAX_SESSIONS: usize = 120;
 #[cfg(test)]
@@ -77,8 +81,10 @@ pub struct MuxClient {
     /// Flows without a local socket (DNS queries) get a session each: sharing
     /// one would collide when two queries name the same server.
     next_anonymous: AtomicU64,
-    /// A server that closed the mux connection before it carried any reply.
-    broken: Arc<AtomicBool>,
+    /// Until when the server is considered unable to speak Mux.Cool. A
+    /// rejection is retried after `BROKEN_RETRY`, so one bad moment cannot
+    /// disable the multiplexer until the process restarts.
+    broken: Arc<SyncMutex<Option<Instant>>>,
     /// Cancels every connection, current or retired, when the client goes.
     cancel: CancellationToken,
 }
@@ -110,14 +116,14 @@ impl MuxClient {
             next_id: AtomicU16::new(1),
             salt,
             next_anonymous: AtomicU64::new(1),
-            broken: Arc::new(AtomicBool::new(false)),
+            broken: Arc::new(SyncMutex::new(None)),
             cancel: CancellationToken::new(),
         }
     }
 
     /// Whether the server turned out not to speak Mux.Cool.
     pub fn is_broken(&self) -> bool {
-        self.broken.load(Ordering::Relaxed)
+        self.broken.lock().is_some_and(|at| Instant::now() < at)
     }
 
     /// Opens a UDP flow to `target` from the local socket `source`. Every flow
@@ -219,10 +225,12 @@ struct Conn {
     ever_data: AtomicBool,
     /// A session was opened on this connection.
     opened: AtomicBool,
-    opened_at: Instant,
+    /// When the first data frame went out. The rejection window starts here,
+    /// not at dial time: a flow may wait for the application to write.
+    first_frame_at: Arc<SyncMutex<Option<Instant>>>,
     /// When the last session ended; None while a session is alive.
     idle_at: SyncMutex<Option<Instant>>,
-    broken: Arc<AtomicBool>,
+    broken: Arc<SyncMutex<Option<Instant>>>,
 }
 
 #[derive(Default)]
@@ -289,6 +297,9 @@ struct SourceSession {
     /// The target of the `new` frame: the link was dispatched to it, so an
     /// address-less reply belongs to this flow.
     origin: SyncMutex<Option<TargetAddr>>,
+    /// Shared with the connection: the rejection window opens on the first
+    /// frame that really goes out.
+    first_frame_at: Arc<SyncMutex<Option<Instant>>>,
     closed: AtomicBool,
 }
 
@@ -307,7 +318,13 @@ impl SourceSession {
         };
         match self.tx.send(frame).await {
             Ok(()) => {
-                *first = false;
+                if *first {
+                    *first = false;
+                    let mut at = self.first_frame_at.lock();
+                    if at.is_none() {
+                        *at = Some(Instant::now());
+                    }
+                }
                 Ok(())
             }
             Err(_) => {
@@ -338,6 +355,12 @@ impl SourceSession {
             if flows.len() == 1 {
                 let (target, tx) = flows.iter().next()?;
                 if matches!(target.addr, Address::Domain(_)) {
+                    // The reply names the resolved IP, but the port stays the
+                    // destination's: a datagram for another port of that host
+                    // is not this flow's answer.
+                    if dest.as_ref().is_some_and(|d| d.port != target.port) {
+                        return None;
+                    }
                     return Some(tx.clone());
                 }
             }
@@ -361,7 +384,11 @@ impl SourceSession {
 }
 
 impl Conn {
-    fn start(stream: BoxStream, broken: Arc<AtomicBool>, cancel: CancellationToken) -> Arc<Conn> {
+    fn start(
+        stream: BoxStream,
+        broken: Arc<SyncMutex<Option<Instant>>>,
+        cancel: CancellationToken,
+    ) -> Arc<Conn> {
         let (tx, rx) = mpsc::channel(QUEUE);
         let conn = Arc::new(Conn {
             tx,
@@ -371,7 +398,7 @@ impl Conn {
             retired: AtomicBool::new(false),
             ever_data: AtomicBool::new(false),
             opened: AtomicBool::new(false),
-            opened_at: Instant::now(),
+            first_frame_at: Arc::new(SyncMutex::new(None)),
             idle_at: SyncMutex::new(None),
             broken,
         });
@@ -417,6 +444,7 @@ impl Conn {
                     flows: SyncMutex::new(HashMap::new()),
                     first: Mutex::new(true),
                     origin: SyncMutex::new(None),
+                    first_frame_at: self.first_frame_at.clone(),
                     closed: AtomicBool::new(false),
                 });
                 sessions.by_id.insert(id, session.clone());
@@ -427,6 +455,14 @@ impl Conn {
         let mut flows = session.flows.lock();
         if flows.contains_key(target) {
             return Err(Error::protocol("mux: destination already open"));
+        }
+        // The server carries at most `MAX_UDP_FLOWS` per session and can only
+        // drop the rest, so a full session sends this destination down the
+        // plain path instead of blackholing it.
+        if flows.len() >= MAX_UDP_FLOWS {
+            return Err(Error::Unsupported(
+                "mux: session carries the maximum number of UDP flows".into(),
+            ));
         }
         flows.insert(target.clone(), tx);
         drop(flows);
@@ -439,9 +475,12 @@ impl Conn {
         // plain VLESS UDP path.
         if self.opened.load(Ordering::Relaxed)
             && !self.ever_data.load(Ordering::Relaxed)
-            && self.opened_at.elapsed() < REJECT_WINDOW
+            && self
+                .first_frame_at
+                .lock()
+                .is_some_and(|at| at.elapsed() < REJECT_WINDOW)
         {
-            self.broken.store(true, Ordering::Relaxed);
+            *self.broken.lock() = Some(Instant::now() + BROKEN_RETRY);
         }
         self.closed.store(true, Ordering::Relaxed);
         self.cancel.cancel();
@@ -838,6 +877,76 @@ mod tests {
                 .is_err()
         );
         assert_eq!(dials.load(Ordering::Relaxed), 1, "no second mux dial");
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_died_before_the_first_frame_is_not_a_rejection() {
+        // A flow opened but the application never wrote: the server closing is
+        // a transport failure, not proof that Mux.Cool is missing. Treating it
+        // as one used to disable mux for the life of the process.
+        let dials = Arc::new(AtomicUsize::new(0));
+        let dials_for_client = dials.clone();
+        let client = MuxClient::new(move || {
+            let dials = dials_for_client.clone();
+            async move {
+                dials.fetch_add(1, Ordering::Relaxed);
+                let (client, server) = tokio::io::duplex(64 * 1024);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    drop(server);
+                });
+                Ok(Box::new(client) as BoxStream)
+            }
+        });
+        let _flow = client.open_udp(src(40000), target(9001)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!client.is_broken(), "no frame was written, so nothing was rejected");
+        assert!(client.open_udp(src(40000), target(9001)).await.is_ok());
+        assert!(dials.load(Ordering::Relaxed) >= 2, "the next flow dials again");
+    }
+
+    #[tokio::test]
+    async fn a_reply_from_another_port_of_the_resolved_host_is_dropped() {
+        // The domain flow's reply comes from the resolved IP, but the port is
+        // still the destination's; anything else is not this flow's answer.
+        let client = client_replying_from("1.2.3.4:9999".parse().unwrap());
+        let flow = client
+            .open_udp(src(40000), "dns.example:53".parse().unwrap())
+            .await
+            .unwrap();
+        flow.send(b"q").await.unwrap();
+        let mut buf = [0u8; 8];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), flow.recv(&mut buf))
+                .await
+                .is_err(),
+            "a datagram for another port of the same host is not delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_session_sends_the_next_destination_down_the_plain_path() {
+        // The server carries a bounded number of UDP flows per session and can
+        // only drop the rest, so the client must stop before that: an error
+        // here makes the outbound use its plain path for this destination.
+        let dials = Arc::new(AtomicUsize::new(0));
+        let client = client_with_echo(dials);
+        // The flows must stay open: a dropped one frees its place.
+        let mut open = Vec::with_capacity(MAX_UDP_FLOWS);
+        for port in 0..MAX_UDP_FLOWS {
+            open.push(
+                client
+                    .open_udp(src(40000), target(1000 + port as u16))
+                    .await
+                    .unwrap_or_else(|e| panic!("flow {port}: {e}")),
+            );
+        }
+        assert_eq!(open.len(), MAX_UDP_FLOWS);
+        let err = match client.open_udp(src(40000), target(5000)).await {
+            Ok(_) => panic!("a full session must refuse another destination"),
+            Err(e) => e,
+        };
+        assert!(format!("{err}").contains("maximum"), "{err}");
     }
 
     #[tokio::test]

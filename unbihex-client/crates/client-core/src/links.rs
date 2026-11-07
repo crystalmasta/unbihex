@@ -417,12 +417,12 @@ pub fn outbound_json_with(server: &Server, mux: bool) -> Result<Value> {
     if let Some(why) = &server.unsupported {
         return Err(ClientError::Unsupported(why.clone()));
     }
-    // Only `vless://` outbounds read the switch; sending it for the rest would
-    // claim an effect the engine does not have.
-    let mux = mux && server.protocol == "vless";
     match server.protocol.as_str() {
-        "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "trusttunnel" => {
-            Ok(json!({ "type": "link", "tag": "proxy", "url": server.link, "mux": mux }))
+        // Only a `vless://` outbound reads the switch; the others do not carry
+        // the key at all, so the config cannot claim an effect it lacks.
+        "vless" => Ok(json!({ "type": "link", "tag": "proxy", "url": server.link, "mux": mux })),
+        "vmess" | "trojan" | "ss" | "hysteria2" | "trusttunnel" => {
+            Ok(json!({ "type": "link", "tag": "proxy", "url": server.link }))
         }
         "socks" => {
             let p = socks_parts(&server.link)?;
@@ -451,7 +451,10 @@ mod tests {
         assert_eq!(outbound_json_with(&vless, true).unwrap()["mux"], true);
         assert_eq!(outbound_json_with(&vless, false).unwrap()["mux"], false);
         let trojan = parse_server("trojan://pass@h.com:443#T").unwrap();
-        assert_eq!(outbound_json_with(&trojan, true).unwrap()["mux"], false);
+        assert!(
+            outbound_json_with(&trojan, true).unwrap().get("mux").is_none(),
+            "a protocol that ignores the switch must not carry it"
+        );
     }
 
     #[test]

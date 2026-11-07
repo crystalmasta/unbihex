@@ -33,7 +33,7 @@ const MAX_SESSIONS: usize = 128;
 /// Destinations one UDP session may reach at once. Xray clients put every
 /// destination of one local socket into a single session, and a browser can
 /// easily exceed a few dozen; the old 64 silently dropped the rest.
-const MAX_UDP_FLOWS: usize = 256;
+use crate::mux::MAX_UDP_FLOWS;
 /// TCP replies are cut into frames of at most this size, as Xray does.
 const TCP_CHUNK: usize = 8 * 1024;
 const TCP_PIPE: usize = 64 * 1024;
@@ -202,7 +202,9 @@ async fn deliver(
             };
             flows.retain(|_, f| !f.is_closed());
             if flows.len() >= MAX_UDP_FLOWS {
-                tracing::debug!("mux: {} UDP flows, dropping {}", MAX_UDP_FLOWS, dest);
+                // The client stops at the same number, so this is a bug or an
+                // older client; say it louder than a debug line.
+                tracing::warn!("mux: {} UDP flows, dropping {}", MAX_UDP_FLOWS, dest);
                 return true;
             }
             flows.insert(dest.clone(), open_udp(id, dest, data, ctx, tx, done));

@@ -370,6 +370,13 @@ impl VlessOutbound {
         ob.mux_enabled = cfg.mux;
         ob.dialer.reality = reality;
         ob.dialer.vision = cfg.is_vision();
+        if ob.dialer.vision && !cfg.mux {
+            tracing::warn!(
+                "outbound {}: Vision has no plain UDP, so `mux: false` cannot turn Mux.Cool \
+                 off for it; XUDP stays the only UDP path",
+                cfg.tag
+            );
+        }
         ob.dialer.fragment = cfg.fragment.clone();
         ob.dialer.xhttp = xhttp;
         ob.dialer.ws = cfg.ws.clone();

@@ -588,10 +588,14 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
   through one shared **Mux.Cool connection** (command 0x03) per outbound: one session per local socket, with the
   destination named on every frame. A new IP destination costs microseconds, and the server keeps one NAT mapping per
   socket; the session's global ID comes from the socket, so after a reconnect Xray reuses its UDP socket for another
-  minute. A domain destination gets a session of its own: the server resolves the name and answers from an IP that
+  minute. The per-client salt keeps that ID stable within one process: after a restart the server sees a new socket.
+  One connection is active; when it holds 120 sessions another is dialed, and the older ones serve their flows to the
+  end. A session carries at most 256 UDP flows: the next destination takes the plain VLESS path, because the server
+  can only drop the surplus silently. A flow without a local socket (a DNS query) gets a session of its own and an
+  empty global ID. A domain destination gets a session of its own: the server resolves the name and answers from an IP that
   cannot pick the flow. Datagrams from a peer the client never sent to are not delivered yet: that needs a TUN-level
   NAT rather than a flow per destination. The one exception is a session with a single domain flow: its reply comes
-  from the resolved IP, and nothing tells it apart from a stranger's datagram. XHTTP multiplexes through its h2 pool instead; with Vision, UDP goes as
+  from the resolved IP, and nothing tells it apart from a stranger's datagram (the port is still checked). XHTTP multiplexes through its h2 pool instead; with Vision, UDP goes as
   XUDP (§11.4). A server without Mux.Cool is remembered, and the flow is retried over plain VLESS UDP starting with
   the very datagram that found the rejection; `"mux": false` turns Mux.Cool off up front. Vision has no plain UDP
   (Xray rejects a UDP request that carries the Vision flow), so XUDP stays its only path and `"mux": false` does not
@@ -660,7 +664,8 @@ characters), `alpn`, `fingerprint` (§11.2). `tls` and `reality` together are re
   ID), 2 keep, 3 end, 4 keep-alive (ignored). In Xray the 8-byte global ID names the client's UDP socket and gives it
   one NAT mapping (full-cone). On the shared Mux.Cool path our client takes the ID from the socket: one session per
   socket, the destination on every frame, so IP destinations go through one server-side UDP socket (a domain gets its
-  own session, because the reply carries the resolved IP). On the fallback
+  own session, because the reply carries the resolved IP on the destination's port; a datagram for another port of
+  that host is not an answer). On the fallback
   path (`mux: false`) a stream carries one destination and the ID also mixes that destination in, because Xray moves
   the link of an ID to the latest frame. Vision has no fallback path: XUDP is Mux.Cool itself, and `mux: false` does
   not turn it off. A `keep` frame whose tail does not start with the UDP network is padding and is ignored, as
