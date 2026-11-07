@@ -600,6 +600,28 @@ impl Client {
     pub async fn status(&self) -> Status {
         self.controller.status().await
     }
+
+    /// The quick settings tile's label: the server in use (with auto-select, the
+    /// one working now), else the selected one, else "Unbihex"; see [`short_label`].
+    pub async fn tile_label(&self) -> String {
+        let status = self.status().await;
+        let name = status
+            .auto_server
+            .or(status.info.map(|i| i.server_name))
+            .or_else(|| self.data.read().selected_server().map(|s| s.name.clone()))
+            .unwrap_or_default();
+        let label = short_label(&name);
+        if label.is_empty() { "Unbihex".into() } else { label }
+    }
+}
+
+/// A server name for a narrow label (the tile has no running text): leading
+/// flags, emoji and separators go, so the start of the real name fits; spaces
+/// are collapsed. A name of symbols only stays as it is.
+pub fn short_label(name: &str) -> String {
+    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let rest = name.trim_start_matches(|c: char| !c.is_alphanumeric());
+    if rest.is_empty() { words(name) } else { words(rest) }
 }
 
 fn shorten(s: &str) -> String {
@@ -652,6 +674,26 @@ mod tests {
         assert!(s.is_supported());
         assert!(s.ping_error.is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tile_labels_lose_leading_flags_and_emoji() {
+        assert_eq!(short_label("🇩🇪 Германия | Обход"), "Германия | Обход");
+        assert_eq!(short_label("🔥⚡️  NL-1   fast"), "NL-1 fast");
+        assert_eq!(short_label("| 🇫🇮 Finland"), "Finland");
+        assert_eq!(short_label("1️⃣ Server"), "1️⃣ Server");
+        assert_eq!(short_label("🚀"), "🚀");
+        assert_eq!(short_label("  "), "");
+    }
+
+    #[tokio::test]
+    async fn tile_label_is_the_selected_server_or_the_app_name() {
+        let c = Client::open(tmp());
+        assert_eq!(c.tile_label().await, "Unbihex");
+        c.add_input(&format!("vless://{UUID}@a.example:443?security=tls#%F0%9F%87%A9%F0%9F%87%AA%20Berlin"))
+            .await
+            .unwrap();
+        assert_eq!(c.tile_label().await, "Berlin");
     }
 
     #[tokio::test]

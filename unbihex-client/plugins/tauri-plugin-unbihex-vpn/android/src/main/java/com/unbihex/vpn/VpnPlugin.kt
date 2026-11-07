@@ -171,6 +171,13 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         else invoke.reject("запуск VPN отменён")
     }
 
+    /** The tile asks the native side for its label again (another server in use). */
+    @Command
+    fun refreshTile(invoke: Invoke) {
+        VpnTileService.refresh(activity.applicationContext)
+        invoke.resolve()
+    }
+
     /** The read end of [UiSignal]'s pipe, once; the Rust side owns it after this. */
     @Command
     fun uiSignal(invoke: Invoke) {

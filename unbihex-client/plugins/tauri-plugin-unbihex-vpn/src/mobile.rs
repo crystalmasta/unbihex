@@ -51,6 +51,15 @@ impl<R: Runtime> UnbihexVpn<R> {
             .map_err(Into::into)
     }
 
+    /// Android: the quick settings tile reads its label (the server) again.
+    #[cfg(target_os = "android")]
+    pub fn refresh_tile(&self) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>("refreshTile", ())
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     /// Brings the tunnel down.
     pub fn stop(&self) -> crate::Result<()> {
         #[cfg(target_os = "android")]

@@ -251,6 +251,47 @@ pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_start(
     }
 }
 
+/// Refreshes the tile when its label changes: another server selected, or
+/// auto-select moved on. Runs with the window's status polls; the tile also
+/// asks for the label itself each time the quick settings open.
+pub async fn follow_tile_label(app: &tauri::AppHandle, client: &Client) {
+    use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let label = client.tile_label().await;
+    {
+        let Ok(mut last) = LAST.lock() else { return };
+        if *last == label {
+            return;
+        }
+        *last = label;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = handle.unbihex_vpn().refresh_tile() {
+            tracing::debug!("android: tile refresh: {e}");
+        }
+    });
+}
+
+/// `NativeVpn.label`: the quick settings tile's label (`Client::tile_label`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_label(
+    mut env: JNIEnv,
+    _object: JObject,
+    dir: JString,
+) -> jstring {
+    let label = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let dir: String = env.get_string(&dir).ok()?.into();
+        let owner = owner(Path::new(&dir));
+        Some(tauri::async_runtime::block_on(owner.client.tile_label()))
+    }))
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "Unbihex".into());
+    let _ = env.exception_clear();
+    env.new_string(label).map_or(std::ptr::null_mut(), |s| s.into_raw())
+}
+
 /// `NativeVpn.stop`: stops `generation` if it is still the running session.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_stop(

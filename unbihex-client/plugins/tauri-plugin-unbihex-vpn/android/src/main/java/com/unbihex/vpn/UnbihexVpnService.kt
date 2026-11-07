@@ -28,6 +28,8 @@ object NativeVpn {
     init { System.loadLibrary("unbihex_client_lib") }
     external fun start(dataDir: String, service: UnbihexVpnService, generation: Long, bootstrapDns: String): String?
     external fun stop(generation: Long)
+    /** The tile's label: the server in use or selected, without leading flags. */
+    external fun label(dataDir: String): String?
 }
 
 /**

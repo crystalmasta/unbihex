@@ -52,7 +52,9 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
 - Android and iOS: the system VPN (TUN).
 - macOS (Apple Silicon): an unofficial build, see "Building for macOS"; TUN mode needs root.
 - Android: add the **Unbihex** tile in Quick Settings. Tap it to connect to the selected server or disconnect;
-  the main screen stays closed. Long-press opens the app. Android asks for VPN permission on first use.
+  the main screen stays closed. An active tile means the VPN is on; its label is the server (with auto-select, the
+  one working now; when disconnected, the selected one), without leading flags and emoji so the name fits.
+  Long-press opens the app. Android asks for VPN permission on first use.
 - Routing: "Everything through VPN", "Russia direct" (.ru/.su/.рф and major Russian services),
   "Only selected sites", "Only blocked sites" (by the geosite/geoip databases),
   plus your own "through VPN / direct / block" lists. Rule databases: geosite.dat / geoip.dat (v2fly) and `.srs`

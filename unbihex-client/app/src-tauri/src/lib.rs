@@ -343,6 +343,8 @@ async fn reconnect_if_connected(
 async fn status(app: AppHandle, state: State<'_, AppState>) -> Result<Status, String> {
     #[cfg(mobile)]
     sync_mobile_state(&app, &state).await;
+    #[cfg(target_os = "android")]
+    android_vpn::follow_tile_label(&app, &state.client).await;
     let _ = &app;
     Ok(state.client.status().await)
 }
