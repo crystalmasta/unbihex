@@ -416,6 +416,9 @@ impl Dispatcher {
      RRSIG, NSEC, NSEC3, NSEC3PARAM, CDS, CDNSKEY: that is how a TLD such as `com.` is asked about, and DNSSEC validation
      needs the real answer), `local` and `home.arpa` with subdomains, PTR in the
      reverse zones of private, loopback, link-local and 100.64/10 addresses (RFC 6303), `fc00::/7`, `fe80::/10`, `::1`.
+     The exception is a name a rule sends to a proxy by the name alone (`Router::pick_by_name`, "always through VPN"):
+     it is not treated as local nor as `dns.fakeip_exclude`; A gets a fake IP (the proxy resolves the name) and other
+     types are forwarded through that outbound (step 5).
   5. Other types (MX, TXT, other PTR …) and single-label names are forwarded to the upstream as a UDP session through the
      Dispatcher (the inbound is the TUN tag): with a proxy as `final` the query goes through the proxy, not in the
      clear. For an outbound without UDP (SOCKS5) the query goes over TCP. A DoT/DoH server (§8.3) gets a TCP session to

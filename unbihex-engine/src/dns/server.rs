@@ -127,8 +127,14 @@ impl DnsServer {
         }
         let q = &msg.queries[0];
         let domain = q.name().to_ascii().trim_end_matches('.').to_string();
-        let local = !domain.contains('.');
         let qtype = q.query_type();
+        // A name a rule sends through a proxy by name ("always through VPN") is the
+        // proxy's to resolve, even when it looks like a LAN name (issue #24).
+        let proxied = match &self.via {
+            Some((d, tag)) => normalize_domain(&domain).ok().and_then(|n| d.proxied_name(&n, tag)),
+            None => None,
+        };
+        let local = !domain.contains('.') && proxied.is_none();
         // A reverse lookup of a fake address is answered from the pool: upstream knows
         // nothing of it, and a stream of PTR queries for 198.18.x.x tells it (and the
         // network on the way) that the device runs a fake-IP proxy.
@@ -152,6 +158,7 @@ impl DnsServer {
         // asked about as a zone (NS, SOA, DNSSEC records) is a TLD such as `com.`:
         // a validating resolver needs the real answer, so it goes upstream.
         if is_local_only(&domain)
+            && proxied.is_none()
             && !(local && is_zone_query(qtype))
             && self.upstream_is_public()
         {
@@ -171,9 +178,10 @@ impl DnsServer {
                 qtype,
                 RecordType::A | RecordType::AAAA | RecordType::HTTPS | RecordType::SVCB
             )
+            && proxied.is_none()
             && self.is_excluded(&domain)
         {
-            return self.forward(&msg, packet).await;
+            return self.forward(&msg, packet, None).await;
         }
         match qtype {
             RecordType::A if !local => match normalize_domain(&domain) {
@@ -190,12 +198,12 @@ impl DnsServer {
                     ));
                     resp.to_vec().ok()
                 }
-                Err(_) => self.forward(&msg, packet).await,
+                Err(_) => self.forward(&msg, packet, proxied).await,
             },
             RecordType::AAAA | RecordType::HTTPS | RecordType::SVCB if !local => {
                 response(&msg).to_vec().ok()
             }
-            _ => self.forward(&msg, packet).await,
+            _ => self.forward(&msg, packet, proxied).await,
         }
     }
 
@@ -206,8 +214,10 @@ impl DnsServer {
         !servers.is_empty() && servers.iter().all(|u| u.host_ip().is_none_or(is_public))
     }
 
-    async fn forward(&self, msg: &Message, packet: &[u8]) -> Option<Vec<u8>> {
+    /// Sends a query upstream; `proxied`: through that outbound, as the name's own.
+    async fn forward(&self, msg: &Message, packet: &[u8], proxied: Option<Arc<dyn Outbound>>) -> Option<Vec<u8>> {
         let r = match (&self.via, &self.direct) {
+            (Some((d, tag)), _) if proxied.is_some() => self.forward_routed(d, tag, proxied.as_ref(), msg, packet).await,
             (Some((d, tag)), Some(direct)) => {
                 let name = msg.queries[0].name().to_ascii();
                 let name = name.trim_end_matches('.');
@@ -852,8 +862,11 @@ mod tests {
         (addr, hits)
     }
 
-    /// A SOCKS5 proxy (no auth, CONNECT only) that records the targets it is asked for.
-    async fn socks_stub() -> (std::net::SocketAddr, Arc<parking_lot::Mutex<Vec<String>>>) {
+    /// A SOCKS5 proxy (no auth, CONNECT only) that records the targets it is asked
+    /// for and connects to them, or to `redirect`.
+    async fn socks_stub(
+        redirect: Option<std::net::SocketAddr>,
+    ) -> (std::net::SocketAddr, Arc<parking_lot::Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -875,7 +888,7 @@ mod tests {
                     c.read_exact(&mut a).await.unwrap();
                     let target = std::net::SocketAddr::from(([a[0], a[1], a[2], a[3]], u16::from_be_bytes([a[4], a[5]])));
                     log.lock().push(target.to_string());
-                    let mut up = tokio::net::TcpStream::connect(target).await.unwrap();
+                    let mut up = tokio::net::TcpStream::connect(redirect.unwrap_or(target)).await.unwrap();
                     c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
                     let _ = tokio::io::copy_bidirectional(&mut c, &mut up).await;
                 });
@@ -892,7 +905,7 @@ mod tests {
         use std::sync::atomic::Ordering::SeqCst;
         let (home, home_hits) = fake_upstream().await;
         let (remote, remote_hits) = tcp_upstream().await;
-        let (socks, targets) = socks_stub().await;
+        let (socks, targets) = socks_stub(None).await;
         let cfg = crate::config::Config::from_json(&format!(
             r#"{{"outbounds":[{{"type":"socks","tag":"proxy","server":"127.0.0.1","port":{}}},
                               {{"type":"direct","tag":"direct"}},{{"type":"block","tag":"block"}}],
@@ -940,6 +953,59 @@ mod tests {
         // Proxied names get fake addresses as before and reach no DNS server.
         assert_eq!(code(&s, "example.com.", RecordType::A).await, (ResponseCode::NoError, 1));
         assert_eq!((home_hits.load(SeqCst), remote_hits.load(SeqCst)), (1, 1));
+    }
+
+    /// Issue #24: a name the user sends through the VPN is the proxy's to resolve,
+    /// even when it looks like a LAN name that a public upstream would never know.
+    #[tokio::test]
+    async fn lan_looking_names_listed_through_the_proxy_are_resolved_there() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (remote, remote_hits) = tcp_upstream().await;
+        let (socks, targets) = socks_stub(Some(remote)).await;
+        let cfg = crate::config::Config::from_json(&format!(
+            r#"{{"outbounds":[{{"type":"socks","tag":"proxy","server":"127.0.0.1","port":{}}},
+                              {{"type":"direct","tag":"direct"}}],
+                 "route":{{"rules":[{{"domain_suffix":["corp.local"],"domain":["intranet"],"outbound":"proxy"}}],
+                           "final":"direct"}}}}"#,
+            socks.port()
+        ))
+        .unwrap();
+        let resolver = Arc::new(crate::dns::Resolver::System);
+        let ctx = crate::outbound::OutboundContext {
+            sockets: Arc::default(),
+            resolver: resolver.clone(),
+            server_resolver: resolver,
+            fakeip: None,
+        };
+        let mut outbounds = Vec::new();
+        for o in &cfg.outbounds {
+            outbounds.push(crate::outbound::build_outbound(o, &ctx).await.unwrap());
+        }
+        let dispatcher = Arc::new(Dispatcher::new(
+            crate::router::Router::new(&cfg).unwrap(),
+            outbounds,
+            cfg.limits.clone(),
+            None,
+            Arc::default(),
+        ));
+        let pool = Arc::new(FakeIpPool::new("198.18.0.0/15".parse().unwrap()));
+        let exclude = crate::config::DnsConfig::default().fakeip_exclude_suffixes().unwrap();
+        let up = vec!["tcp://9.9.9.9".parse().unwrap()];
+        let client = Arc::new(DnsClient::with_upstreams(up, &[], Arc::default()).unwrap());
+        let s = DnsServer::new(pool, client, 10)
+            .with_fakeip_exclude(exclude)
+            .with_dispatcher(dispatcher, "tun-in".into());
+
+        // Not listed: a LAN name stays local.
+        assert_eq!(code(&s, "printer.local.", RecordType::A).await.0, ResponseCode::NXDomain);
+        // Listed: a fake address, so the proxy resolves the name on its side.
+        assert_eq!(code(&s, "srv.corp.local.", RecordType::A).await, (ResponseCode::NoError, 1));
+        assert_eq!(code(&s, "intranet.", RecordType::A).await, (ResponseCode::NoError, 1));
+        assert_eq!(remote_hits.load(SeqCst), 0);
+        // Other types go to the upstream through the proxy.
+        assert_eq!(code(&s, "srv.corp.local.", RecordType::MX).await.0, ResponseCode::NoError);
+        assert_eq!(remote_hits.load(SeqCst), 1);
+        assert_eq!(*targets.lock(), ["9.9.9.9:53"]);
     }
 
     #[tokio::test]

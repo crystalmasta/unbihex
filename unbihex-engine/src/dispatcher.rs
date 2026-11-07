@@ -270,6 +270,15 @@ impl Dispatcher {
             .is_some_and(|o| o.is_block())
     }
 
+    /// The proxy outbound a domain rule sends every session to the normalized name
+    /// `domain` from `inbound` to (a user's "always through VPN" list): such a name
+    /// is resolved on the proxy's side even when it looks like a LAN name.
+    pub(crate) fn proxied_name(&self, domain: &str, inbound: &str) -> Option<Arc<dyn Outbound>> {
+        let table = self.table.load();
+        let tag = table.router.pick_by_name(domain, inbound)?;
+        table.outbounds.get(tag).filter(|o| !o.is_direct() && !o.is_block()).cloned()
+    }
+
     /// The outbound a TCP session to the name `domain` (port 443) from `inbound`
     /// would start with: decides where the DNS server sends a query for the name
     /// when the config has a "home" DNS (SPEC §8.2).

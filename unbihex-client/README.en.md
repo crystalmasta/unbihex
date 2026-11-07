@@ -57,7 +57,9 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   Long-press opens the app. Android asks for VPN permission on first use.
 - Routing: "Everything through VPN", "Russia direct" (.ru/.su/.рф and major Russian services),
   "Only selected sites", "Only blocked sites" (by the geosite/geoip databases),
-  plus your own "through VPN / direct / block" lists. Rule databases: geosite.dat / geoip.dat (v2fly) and `.srs`
+  plus your own "through VPN / direct / block" lists. Order: block → "through VPN" → "direct" → other private
+  addresses (the LAN) direct → the chosen mode; so a subnet such as `192.168.50.0/24` or a name such as `nas.corp.lan` in
+  the "through VPN" list goes through the server, and such a name is resolved on its side even when it looks local. Rule databases: geosite.dat / geoip.dat (v2fly) and `.srs`
   (sing-box), updated weekly.
   QUIC (UDP/443) is blocked in TUN so that browsers fall back to TCP through the tunnel, which is faster.
 - Ad and tracker blocking (off by default): hosts-format lists — AdAway (CC BY 3.0), StevenBlack (MIT),

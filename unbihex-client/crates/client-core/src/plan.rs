@@ -207,10 +207,12 @@ fn routing_rules(
     fn list(v: &[String]) -> impl Iterator<Item = &str> {
         v.iter().map(String::as_str)
     }
+    // The user's lists first (issue #24): block, always through VPN, always direct;
+    // then the LAN and other private addresses, then the routing mode.
     push_list(&mut rules, geo, list(&settings.block_list), "block")?;
-    rules.push(json!({ "ip_private": true, "outbound": "direct" }));
     push_list(&mut rules, geo, list(&settings.proxy_list), "proxy")?;
     push_list(&mut rules, geo, list(&settings.direct_list), "direct")?;
+    rules.push(json!({ "ip_private": true, "outbound": "direct" }));
     // After the user's own lists: a site sent direct or through the proxy stays
     // reachable. Exact names, as hosts lists mean them.
     if settings.adblock
@@ -521,20 +523,38 @@ mod tests {
         let mut s = Settings {
             routing: RoutingMode::BypassRu,
             direct_list: vec!["https://www.example.org/page".into(), "10.9.0.0/16".into()],
-            proxy_list: vec!["*.youtube.com".into(), "keyword:google".into()],
+            proxy_list: vec!["*.youtube.com".into(), "keyword:google".into(), "192.168.50.0/24".into(), "corp.lan".into()],
             block_list: vec!["full:ads.example".into()],
             ..Default::default()
         };
         let cfg = build_config(&[server()], &s, &Geo::default(), Target::DesktopProxy).unwrap();
         let tags: Vec<&str> = cfg.route.rules.iter().map(|r| r.outbound.as_str()).collect();
-        assert_eq!(tags, ["block", "direct", "proxy", "direct", "direct", "direct"]);
+        // Issue #24: block, always through VPN, always direct, then the LAN, then the mode.
+        assert_eq!(tags, ["block", "proxy", "proxy", "direct", "direct", "direct", "direct"]);
         assert_eq!(cfg.route.rules[0].domain, ["ads.example"]);
-        assert_eq!(cfg.route.rules[1].ip_private, Some(true));
-        assert_eq!(cfg.route.rules[2].domain_suffix, ["youtube.com"]);
-        assert_eq!(cfg.route.rules[2].domain_keyword, ["google"]);
+        assert_eq!(cfg.route.rules[1].domain_suffix, ["youtube.com", "corp.lan"]);
+        assert_eq!(cfg.route.rules[1].domain_keyword, ["google"]);
         assert_eq!(cfg.route.rules[3].domain_suffix, ["www.example.org"]);
-        assert!(cfg.route.rules[5].domain_suffix.contains(&"ru".to_string()));
+        assert_eq!(cfg.route.rules[5].ip_private, Some(true));
+        assert!(cfg.route.rules[6].domain_suffix.contains(&"ru".to_string()));
         assert_eq!(cfg.final_outbound(), "proxy");
+        let router = unbihex_engine::router::Router::new(&cfg).unwrap();
+        let pick = |target: &str| {
+            router
+                .pick(&unbihex_engine::session::Session {
+                    network: unbihex_engine::session::Network::Tcp,
+                    source: None,
+                    target: target.parse().unwrap(),
+                    inbound_tag: "tun-in".into(),
+                    sniffed: None,
+                })
+                .to_string()
+        };
+        // A private network listed "through VPN" goes there; other private addresses stay direct.
+        assert_eq!(pick("192.168.50.7:443"), "proxy");
+        assert_eq!(pick("192.168.1.1:80"), "direct");
+        assert_eq!(pick("10.9.1.1:80"), "direct");
+        assert_eq!(pick("nas.corp.lan:445"), "proxy");
         s.private_names = vec!["*.plex.direct".into(), " ".into()];
         let cfg = build_config(&[server()], &s, &Geo::default(), Target::DesktopProxy).unwrap();
         assert_eq!(cfg.dns.private_answer_suffixes(false).unwrap().len(), 1);
