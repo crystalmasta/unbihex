@@ -1080,6 +1080,11 @@ pub struct LinkConfig {
     /// `None` keeps the parsed link's value.
     #[serde(default)]
     pub mux: Option<bool>,
+    /// A TLS fingerprint (`fp`, see [`TlsConfig::fingerprint`]) that replaces the
+    /// link's own for VLESS, VMess, Trojan (TLS and REALITY), TrustTunnel and
+    /// NaiveProxy; `None` keeps the link's.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 /// Routing: ordered rules and a fallback outbound.
@@ -1570,6 +1575,7 @@ impl Config {
                     allow_plaintext: false,
                     fragment: None,
                     mux: None,
+                    fingerprint: None,
                 }),
                 OutboundConfig::Direct(TagOnly {
                     tag: "direct".into(),

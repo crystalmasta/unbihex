@@ -252,9 +252,11 @@ to both `VpnService` and the engine.
 
 ### 5.4 Share links (`type: "link"`)
 
-The `{"type": "link", "tag", "url", "allow_plaintext"?, "fragment"?}` outbound parses the link when the outbound is
-built; `allow_plaintext` and `fragment` are carried into VLESS, `fragment` also into Trojan, VMess with TLS and TrustTunnel
-without `anti_dpi`. Parsing (`link.rs`): all parameters are
+The `{"type": "link", "tag", "url", "allow_plaintext"?, "fragment"?, "mux"?, "fingerprint"?}` outbound parses the link
+when the outbound is built; `allow_plaintext` and `fragment` are carried into VLESS, `fragment` also into Trojan, VMess
+with TLS and TrustTunnel without `anti_dpi`. `fingerprint` (a name as for `fp`, §11.2; an unknown one is an error)
+replaces the link's fingerprint for VLESS, VMess, Trojan (TLS and REALITY), TrustTunnel and NaiveProxy: that is how the
+client sets one for every server or for one. Parsing (`link.rs`): all parameters are
 percent-decoded, the host may be IPv6 in brackets.
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:

@@ -96,6 +96,37 @@ pub trait Outbound: Send + Sync {
     }
 }
 
+/// Puts `fp` in place of a link's own TLS fingerprint (the client's override).
+fn force_fingerprint(cfg: &mut OutboundConfig, fp: &str) {
+    let fp = Some(fp.to_string());
+    match cfg {
+        OutboundConfig::Vless(v) => {
+            if let Some(t) = &mut v.tls {
+                t.fingerprint = fp.clone();
+            }
+            if let Some(r) = &mut v.reality {
+                r.fingerprint = fp;
+            }
+        }
+        OutboundConfig::Vmess(v) => {
+            if let Some(t) = &mut v.tls {
+                t.fingerprint = fp;
+            }
+        }
+        OutboundConfig::Trojan(t) => {
+            if let Some(tls) = &mut t.tls {
+                tls.fingerprint = fp.clone();
+            }
+            if let Some(r) = &mut t.reality {
+                r.fingerprint = fp;
+            }
+        }
+        OutboundConfig::Trusttunnel(t) => t.fingerprint = fp,
+        OutboundConfig::Naive(n) => n.fingerprint = fp,
+        _ => {}
+    }
+}
+
 /// Shared services every outbound needs.
 #[derive(Clone)]
 pub struct OutboundContext {
@@ -255,6 +286,10 @@ pub async fn build_outbound(
         }
         OutboundConfig::Link(c) => {
             let mut parsed = crate::link::parse_link(c.url.expose(), &c.tag)?;
+            if let Some(fp) = c.fingerprint.as_deref().filter(|f| !f.trim().is_empty()) {
+                fingerprint::Fingerprint::from_name(Some(fp))?;
+                force_fingerprint(&mut parsed, fp);
+            }
             // The link's own fragmentation (`fm`, `fragment`) wins over the config's.
             match &mut parsed {
                 OutboundConfig::Vless(v) => {
@@ -280,4 +315,34 @@ pub async fn build_outbound(
             return Box::pin(build_outbound(&parsed, ctx)).await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_forced_fingerprint_replaces_the_links_own() {
+        let link = "trojan://pw@1.2.3.4:443?security=reality&sni=a.example&fp=ios&pbk=wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE&sid=ab#t";
+        let mut cfg = crate::link::parse_link(link, "p").unwrap();
+        force_fingerprint(&mut cfg, "firefox");
+        let OutboundConfig::Trojan(t) = cfg else { panic!("trojan") };
+        assert_eq!(t.reality.unwrap().fingerprint.as_deref(), Some("firefox"));
+        let mut cfg = crate::link::parse_link("naive+https://u:p@n.example#n", "p").unwrap();
+        force_fingerprint(&mut cfg, "safari");
+        let OutboundConfig::Naive(n) = cfg else { panic!("naive") };
+        assert_eq!(n.fingerprint.as_deref(), Some("safari"));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_forced_fingerprint_is_refused() {
+        let cfg: OutboundConfig = serde_json::from_value(serde_json::json!({
+            "type": "link", "tag": "p", "url": "trojan://pw@1.2.3.4:443?sni=a.example#t", "fingerprint": "netscape"
+        }))
+        .unwrap();
+        let resolver = Arc::new(Resolver::System);
+        let ctx = OutboundContext { sockets: Arc::default(), resolver: resolver.clone(), server_resolver: resolver, fakeip: None };
+        let e = build_outbound(&cfg, &ctx).await.err().expect("refused");
+        assert!(e.to_string().contains("netscape"), "{e}");
+    }
 }

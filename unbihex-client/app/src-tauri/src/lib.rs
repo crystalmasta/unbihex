@@ -564,6 +564,19 @@ async fn save_settings(
     reconnect_if_connected(&app, &state).await
 }
 
+/// The TLS fingerprint of one server; `None` follows the settings and the link.
+#[tauri::command]
+async fn set_server_fingerprint(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: Uuid,
+    fingerprint: Option<String>,
+) -> Result<Option<ConnectionInfo>, String> {
+    state.client.set_server_fingerprint(id, fingerprint).map_err(err)?;
+    notify(&app);
+    reconnect_if_connected(&app, &state).await
+}
+
 /// Android: the apps that can be put in or out of the VPN (issue #16).
 #[tauri::command]
 async fn android_apps(app: AppHandle) -> Result<Vec<tauri_plugin_unbihex_vpn::AppInfo>, String> {
@@ -1021,6 +1034,7 @@ pub fn run() {
             remove_subscription,
             remove_server,
             set_server_auto,
+            set_server_fingerprint,
             select_server,
             save_settings,
             set_ping_method,

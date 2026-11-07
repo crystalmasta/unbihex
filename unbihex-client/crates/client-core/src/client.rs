@@ -355,6 +355,11 @@ impl Client {
                 "пароль для доступа из сети — не короче {MIN_LAN_PASSWORD} символов"
             )));
         }
+        let fp = s.tls_fingerprint.trim().to_ascii_lowercase();
+        if !fp.is_empty() {
+            check_fingerprint(&fp)?;
+        }
+        s.tls_fingerprint = fp;
         // A mistyped DNS server would be dropped silently when connecting.
         for dns in s.dns_upstream.iter().chain(&s.dns_direct).filter(|d| !d.trim().is_empty()) {
             if let Err(e) = dns.trim().parse::<unbihex_engine::config::DnsUpstream>() {
@@ -403,10 +408,16 @@ impl Client {
     ) -> Vec<PingResult> {
         let servers: Vec<Server> = {
             let d = self.data.read();
+            // The delay is measured with the fingerprint a connection would send.
+            let fp = Some(d.settings.tls_fingerprint.trim().to_string()).filter(|f| !f.is_empty());
             d.servers
                 .iter()
                 .filter(|s| ids.is_empty() || ids.contains(&s.id))
                 .cloned()
+                .map(|mut s| {
+                    s.fingerprint = s.fingerprint.or_else(|| fp.clone());
+                    s
+                })
                 .collect()
         };
         let env = self.controller.ping_env();
@@ -506,6 +517,24 @@ impl Client {
             if let Some(v) = marked {
                 s.auto_marked = v;
             }
+            Ok(s.clone())
+        })?
+    }
+
+    /// Sets the TLS fingerprint of one server (`None` or empty: the one from the
+    /// settings or the link).
+    pub fn set_server_fingerprint(&self, id: Uuid, fingerprint: Option<String>) -> Result<Server> {
+        let fingerprint = fingerprint.map(|f| f.trim().to_ascii_lowercase()).filter(|f| !f.is_empty());
+        if let Some(f) = &fingerprint {
+            check_fingerprint(f)?;
+        }
+        self.mutate(|d| {
+            let s = d
+                .servers
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or_else(|| ClientError::NotFound("сервер".into()))?;
+            s.fingerprint = fingerprint;
             Ok(s.clone())
         })?
     }
@@ -622,6 +651,18 @@ pub fn short_label(name: &str) -> String {
     let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let rest = name.trim_start_matches(|c: char| !c.is_alphanumeric());
     if rest.is_empty() { words(name) } else { words(rest) }
+}
+
+/// TLS fingerprints the client offers (`fp` as in Xray).
+pub const FINGERPRINTS: &[&str] =
+    &["chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"];
+
+fn check_fingerprint(fp: &str) -> Result<()> {
+    if FINGERPRINTS.contains(&fp) {
+        Ok(())
+    } else {
+        Err(ClientError::Input(format!("неизвестный отпечаток TLS «{fp}»: {}", FINGERPRINTS.join(", "))))
+    }
 }
 
 fn shorten(s: &str) -> String {
@@ -857,12 +898,16 @@ mod tests {
             c.set_server_auto(ids[i], None, Some(true)).unwrap();
         }
         assert_eq!(group(&c), [ids[1], ids[0], ids[4]]);
+        // So does a server's own TLS fingerprint; an unknown one is refused.
+        c.set_server_fingerprint(ids[0], Some(" Firefox ".into())).unwrap();
+        assert!(c.set_server_fingerprint(ids[0], Some("netscape".into())).is_err());
         // The flags survive an update with rewritten links.
         let fresh = |host: &str| parse_server(&format!("vless://{UUID}@{host}:443?security=tls&sid=2#{host}")).unwrap();
         c.mutate(|d| d.replace_servers(s1, vec![fresh("c.com"), fresh("a.com"), fresh("b.com")])).unwrap();
         let d = c.snapshot();
         let a = d.server(ids[0]).unwrap();
         assert!(a.auto_excluded && a.auto_marked);
+        assert_eq!(a.fingerprint.as_deref(), Some("firefox"));
         assert!(!d.server(ids[2]).unwrap().auto_marked);
         // Updated servers go after the other subscription's: list order.
         assert_eq!(group(&c), [ids[1], ids[4], ids[0]]);

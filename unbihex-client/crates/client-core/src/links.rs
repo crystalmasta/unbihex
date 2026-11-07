@@ -101,6 +101,7 @@ fn blank(protocol: &str) -> Server {
         ping_error: None,
         auto_excluded: false,
         auto_marked: false,
+        fingerprint: None,
     }
 }
 
@@ -415,11 +416,12 @@ fn socks_parts(link: &str) -> Result<SocksParts> {
 
 /// The engine outbound (JSON, `tag` = "proxy") for a supported server.
 pub fn outbound_json(server: &Server) -> Result<Value> {
-    outbound_json_with(server, true)
+    outbound_json_with(server, true, "")
 }
 
-/// The engine outbound, with the UDP multiplexer switch for `vless://` links.
-pub fn outbound_json_with(server: &Server, mux: bool) -> Result<Value> {
+/// The engine outbound, with the UDP multiplexer switch for `vless://` links and a
+/// TLS fingerprint: the server's own, else `default_fp` (empty: the link's).
+pub fn outbound_json_with(server: &Server, mux: bool, default_fp: &str) -> Result<Value> {
     if let Some(why) = &server.unsupported {
         return Err(ClientError::Unsupported(why.clone()));
     }
@@ -428,7 +430,12 @@ pub fn outbound_json_with(server: &Server, mux: bool) -> Result<Value> {
     let mux = mux && server.protocol == "vless";
     match server.protocol.as_str() {
         "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "trusttunnel" | "naive" => {
-            Ok(json!({ "type": "link", "tag": "proxy", "url": server.link, "mux": mux }))
+            let mut v = json!({ "type": "link", "tag": "proxy", "url": server.link, "mux": mux });
+            let fp = server.fingerprint.as_deref().unwrap_or(default_fp).trim();
+            if !fp.is_empty() && matches!(server.protocol.as_str(), "vless" | "vmess" | "trojan" | "trusttunnel" | "naive") {
+                v["fingerprint"] = json!(fp);
+            }
+            Ok(v)
         }
         "socks" => {
             let p = socks_parts(&server.link)?;
@@ -454,10 +461,16 @@ mod tests {
     #[test]
     fn the_udp_mux_switch_reaches_only_vless() {
         let vless = parse_server(&format!("vless://{UUID}@h.com:443?security=tls#V")).unwrap();
-        assert_eq!(outbound_json_with(&vless, true).unwrap()["mux"], true);
-        assert_eq!(outbound_json_with(&vless, false).unwrap()["mux"], false);
+        assert_eq!(outbound_json_with(&vless, true, "").unwrap()["mux"], true);
+        assert_eq!(outbound_json_with(&vless, false, "").unwrap()["mux"], false);
         let trojan = parse_server("trojan://pass@h.com:443#T").unwrap();
-        assert_eq!(outbound_json_with(&trojan, true).unwrap()["mux"], false);
+        assert_eq!(outbound_json_with(&trojan, true, "").unwrap()["mux"], false);
+        // The fingerprint: the server's own over the settings', none for protocols without TLS.
+        assert_eq!(outbound_json_with(&trojan, true, "firefox").unwrap()["fingerprint"], "firefox");
+        let mut own = trojan.clone();
+        own.fingerprint = Some("safari".into());
+        assert_eq!(outbound_json_with(&own, true, "firefox").unwrap()["fingerprint"], "safari");
+        assert!(outbound_json_with(&trojan, true, "").unwrap().get("fingerprint").is_none());
     }
 
     #[test]

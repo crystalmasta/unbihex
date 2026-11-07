@@ -118,6 +118,10 @@ pub struct Server {
     /// Taken into the auto-select group in [`AutoGroup::Marked`] mode.
     #[serde(default)]
     pub auto_marked: bool,
+    /// TLS fingerprint for this server instead of [`Settings::tls_fingerprint`]
+    /// and the link's `fp`; kept across subscription updates.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 impl Server {
@@ -297,6 +301,9 @@ pub struct Settings {
     /// Android: show a "VPN is on" notification. It keeps the VPN running in the
     /// foreground, so swiping the app away does not drop it.
     pub android_notification: bool,
+    /// TLS fingerprint forced on every server (`fp`: chrome, firefox, …); empty
+    /// keeps each link's own.
+    pub tls_fingerprint: String,
     /// Android: which apps go through the VPN; applied on connect.
     pub android_apps_mode: AppsMode,
     /// Android: package names for [`Settings::android_apps_mode`].
@@ -363,6 +370,7 @@ impl Default for Settings {
             auto_start: false,
             auto_start_admin: false,
             android_notification: true,
+            tls_fingerprint: String::new(),
             android_apps_mode: AppsMode::All,
             android_apps: Vec::new(),
             log_level: "info".into(),
@@ -486,6 +494,7 @@ impl AppData {
                 s.ping_error = o.ping_error.clone();
                 s.auto_excluded = o.auto_excluded;
                 s.auto_marked = o.auto_marked;
+                s.fingerprint = o.fingerprint.clone();
             }
             s.subscription_id = Some(sub_id);
             self.servers.push(s);

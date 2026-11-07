@@ -37,7 +37,11 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   (written to disk as it downloads).
 - Adding `vless://`, `ss://`, `socks://`, `hy2://` and `hysteria2://` links by hand.
 - VLESS TLS and REALITY send a Chrome ClientHello (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768) instead of
-  rustls's recognisable one; `fp=none` in a link turns this off.
+  rustls's recognisable one; `fp=none` in a link turns this off. "TLS fingerprint" in the settings is "As in the
+  link" (the default) or one for every server: chrome, firefox, safari, ios, android, edge, 360, qq, random,
+  randomized (VLESS, VMess, Trojan, TrustTunnel, NaiveProxy). A button in a server's row sets one for that server only;
+  like the auto-select marks, it survives subscription updates. With REALITY, fingerprints without ML-KEM (ios,
+  android, edge, 360, qq) are refused by an Xray 26 server.
 - A choice of ping tests: through the proxy with GET or HEAD (the request goes through the engine itself to
   `cp.cloudflare.com/generate_204`, so the whole chain is checked), TCP (a connection to the server port only) or ICMP.
   TCP and ICMP also test servers whose protocol is not supported; in TUN mode the tests bypass the tunnel.

@@ -251,7 +251,7 @@ function serverHtml(s) {
   return `<div class="server${sel ? " selected" : ""}${s.unsupported ? " unsupported" : ""}${off ? " auto-off" : ""}" data-server="${s.id}">
     <span class="radio"></span>
     <div class="s-main"><div class="s-name">${esc(s.name)}</div><div class="s-meta"><span class="badge">${esc(s.protocol)}</span>${meta}</div></div>
-    ${pingHtml(s)}${autoHtml(s)}${del || "<span></span>"}
+    ${pingHtml(s)}${fpHtml(s)}${autoHtml(s)}${del || "<span></span>"}
   </div>`;
 }
 
@@ -271,6 +271,32 @@ function autoHtml(s) {
     ? on ? "Отмечен для автовыбора — снять отметку" : "Отметить для автовыбора"
     : on ? "В автовыборе — исключить" : "Исключён из автовыбора — вернуть";
   return `<button class="icon-btn auto-btn${on ? " on" : ""}" data-auto-server="${s.id}" title="${title}"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3M18 3v4h-4M6 21v-4h4"/></svg></button>`;
+}
+
+// TLS fingerprint of one server: kept across subscription updates, like the auto-select marks.
+const FP_PROTOCOLS = ["vless", "vmess", "trojan", "trusttunnel", "naive"];
+
+function fpHtml(s) {
+  if (s.unsupported || !FP_PROTOCOLS.includes(s.protocol)) return "<span></span>";
+  const title = s.fingerprint ? `Отпечаток TLS: ${s.fingerprint}` : "Отпечаток TLS: как в настройках";
+  return `<button class="icon-btn fp-btn${s.fingerprint ? " on" : ""}" data-fp-server="${s.id}" title="${esc(title)}"><svg viewBox="0 0 24 24"><path d="M12 11v3a8 8 0 0 1-1.5 4.7M8 9.5a4 4 0 0 1 8 0v2.5a12 12 0 0 1-1 4.8M5 12a7 7 0 0 1 12.6-4.2M19 12v1.5a14 14 0 0 1-.6 4"/></svg></button>`;
+}
+
+let fpServer = null;
+function openFpDialog(id) {
+  const s = S.data.servers.find((x) => x.id === id);
+  if (!s) return;
+  fpServer = id;
+  $("#fp-server").textContent = s.name;
+  $("#fp-select").value = s.fingerprint || "";
+  $("#dlg-fp").showModal();
+}
+
+async function saveFp() {
+  const fingerprint = $("#fp-select").value || null;
+  $("#dlg-fp").close();
+  await call("set_server_fingerprint", { id: fpServer, fingerprint }).catch(() => {});
+  await refresh();
 }
 
 async function toggleAuto(id) {
@@ -448,6 +474,7 @@ function fillSettings() {
   f.android_notification.checked = s.android_notification;
   $("#android-notification").hidden = S.platform !== "android";
   f.android_apps_mode.value = s.android_apps_mode || "all";
+  f.tls_fingerprint.value = s.tls_fingerprint || "";
   $("#android-apps").hidden = S.platform !== "android";
   appsCount();
   f.log_level.value = s.log_level;
@@ -539,6 +566,7 @@ function readSettings() {
     auto_connect: f.auto_connect.checked,
     android_notification: f.android_notification.checked,
     android_apps_mode: f.android_apps_mode.value,
+    tls_fingerprint: f.tls_fingerprint.value,
     log_level: f.log_level.value,
     geosite_url: f.geosite_url.value.trim(),
     geoip_url: f.geoip_url.value.trim(),
@@ -685,7 +713,7 @@ function bind() {
   );
 
   document.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-open],[data-goto],[data-server],[data-del-server],[data-auto-server],[data-toggle-group],[data-update-sub],[data-edit-sub],[data-href]");
+    const t = e.target.closest("[data-open],[data-goto],[data-server],[data-del-server],[data-auto-server],[data-fp-server],[data-toggle-group],[data-update-sub],[data-edit-sub],[data-href]");
     if (!t) return;
     if (t.dataset.open === "add") {
       $("#add-text").value = "";
@@ -698,6 +726,9 @@ function bind() {
     } else if (t.dataset.autoServer) {
       e.stopPropagation();
       toggleAuto(t.dataset.autoServer);
+    } else if (t.dataset.fpServer) {
+      e.stopPropagation();
+      openFpDialog(t.dataset.fpServer);
     } else if (t.dataset.server) {
       selectServer(t.dataset.server);
     } else if (t.dataset.toggleGroup) {
@@ -845,6 +876,7 @@ function bind() {
     $("#apps-picked").textContent = `выбрано: ${appsPicked.size}`;
   });
   $("#apps-save").addEventListener("click", saveApps);
+  $("#fp-save").addEventListener("click", saveFp);
 
   for (const [preset, field] of [["#dns-preset", "dns_upstream"], ["#dns-direct-preset", "dns_direct"]]) {
     $(preset).addEventListener("change", (e) => {

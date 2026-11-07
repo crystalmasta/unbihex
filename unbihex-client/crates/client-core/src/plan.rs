@@ -309,7 +309,7 @@ fn proxy_outbounds(servers: &[Server], settings: &Settings) -> Result<Vec<Value>
 }
 
 fn proxy_outbound(server: &Server, settings: &Settings) -> Result<Value> {
-    let mut ob = outbound_json_with(server, settings.mux)?;
+    let mut ob = outbound_json_with(server, settings.mux, &settings.tls_fingerprint)?;
     let tls_like = server.transport.contains("tls") || server.transport.contains("reality");
     if settings.fragment && server.protocol == "vless" && tls_like {
         ob["fragment"] = json!({

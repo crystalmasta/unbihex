@@ -160,6 +160,22 @@
           </fieldset>
           <fieldset>
             <legend>Обход DPI</legend>
+            <label>Отпечаток TLS
+              <select name="tls_fingerprint">
+                <option value="">Как в ссылке</option>
+                <option value="chrome">Chrome</option>
+                <option value="firefox">Firefox</option>
+                <option value="safari">Safari</option>
+                <option value="ios">iOS</option>
+                <option value="android">Android</option>
+                <option value="edge">Edge</option>
+                <option value="360">360 Browser</option>
+                <option value="qq">QQ Browser</option>
+                <option value="random">Случайный (один из браузеров)</option>
+                <option value="randomized">Случайный набор (randomized)</option>
+              </select>
+            </label>
+            <p class="hint">Какой браузер изображает TLS-рукопожатие (VLESS, VMess, Trojan, TrustTunnel, NaiveProxy). «Как в ссылке» — параметр <code>fp</code> сервера. Для одного сервера отпечаток можно задать кнопкой в его строке. С REALITY отпечатки без ML-KEM — iOS, Android, Edge, 360 и QQ — сервер Xray 26 не пустит (он требует X25519MLKEM768).</p>
             <label class="check"><input name="fragment" type="checkbox" /> Дробить TLS ClientHello на мелкие части (VLESS с TLS или REALITY)</label>
             <div class="row">
               <label>Размер частей, байт<input name="fragment_length" placeholder="100-200" /></label>
@@ -316,6 +332,34 @@
         <span class="spacer"></span>
         <button value="cancel" class="btn">Отмена</button>
         <button type="button" class="btn primary" id="sub-save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-fp">
+    <form method="dialog" class="dlg">
+      <h2>Отпечаток TLS</h2>
+      <p class="hint" id="fp-server"></p>
+      <label>Для этого сервера
+        <select id="fp-select">
+          <option value="">Как в настройках</option>
+          <option value="chrome">Chrome</option>
+                <option value="firefox">Firefox</option>
+                <option value="safari">Safari</option>
+                <option value="ios">iOS</option>
+                <option value="android">Android</option>
+                <option value="edge">Edge</option>
+                <option value="360">360 Browser</option>
+                <option value="qq">QQ Browser</option>
+                <option value="random">Случайный (один из браузеров)</option>
+                <option value="randomized">Случайный набор (randomized)</option>
+        </select>
+      </label>
+      <p class="hint">С REALITY отпечатки без ML-KEM — iOS, Android, Edge, 360 и QQ — сервер Xray 26 не пустит (он требует X25519MLKEM768).</p>
+      <div class="dlg-actions">
+        <span class="spacer"></span>
+        <button value="cancel" class="btn">Отмена</button>
+        <button type="button" class="btn primary" id="fp-save">Сохранить</button>
       </div>
     </form>
   </dialog>

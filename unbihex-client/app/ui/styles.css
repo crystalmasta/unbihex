@@ -173,7 +173,7 @@ textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consola
 .group-head .chev { transform: rotate(90deg); transition: transform .15s; }
 .servers { border-top: 1px solid var(--border); }
 .server {
-  display: grid; grid-template-columns: 22px 1fr auto auto auto; gap: 10px; align-items: center;
+  display: grid; grid-template-columns: 22px 1fr auto auto auto auto; gap: 10px; align-items: center;
   padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer;
 }
 .server:last-child { border-bottom: 0; }
@@ -182,8 +182,8 @@ textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consola
 .server.unsupported { cursor: default; }
 .server.unsupported .s-name { color: var(--muted); }
 .server.auto-off .s-name { color: var(--muted); }
-.auto-btn { opacity: .45; }
-.auto-btn.on { opacity: 1; color: var(--accent); }
+.auto-btn, .fp-btn { opacity: .45; }
+.auto-btn.on, .fp-btn.on { opacity: 1; color: var(--accent); }
 .radio { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--border); display: grid; place-items: center; }
 .server.selected .radio { border-color: var(--accent); }
 .server.selected .radio::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
