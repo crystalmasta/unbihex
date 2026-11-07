@@ -645,6 +645,35 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
         }
         "shadowsocks" => Some(ss_link(str_of(ob, "method"), str_of(ob, "password"), host, port, name)),
         "socks" => Some(socks_link(str_of(ob, "username"), str_of(ob, "password"), host, port, name)),
+        "naive" => {
+            // sing-box's `quic` is HTTP/3 (naive+quic, refused for now); `udp_over_tcp`
+            // is sing-box's own and dropped (NaiveProxy has no UDP).
+            let scheme = if ob.get("quic") == Some(&Value::Bool(true)) { "naive+quic" } else { "naive+https" };
+            let fp = tls
+                .get("utls")
+                .map(|u| str_of(u, "fingerprint").to_string())
+                .unwrap_or_default();
+            let mut params = vec![("padding", "true".to_string()), ("sni", str_of(&tls, "server_name").to_string()), ("fp", fp)];
+            if tls.get("insecure") == Some(&Value::Bool(true)) {
+                params.push(("insecure", "1".into()));
+            }
+            if ob.get("extra_headers").is_some_and(|h| h.as_object().is_some_and(|m| !m.is_empty())) {
+                params.push(("extra-headers", "1".into()));
+            }
+            let query: Vec<String> = params
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, v)| format!("{k}={}", enc(&v)))
+                .collect();
+            Some(format!(
+                "{scheme}://{}:{}@{}?{}#{}",
+                enc(str_of(ob, "username")),
+                enc(str_of(ob, "password")),
+                host_port(host, port),
+                query.join("&"),
+                enc(name)
+            ))
+        }
         "trojan" => {
             let security = if reality_on { "reality" } else if tls_on { "tls" } else { "none" };
             let fp = tls
@@ -1068,10 +1097,21 @@ mod tests {
                  "flow":"xtls-rprx-vision","tls":{{"enabled":true,"server_name":"x.com",
                  "reality":{{"enabled":true,"public_key":"wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE","short_id":"ab"}}}}}},
                {{"type":"hysteria2","tag":"h","server":"2.2.2.2","server_port":443,"password":"p"}},
+               {{"type":"naive","tag":"n","server":"3.3.3.3","server_port":8443,"username":"u@x","password":"p:w",
+                 "tls":{{"enabled":true,"server_name":"naive.example"}}}},
+               {{"type":"naive","tag":"nq","server":"3.3.3.3","server_port":443,"username":"u","password":"p","quic":true,
+                 "tls":{{"enabled":true}}}},
                {{"type":"direct","tag":"direct"}}]}}"#
         );
         let links = links_from_json(&body).unwrap();
-        assert_eq!(links.len(), 2);
+        assert_eq!(links.len(), 4);
+        let n = parse_server(&links[2]).unwrap();
+        assert_eq!((n.protocol.as_str(), n.name.as_str(), n.port), ("naive", "n", 8443));
+        assert!(n.is_supported(), "{:?} {}", n.unsupported, links[2]);
+        let Ok(OutboundConfig::Naive(c)) = unbihex_engine::link::parse_link(&links[2], "p") else { panic!("{}", links[2]) };
+        assert_eq!((c.username.expose(), c.password.expose(), c.sni.as_deref()), ("u@x", "p:w", Some("naive.example")));
+        assert!(!parse_server(&links[3]).unwrap().is_supported(), "naive+quic waits for HTTP/3");
+        let links = links[..2].to_vec();
         let a = parse_server(&links[0]).unwrap();
         assert_eq!(a.name, "a");
         assert!(a.is_supported(), "{:?}", a.unsupported);

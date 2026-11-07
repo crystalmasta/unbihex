@@ -77,7 +77,7 @@ pub async fn resolve(cfg: &TrustTunnelConfig, resolver: &Resolver) -> Result<Ser
 }
 
 /// The `:authority` of a CONNECT: `host:port`, `[v6]:port`.
-fn authority(target: &TargetAddr) -> String {
+pub(crate) fn authority(target: &TargetAddr) -> String {
     match &target.addr {
         Address::Ip(IpAddr::V6(ip)) => format!("[{ip}]:{}", target.port),
         Address::Ip(IpAddr::V4(ip)) => format!("{ip}:{}", target.port),
@@ -353,7 +353,7 @@ impl Outbound for TrustTunnelOutbound {
 }
 
 /// A CONNECT stream as a byte stream.
-struct H2Io {
+pub(crate) struct H2Io {
     send: SendStream<Bytes>,
     recv: RecvStream,
     pending: Bytes,
@@ -362,7 +362,7 @@ struct H2Io {
 }
 
 impl H2Io {
-    fn new(send: SendStream<Bytes>, recv: RecvStream) -> Self {
+    pub(crate) fn new(send: SendStream<Bytes>, recv: RecvStream) -> Self {
         H2Io {
             send,
             recv,

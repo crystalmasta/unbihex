@@ -44,7 +44,7 @@ unbihex-engine/
 │  ├─ address.rs     # Address, TargetAddr, SOCKS5-style addresses
 │  ├─ session.rs     # Session, Network
 │  ├─ config.rs      # config (§5) and checks
-│  ├─ link.rs        # vless://, vmess://, trojan://, ss://, hy2://, tt:// share links (§5.4)
+│  ├─ link.rs        # vless://, vmess://, trojan://, ss://, hy2://, tt://, naive+https:// share links (§5.4)
 │  ├─ router.rs      # rules (§6)
 │  ├─ rules/         # geosite/geoip (geodata.rs), .srs (srs.rs), succinct trie, IP sets (§6.2)
 │  ├─ dispatcher.rs  # outbound choice, address checks, hot table swap (§7)
@@ -302,6 +302,10 @@ as Xray 26 writes it; `obfs` wins; `salamander` with `packetSize` and other mask
   Refused: a version above 2, `skip_verification`, HTTP/3, `client_random_prefix` / `client_random_auth_key`, a
   subscription-only link. `dns_upstreams` and `subscription_url` are ignored. The client turns an endpoint's
   subscription JSON (`hostname`, `address`, …, the certificate in PEM) into such a link (`link::tt_link_from_json`).
+- `naive+https://<user>:<password>@<host>[:443][/]?…#<name>` (NaiveProxy, the NekoBox/Shadowrocket form, §11.17):
+  `padding` (`true` by default, `false` turns it off), `sni` / `peer` / `serverName`, `fp`. Refused: `naive+quic://`
+  (HTTP/3), `insecure=1`, `extra-headers`. Other parameters (`insecure-concurrency`) are ignored. The client turns a
+  sing-box `type: naive` outbound of a JSON subscription into such a link (`quic: true` into `naive+quic://`).
 
 ---
 
@@ -960,6 +964,26 @@ they are.
   `Unsupported` for UDP (SOCKS5) is not a failure.
 - `Instance::balancers()` gives every balancer's current member (the one the last connection went through) and the
   members' state (`alive`, `delay_ms`). The checks stop when a hot reload replaces the balancer.
+
+### 11.17 NaiveProxy
+
+`{"type": "naive", "tag", "server", "port", "username", "password", "sni"?, "certificates"?, "padding"?, "fingerprint"?}`
+is a NaiveProxy client (issue #15), as NaiveProxy and sing-box (`protocol/naive`) speak it.
+
+- One TLS connection (ALPN `h2`, Chrome's ClientHello unless `fingerprint` says otherwise; §11.2) and HTTP/2 with the
+  chosen browser's SETTINGS and WINDOW_UPDATE, as in XHTTP (§11.5). Every TCP flow is a `CONNECT host:port` with
+  `proxy-authorization: Basic base64(user:password)`; 200 opens it, 407 means a wrong user or password, anything
+  else is a refusal. A connection idle for 30 s is pinged (5 s) before a new flow; a connection that fails a CONNECT
+  is replaced once. The certificate is checked against the WebPKI roots or only `certificates` (base64 DER), for the
+  name `sni`, else `server`.
+- Padding (`padding`, on by default): the request carries a `padding` header of 30–61 bytes, the first 16 random from
+  ``!#$()+<>?@[]^`{}`` (HPACK's Huffman code cannot shorten them), the rest `~`. When the answer has `padding` too, the
+  first 8 writes and the first 8 read frames of each direction are `data_len(be16) | padding_len(u8) | data |
+  padding_len zeros` (`padding_len` random in 0–255, `data` up to 65 535 bytes, a larger write is split); later
+  bytes go as they are. Without the header in the answer (older servers) there is no padding. sing-box refuses a
+  CONNECT without `padding` (400).
+- NaiveProxy has no UDP: `connect_udp` is `Unsupported` (sing-box's UoT is its own extension and not supported).
+  HTTP/3 (`naive+quic`) is not there yet.
 
 ---
 

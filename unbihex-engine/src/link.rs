@@ -1,7 +1,8 @@
-//! Share links: `vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, `hysteria2://`
-//! and TrustTunnel's `tt://` (SPEC §5.4).
+//! Share links: `vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, `hysteria2://`,
+//! TrustTunnel's `tt://` and NaiveProxy's `naive+https://` (SPEC §5.4).
 
 mod finalmask;
+mod naive;
 mod trojan;
 mod tt;
 mod vmess;
@@ -29,6 +30,10 @@ pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
         trojan::parse(rest, tag)
     } else if strip_scheme(url, "tt://").is_some() {
         tt::parse(url, tag)
+    } else if let Some(rest) = strip_scheme(url, "naive+https://") {
+        naive::parse(rest, tag)
+    } else if strip_scheme(url, "naive+quic://").is_some() {
+        naive::parse_quic()
     } else if let Some(rest) = strip_scheme(url, "ss://") {
         parse_ss(rest, tag)
     } else if let Some(rest) =
@@ -37,8 +42,8 @@ pub fn parse_link(url: &str, tag: &str) -> Result<OutboundConfig> {
         parse_hysteria2(rest, tag)
     } else {
         Err(Error::Unsupported(
-            "only vless://, vmess://, trojan://, ss://, hysteria2://, hy2:// and tt:// links \
-             are supported"
+            "only vless://, vmess://, trojan://, ss://, hysteria2://, hy2://, tt:// and \
+             naive+https:// links are supported"
                 .into(),
         ))
     }

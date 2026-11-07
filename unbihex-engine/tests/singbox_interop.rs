@@ -3,7 +3,8 @@
 //! Runs only when `SINGBOX_BIN` points to a `sing-box` binary, e.g.
 //! `SINGBOX_BIN=/path/to/sing-box cargo test --test singbox_interop`.
 //! Covers VLESS over WebSocket and HTTPUpgrade with the request headers from the
-//! config, plain and behind an nginx-like gate that wants one User-Agent.
+//! config, plain and behind an nginx-like gate that wants one User-Agent; and
+//! NaiveProxy (HTTP/2 CONNECT with padding) against sing-box's `naive` inbound.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -16,7 +17,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use unbihex_engine::address::TargetAddr;
-use unbihex_engine::config::{Secret, VlessConfig};
+use unbihex_engine::config::{NaiveConfig, Secret, VlessConfig};
 use unbihex_engine::net::SocketFactory;
 use unbihex_engine::outbound::vless::VlessOutbound;
 use unbihex_engine::outbound::ws::WsConfig;
@@ -183,4 +184,73 @@ async fn vless_websocket_headers_against_sing_box() {
         };
         assert!(e.contains("200"), "{e}");
     }
+}
+
+/// NaiveProxy against sing-box's `naive` inbound over TLS with its own
+/// certificate: a padded round trip, then a wrong password and a request without
+/// padding (sing-box refuses both).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn naive_against_sing_box() {
+    use base64::Engine as _;
+    let Some(bin) = std::env::var("SINGBOX_BIN").ok().filter(|p| !p.is_empty()) else {
+        eprintln!("SINGBOX_BIN is not set: skipping the sing-box naive test");
+        return;
+    };
+    init_tracing();
+    let echo = tcp_echo().await;
+    let port = free_port();
+    let ck = rcgen::generate_simple_self_signed(vec!["naive.test".into()]).unwrap();
+    let dir = std::env::temp_dir().join(format!("unbihex-naive-cert-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+    std::fs::write(&cert, ck.cert.pem()).unwrap();
+    std::fs::write(&key, ck.signing_key.serialize_pem()).unwrap();
+    let config = serde_json::json!({
+        "log": { "level": "debug" },
+        "inbounds": [{
+            "type": "naive", "tag": "in", "listen": "127.0.0.1", "listen_port": port,
+            "users": [{ "username": "user", "password": "secret" }],
+            "tls": {
+                "enabled": true, "server_name": "naive.test",
+                "certificate_path": cert.to_string_lossy(), "key_path": key.to_string_lossy()
+            }
+        }],
+        "outbounds": [{ "type": "direct", "tag": "direct" }]
+    });
+    let _sb = start_sing_box(&bin, config, port).await;
+    let cfg = NaiveConfig {
+        tag: "naive".into(),
+        server: "127.0.0.1".into(),
+        port,
+        username: Secret("user".into()),
+        password: Secret("secret".into()),
+        sni: Some("naive.test".into()),
+        certificates: vec![base64::engine::general_purpose::STANDARD.encode(ck.cert.der())],
+        padding: true,
+        fingerprint: None,
+    };
+    let build = |cfg: &NaiveConfig| {
+        let server = ServerEndpoint {
+            host: "127.0.0.1".into(),
+            port,
+            addrs: vec![SocketAddr::from(([127, 0, 0, 1], port))],
+        };
+        unbihex_engine::outbound::naive::NaiveOutbound::new(cfg, server, Arc::new(SocketFactory::default()))
+            .unwrap()
+    };
+    let ob = build(&cfg);
+    eprintln!("sing-box naive, padded");
+    roundtrip(&ob, echo).await;
+    // A second stream on the same HTTP/2 connection.
+    roundtrip(&ob, echo).await;
+    assert!(ob.connect_udp(&session(echo)).await.is_err(), "naive has no UDP");
+
+    let mut wrong = cfg.clone();
+    wrong.password = Secret("nope".into());
+    let e = build(&wrong).connect_tcp(&session(echo)).await.err().expect("a wrong password is refused");
+    assert!(e.to_string().contains("407"), "{e}");
+    let mut plain = cfg.clone();
+    plain.padding = false;
+    assert!(build(&plain).connect_tcp(&session(echo)).await.is_err(), "sing-box wants padding");
+    let _ = std::fs::remove_dir_all(&dir);
 }

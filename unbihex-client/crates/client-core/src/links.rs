@@ -1,6 +1,6 @@
 //! Share links: display metadata for any common scheme, and the outbound the
 //! engine needs for the ones it supports (`vless://`, `vmess://`, `trojan://`, `ss://`,
-//! `socks://`, `hy2://`, `tt://`).
+//! `socks://`, `hy2://`, `tt://`, `naive+https://`).
 
 use base64::Engine as _;
 use percent_encoding::percent_decode_str;
@@ -14,7 +14,7 @@ use crate::model::Server;
 /// Schemes recognised as share links (supported or not).
 const SCHEMES: &[&str] = &[
     "vless", "vmess", "trojan", "ss", "ssr", "socks", "socks5", "hysteria", "hysteria2", "hy2",
-    "tuic", "wireguard", "wg", "anytls", "naive+https", "tt",
+    "tuic", "wireguard", "wg", "anytls", "naive+https", "naive+quic", "tt",
 ];
 
 /// Whether `line` looks like a share link.
@@ -166,6 +166,7 @@ fn parse_generic(link: &str, scheme: &str) -> Result<Server> {
         "socks5" => "socks",
         "hy2" => "hysteria2",
         "wg" => "wireguard",
+        "naive+https" | "naive+quic" => "naive",
         other => other,
     });
     s.link = link.into();
@@ -208,10 +209,15 @@ fn parse_generic(link: &str, scheme: &str) -> Result<Server> {
             s.port = 443;
         }
     }
+    if s.protocol == "naive" && s.port == 0 {
+        s.port = 443;
+    }
     s.transport = match scheme {
         "ss" => "shadowsocks".into(),
         "socks" | "socks5" => "socks5".into(),
         "hysteria2" | "hy2" => "quic+tls".into(),
+        "naive+https" => "h2+tls".into(),
+        "naive+quic" => "quic".into(),
         "vless" | "trojan" => {
             let net = param("type");
             let net = if net.is_empty() { "tcp".to_string() } else { net };
@@ -262,7 +268,7 @@ fn support_problem(link: &str, scheme: &str) -> Option<String> {
         "hysteria2" | "hy2" if json_options_dropped(link) => {
             Some("в профиле есть настройки Hysteria 2, которых клиент пока не поддерживает".into())
         }
-        "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "hy2" | "tt" => match unbihex_engine::link::parse_link(link, "proxy") {
+        "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "hy2" | "tt" | "naive+https" | "naive+quic" => match unbihex_engine::link::parse_link(link, "proxy") {
             Ok(OutboundConfig::Vless(v)) if v.is_plaintext() => {
                 Some("VLESS без TLS передаёт UUID и трафик открыто".into())
             }
@@ -421,7 +427,7 @@ pub fn outbound_json_with(server: &Server, mux: bool) -> Result<Value> {
     // claim an effect the engine does not have.
     let mux = mux && server.protocol == "vless";
     match server.protocol.as_str() {
-        "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "trusttunnel" => {
+        "vless" | "vmess" | "trojan" | "ss" | "hysteria2" | "trusttunnel" | "naive" => {
             Ok(json!({ "type": "link", "tag": "proxy", "url": server.link, "mux": mux }))
         }
         "socks" => {
@@ -530,6 +536,16 @@ mod tests {
         let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","scy":"aes-256-cfb"}}"#))).unwrap();
         let why = s.unsupported.unwrap();
         assert!(why.contains("шифрование VMess «aes-256-cfb»"), "{why}");
+    }
+
+    #[test]
+    fn naive_links() {
+        let s = parse_server("naive+https://u:p@naive.example?padding=true#N").unwrap();
+        assert_eq!((s.protocol.as_str(), s.host.as_str(), s.port, s.transport.as_str()), ("naive", "naive.example", 443, "h2+tls"));
+        assert!(s.is_supported(), "{:?}", s.unsupported);
+        assert!(outbound_json(&s).is_ok());
+        let q = parse_server("naive+quic://u:p@naive.example:443#Q").unwrap();
+        assert!(q.unsupported.as_deref().is_some_and(|w| w.contains("HTTP/3")), "{:?}", q.unsupported);
     }
 
     #[test]

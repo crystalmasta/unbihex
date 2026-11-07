@@ -44,7 +44,7 @@ unbihex-engine/
 │  ├─ address.rs     # Address, TargetAddr, адреса в формате SOCKS5
 │  ├─ session.rs     # Session, Network
 │  ├─ config.rs      # конфиг (§5) и проверки
-│  ├─ link.rs        # share-ссылки vless://, vmess://, trojan://, ss://, hy2://, tt:// (§5.4)
+│  ├─ link.rs        # share-ссылки vless://, vmess://, trojan://, ss://, hy2://, tt://, naive+https:// (§5.4)
 │  ├─ router.rs      # правила (§6)
 │  ├─ rules/         # geosite/geoip (geodata.rs), .srs (srs.rs), succinct-trie, наборы IP (§6.2)
 │  ├─ dispatcher.rs  # выбор outbound, проверки адресов, горячая замена таблицы (§7)
@@ -296,6 +296,10 @@ IPv6 в скобках:
   Отклоняются: версия новее 2, `skip_verification`, HTTP/3, `client_random_prefix` / `client_random_auth_key`,
   ссылка из одной подписки. `dns_upstreams` и `subscription_url` игнорируются. JSON подписки эндпоинта
   (`hostname`, `address`, …, сертификат в PEM) клиент переводит в такую ссылку (`link::tt_link_from_json`).
+- `naive+https://<user>:<password>@<host>[:443][/]?…#<name>` (NaiveProxy, формат NekoBox/Shadowrocket, §11.17):
+  `padding` (`true` по умолчанию, `false` — без дополнения), `sni` / `peer` / `serverName`, `fp`. Отклоняются:
+  `naive+quic://` (HTTP/3), `insecure=1`, `extra-headers`. Прочие параметры (`insecure-concurrency`) игнорируются.
+  Outbound sing-box `type: naive` из JSON-подписки клиент переводит в такую ссылку (`quic: true` — в `naive+quic://`).
 
 ---
 
@@ -931,6 +935,25 @@ RFC 1928/1929: CONNECT, опционально логин и пароль. До�
   следующего. `Unsupported` у UDP (SOCKS5) не считается сбоем.
 - `Instance::balancers()` — для каждого балансировщика текущий участник (через кого шло последнее соединение) и
   состояние участников (`alive`, `delay_ms`). Проверка останавливается, когда балансировщик заменён hot reload.
+
+### 11.17 NaiveProxy
+
+`{"type": "naive", "tag", "server", "port", "username", "password", "sni"?, "certificates"?, "padding"?, "fingerprint"?}`
+— клиент NaiveProxy (issue #15), как его понимают NaiveProxy и sing-box (`protocol/naive`).
+
+- Одно TLS-соединение (ALPN `h2`, ClientHello Chrome, если не задан `fingerprint`; §11.2) и HTTP/2 с SETTINGS и
+  WINDOW_UPDATE выбранного браузера, как у XHTTP (§11.5). Каждый TCP-поток — `CONNECT host:port` с
+  `proxy-authorization: Basic base64(user:password)`; 200 — поток открыт, 407 — неверный логин или пароль, другое —
+  отказ. Соединение, простоявшее 30 с, проверяется PING (5 с) перед новым потоком; обрыв соединения при CONNECT —
+  одна повторная попытка на новом. Сертификат — по корням WebPKI или только по `certificates` (base64 DER), имя —
+  `sni`, иначе `server`.
+- Дополнение (`padding`, по умолчанию включено): запрос несёт заголовок `padding` — 30–61 байт, первые 16 случайны из
+  ``!#$()+<>?@[]^`{}`` (их не сжимает Хаффман HPACK), остальные `~`. Если и ответ несёт `padding`, первые 8 записей и
+  первые 8 кадров чтения в каждом направлении — `data_len(be16) | padding_len(u8) | data | padding_len нулей`
+  (`padding_len` случайно 0–255, `data` до 65 535 байт, большая запись делится); дальше байты идут как есть. Без
+  заголовка в ответе (старые серверы) — без дополнения. sing-box отвергает CONNECT без `padding` (400).
+- UDP в NaiveProxy нет: `connect_udp` — `Unsupported` (UoT sing-box — его собственное расширение, не поддерживается).
+  HTTP/3 (`naive+quic`) — пока нет.
 
 ---
 

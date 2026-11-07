@@ -5,7 +5,7 @@
 A VPN client for subscriptions, built on its own network engine written in Rust. Works with Xray servers:
 VLESS (TLS, REALITY, XTLS Vision, XHTTP, WebSocket, HTTPUpgrade), VMess (TCP, TLS, WebSocket, HTTPUpgrade),
 Trojan (TLS, REALITY, WebSocket, HTTPUpgrade), Shadowsocks, SOCKS5,
-Hysteria2 (TCP/UDP, Salamander), and also TrustTunnel (HTTP/2).
+Hysteria2 (TCP/UDP, Salamander), and also TrustTunnel (HTTP/2) and NaiveProxy (HTTP/2, TCP).
 One code base for Windows, Linux, macOS, Android and iOS.
 
 ## Download

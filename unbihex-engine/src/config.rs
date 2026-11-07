@@ -379,6 +379,8 @@ pub enum OutboundConfig {
     Trojan(TrojanConfig),
     /// TrustTunnel: CONNECT over HTTP/2 and TLS.
     Trusttunnel(TrustTunnelConfig),
+    /// NaiveProxy: CONNECT over HTTP/2 and TLS with padding.
+    Naive(NaiveConfig),
     /// Shadowsocks AEAD.
     Shadowsocks(ShadowsocksConfig),
     /// Upstream SOCKS5 proxy.
@@ -402,6 +404,7 @@ impl OutboundConfig {
             OutboundConfig::Vmess(c) => &c.tag,
             OutboundConfig::Trojan(c) => &c.tag,
             OutboundConfig::Trusttunnel(c) => &c.tag,
+            OutboundConfig::Naive(c) => &c.tag,
             OutboundConfig::Shadowsocks(c) => &c.tag,
             OutboundConfig::Socks(c) => &c.tag,
             OutboundConfig::Link(c) => &c.tag,
@@ -418,6 +421,7 @@ impl OutboundConfig {
             OutboundConfig::Vmess(c) => Some((&c.server, c.port)),
             OutboundConfig::Trojan(c) => Some((&c.server, c.port)),
             OutboundConfig::Trusttunnel(c) => c.addresses.first().and_then(|a| split_host_port(a)),
+            OutboundConfig::Naive(c) => Some((&c.server, c.port)),
             OutboundConfig::Shadowsocks(c) => Some((&c.server, c.port)),
             OutboundConfig::Socks(c) => Some((&c.server, c.port)),
             _ => None,
@@ -676,6 +680,64 @@ impl TrustTunnelConfig {
                     .add(cert.clone())
                     .map_err(|e| Error::config(format!("trusttunnel: bad certificate: {e}")))?;
                 Ok(cert)
+            })
+            .collect()
+    }
+}
+
+/// NaiveProxy outbound settings (SPEC §11.17): HTTP/2 CONNECT over TLS.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NaiveConfig {
+    /// Outbound tag.
+    pub tag: String,
+    /// Server host name or IP.
+    pub server: String,
+    /// Server port.
+    pub port: u16,
+    /// User name.
+    pub username: Secret,
+    /// Password.
+    pub password: Secret,
+    /// SNI and the name the certificate is checked against; `server` when absent.
+    #[serde(default)]
+    pub sni: Option<String>,
+    /// Trust exactly these certificates (base64 DER) instead of the public roots.
+    #[serde(default)]
+    pub certificates: Vec<String>,
+    /// NaiveProxy padding of the first frames; on unless set false.
+    #[serde(default = "default_true")]
+    pub padding: bool,
+    /// Browser whose ClientHello and HTTP/2 SETTINGS are sent, as
+    /// [`TlsConfig::fingerprint`]: Chrome when absent.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+}
+
+impl NaiveConfig {
+    /// Checks the names, credentials and certificates.
+    pub fn validate(&self) -> Result<()> {
+        let sni = self.sni.as_deref().filter(|s| !s.is_empty()).unwrap_or(&self.server);
+        rustls::pki_types::ServerName::try_from(sni)
+            .map_err(|_| Error::config(format!("naive: invalid TLS name {sni:?}")))?;
+        if self.username.expose().contains(':') {
+            return Err(Error::config("naive: the user name cannot contain ':'"));
+        }
+        self.trust_roots()?;
+        crate::outbound::fingerprint::Fingerprint::from_name(self.fingerprint.as_deref())?;
+        Ok(())
+    }
+
+    /// The decoded `certificates`.
+    pub fn trust_roots(&self) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        use base64::Engine as _;
+        self.certificates
+            .iter()
+            .map(|c| {
+                let der = base64::engine::general_purpose::STANDARD
+                    .decode(c.trim())
+                    .map_err(|_| Error::config("naive: certificate is not base64"))?;
+                Ok(rustls::pki_types::CertificateDer::from(der))
             })
             .collect()
     }
@@ -1606,6 +1668,9 @@ impl Config {
             }
             if let OutboundConfig::Trusttunnel(t) = o {
                 t.validate()?;
+            }
+            if let OutboundConfig::Naive(n) = o {
+                n.validate()?;
             }
             if let Some((server, port)) = o.server()
                 && (server.trim().is_empty() || port == 0)

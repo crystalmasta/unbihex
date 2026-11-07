@@ -58,7 +58,7 @@ const PIPE: usize = 64 * 1024;
 /// with `http2_window_update` as the increment, so the target window below is that value
 /// plus the protocol's initial 65 535 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct H2Settings {
+pub(crate) struct H2Settings {
     header_table_size: Option<u32>,
     enable_push: Option<bool>,
     initial_window_size: u32,
@@ -137,7 +137,7 @@ impl H2Settings {
     /// Browser; both are Chromium forks, so they keep the Chromium set, as does
     /// `randomized` (whose TLS profile is built from modern Chromium lists). `random`
     /// arrives as the preset it drew. `none`/`rustls` keep the historical Chrome values.
-    fn for_fingerprint(fingerprint: Option<Fingerprint>) -> Self {
+    pub(crate) fn for_fingerprint(fingerprint: Option<Fingerprint>) -> Self {
         match fingerprint {
             Some(Fingerprint::Firefox) => Self::FIREFOX,
             Some(Fingerprint::Safari) => Self::SAFARI,
@@ -150,7 +150,7 @@ impl H2Settings {
         }
     }
 
-    fn apply(self, builder: &mut h2::client::Builder) {
+    pub(crate) fn apply(self, builder: &mut h2::client::Builder) {
         if let Some(size) = self.header_table_size {
             builder.header_table_size(size);
         }

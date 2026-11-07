@@ -7,6 +7,7 @@ pub mod direct;
 pub mod fingerprint;
 pub mod fragment;
 pub mod hysteria2;
+pub mod naive;
 pub(crate) mod mux;
 pub mod pq;
 pub mod reality;
@@ -229,6 +230,10 @@ pub async fn build_outbound(
             c.validate()?;
             let server = trusttunnel::resolve(c, &ctx.server_resolver).await?;
             Arc::new(trusttunnel::TrustTunnelOutbound::new(c, server, ctx.sockets.clone())?)
+        }
+        OutboundConfig::Naive(c) => {
+            let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;
+            Arc::new(naive::NaiveOutbound::new(c, server, ctx.sockets.clone())?)
         }
         OutboundConfig::Shadowsocks(c) => {
             let server = ServerEndpoint::resolve(&c.server, c.port, &ctx.server_resolver).await?;

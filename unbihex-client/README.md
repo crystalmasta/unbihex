@@ -105,6 +105,8 @@ VPN-клиент для подписок на собственном ядре **
 - **Trojan** с TLS или REALITY, TCP и UDP; транспорты TCP, WebSocket и HTTPUpgrade.
 - У WebSocket и HTTPUpgrade — заголовки запроса из подписки (`headers`, например свой User-Agent), как у Xray.
 - **TrustTunnel** поверх HTTP/2, TCP и UDP; ссылки `tt://` и JSON-профили эндпоинта.
+- **NaiveProxy** поверх HTTP/2 с дополнением (padding), отпечаток Chrome; только TCP (UDP в протоколе нет); ссылки
+  `naive+https://` и JSON-подписки sing-box. `naive+quic://` (HTTP/3) пока не поддерживается.
 - **Shadowsocks** с AEAD-шифрами aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
 - **SOCKS5**.
 - **Hysteria2**: TCP и UDP поверх QUIC/TLS, в том числе Salamander; ссылки и JSON-подписки Xray/sing-box.

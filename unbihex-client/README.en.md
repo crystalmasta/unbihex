@@ -107,6 +107,8 @@ Works:
 - **Trojan** with TLS or REALITY, TCP and UDP; the TCP, WebSocket and HTTPUpgrade transports.
 - WebSocket and HTTPUpgrade send the request headers from the subscription (`headers`, such as a User-Agent), as Xray.
 - **TrustTunnel** over HTTP/2, TCP and UDP; `tt://` links and endpoint JSON profiles.
+- **NaiveProxy** over HTTP/2 with padding and Chrome's fingerprint; TCP only (the protocol has no UDP); `naive+https://`
+  links and sing-box JSON subscriptions. `naive+quic://` (HTTP/3) is not supported yet.
 - **Shadowsocks** with the AEAD ciphers aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305.
 - **SOCKS5**.
 - **Hysteria2**: TCP/UDP over QUIC/TLS, including Salamander, share links and Xray/sing-box JSON subscriptions.
