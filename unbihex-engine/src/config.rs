@@ -503,6 +503,9 @@ pub struct VmessConfig {
     /// WebSocket or HTTPUpgrade transport.
     #[serde(default)]
     pub ws: Option<crate::outbound::ws::WsConfig>,
+    /// gRPC transport.
+    #[serde(default)]
+    pub grpc: Option<crate::outbound::grpc::GrpcConfig>,
 }
 
 impl VmessConfig {
@@ -516,6 +519,12 @@ impl VmessConfig {
         }
         if let Some(ws) = &self.ws {
             ws.validate()?;
+        }
+        if let Some(g) = &self.grpc {
+            g.validate()?;
+            if self.ws.is_some() {
+                return Err(Error::config(format!("outbound {}: either ws or grpc", self.tag)));
+            }
         }
         if let Some(f) = &self.fragment {
             if !self.tls.as_ref().is_some_and(|t| t.enabled) {
@@ -551,6 +560,9 @@ pub struct TrojanConfig {
     /// WebSocket or HTTPUpgrade transport.
     #[serde(default)]
     pub ws: Option<crate::outbound::ws::WsConfig>,
+    /// gRPC transport (TLS or REALITY).
+    #[serde(default)]
+    pub grpc: Option<crate::outbound::grpc::GrpcConfig>,
 }
 
 impl TrojanConfig {
@@ -599,6 +611,12 @@ impl TrojanConfig {
         }
         if let Some(ws) = &self.ws {
             ws.validate()?;
+        }
+        if let Some(g) = &self.grpc {
+            g.validate()?;
+            if self.ws.is_some() {
+                return Err(Error::config(format!("outbound {}: either ws or grpc", self.tag)));
+            }
         }
         if let Some(f) = &self.fragment {
             f.validate()?;
@@ -863,6 +881,9 @@ pub struct VlessConfig {
     /// WebSocket or HTTPUpgrade transport (TLS or none; not REALITY or Vision).
     #[serde(default)]
     pub ws: Option<crate::outbound::ws::WsConfig>,
+    /// gRPC transport (TLS, REALITY or none; not Vision).
+    #[serde(default)]
+    pub grpc: Option<crate::outbound::grpc::GrpcConfig>,
     /// Multiplex UDP destinations over one Mux.Cool connection. Turn it off
     /// for a server that does not implement Mux.Cool.
     #[serde(default = "default_mux")]
@@ -962,6 +983,21 @@ impl VlessConfig {
             if self.xhttp.is_some() {
                 return Err(Error::config(format!(
                     "outbound {}: use either xhttp or ws",
+                    self.tag
+                )));
+            }
+        }
+        if let Some(g) = &self.grpc {
+            g.validate()?;
+            if self.is_vision() {
+                return Err(Error::config(format!(
+                    "outbound {}: {FLOW_VISION} works only over raw TCP, not gRPC",
+                    self.tag
+                )));
+            }
+            if self.ws.is_some() || self.xhttp.is_some() {
+                return Err(Error::config(format!(
+                    "outbound {}: grpc goes with neither ws nor xhttp",
                     self.tag
                 )));
             }

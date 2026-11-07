@@ -26,6 +26,10 @@ struct Fields {
     insecure: bool,
     headers: WsHeaders,
     fragment: LinkFragment,
+    /// gRPC `serviceName`, `authority` and `mode` of the URL form.
+    service: String,
+    authority: String,
+    mode: String,
 }
 
 pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
@@ -58,6 +62,9 @@ fn url_form(rest: &str) -> Result<(String, String, u16, Fields)> {
             "headerType" => f.header_type = v,
             "host" => f.host = v,
             "path" => f.path = v,
+            "serviceName" => f.service = v,
+            "authority" => f.authority = v,
+            "mode" => f.mode = v,
             "security" => f.security = v,
             "sni" | "serverName" => f.sni = v,
             "alpn" => f.alpn = v,
@@ -126,6 +133,10 @@ fn json_form(body: &str) -> Result<(String, String, u16, Fields)> {
             },
             fragment: Some(field("fragment")).filter(|s| !s.is_empty()),
         },
+        // v2rayN: gRPC's serviceName in `path`, authority in `host`, mode in `type`.
+        service: field("serviceName"),
+        authority: if field("net") == "grpc" { field("host") } else { String::new() },
+        mode: field("type"),
     };
     // `aid` (alterId) is ignored, as Xray does: only the AEAD header exists today.
     Ok((field("id"), field("add"), port, f))
@@ -142,7 +153,12 @@ fn build(tag: &str, uuid: String, server: String, port: u16, f: Fields) -> Resul
         .map(str::trim)
         .find(|h| !h.is_empty())
         .map(String::from);
-    let ws = match f.net.to_ascii_lowercase().as_str() {
+    let net = f.net.to_ascii_lowercase();
+    let grpc = matches!(net.as_str(), "grpc" | "gun").then(|| {
+        super::grpc_link_config(&f.service, &f.path, &f.authority, &f.mode)
+    });
+    let ws = match net.as_str() {
+        "grpc" | "gun" => None,
         "" | "tcp" | "raw" => {
             if !(f.header_type.is_empty() || f.header_type == "none") {
                 return Err(Error::Unsupported(format!(
@@ -197,6 +213,7 @@ fn build(tag: &str, uuid: String, server: String, port: u16, f: Fields) -> Resul
         fragment: f.fragment.build(tag, tls.is_some())?,
         tls,
         ws,
+        grpc,
     };
     cfg.validate()?;
     Ok(OutboundConfig::Vmess(cfg))
@@ -271,7 +288,6 @@ mod tests {
     #[test]
     fn unsupported_settings_are_refused() {
         for j in [
-            serde_json::json!({"add":"a","port":1,"id":UUID,"net":"grpc"}),
             serde_json::json!({"add":"a","port":1,"id":UUID,"net":"tcp","type":"http"}),
             serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"reality"}),
             serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"tls","allowInsecure":"1"}),

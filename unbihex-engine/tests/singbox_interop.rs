@@ -4,7 +4,7 @@
 //! `SINGBOX_BIN=/path/to/sing-box cargo test --test singbox_interop`.
 //! Covers VLESS over WebSocket and HTTPUpgrade with the request headers from the
 //! config, plain and behind an nginx-like gate that wants one User-Agent; and
-//! NaiveProxy (HTTP/2 CONNECT with padding) against sing-box's `naive` inbound.
+//! NaiveProxy (HTTP/2 CONNECT with padding) against sing-box's `naive` inbound; Trojan and VLESS over gRPC.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -126,6 +126,7 @@ async fn vless_websocket_headers_against_sing_box() {
         let _sb = start_sing_box(&bin, config, port).await;
         let cfg = VlessConfig {
             tag: "vless-ws".into(),
+            grpc: None,
             server: "127.0.0.1".into(),
             port,
             uuid: Secret(UUID.into()),
@@ -252,5 +253,84 @@ async fn naive_against_sing_box() {
     let mut plain = cfg.clone();
     plain.padding = false;
     assert!(build(&plain).connect_tcp(&session(echo)).await.is_err(), "sing-box wants padding");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Trojan and VLESS over sing-box's gRPC transport with TLS, from share links
+/// (`type=grpc&serviceName=…&fp=chrome`), and VLESS over gRPC without TLS; several
+/// calls on the shared HTTP/2 connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grpc_against_sing_box() {
+    use unbihex_engine::config::OutboundConfig;
+    use unbihex_engine::outbound::trojan::TrojanOutbound;
+    let Some(bin) = std::env::var("SINGBOX_BIN").ok().filter(|p| !p.is_empty()) else {
+        eprintln!("SINGBOX_BIN is not set: skipping the sing-box gRPC test");
+        return;
+    };
+    init_tracing();
+    let echo = tcp_echo().await;
+    let ck = rcgen::generate_simple_self_signed(vec!["grpc.test".into()]).unwrap();
+    let dir = std::env::temp_dir().join(format!("unbihex-grpc-cert-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+    std::fs::write(&cert, ck.cert.pem()).unwrap();
+    std::fs::write(&key, ck.signing_key.serialize_pem()).unwrap();
+    for (proto, tls) in [("trojan", true), ("vless", true), ("vless", false)] {
+        let port = free_port();
+        let mut inbound = serde_json::json!({
+            "type": proto, "tag": "in", "listen": "127.0.0.1", "listen_port": port,
+            "transport": { "type": "grpc", "service_name": "svc" }
+        });
+        inbound["users"] = if proto == "trojan" {
+            serde_json::json!([{ "password": "pw" }])
+        } else {
+            serde_json::json!([{ "uuid": UUID }])
+        };
+        if tls {
+            inbound["tls"] = serde_json::json!({
+                "enabled": true, "server_name": "grpc.test", "alpn": ["h2"],
+                "certificate_path": cert.to_string_lossy(), "key_path": key.to_string_lossy()
+            });
+        }
+        let config = serde_json::json!({
+            "log": { "level": "debug" },
+            "inbounds": [inbound],
+            "outbounds": [{ "type": "direct", "tag": "direct" }]
+        });
+        let _sb = start_sing_box(&bin, config, port).await;
+        let sec = if tls { "security=tls&sni=grpc.test&fp=chrome" } else { "security=none" };
+        let link = match proto {
+            "trojan" => format!("trojan://pw@127.0.0.1:{port}?type=grpc&serviceName=svc&{sec}#t"),
+            _ => format!("vless://{UUID}@127.0.0.1:{port}?type=grpc&serviceName=svc&{sec}#v"),
+        };
+        let server = ServerEndpoint {
+            host: "127.0.0.1".into(),
+            port,
+            addrs: vec![SocketAddr::from(([127, 0, 0, 1], port))],
+        };
+        let roots = vec![ck.cert.der().clone()];
+        let sockets = Arc::new(SocketFactory::default());
+        let ob: Arc<dyn Outbound> = match unbihex_engine::link::parse_link(&link, "grpc").unwrap() {
+            OutboundConfig::Trojan(c) => Arc::new(
+                TrojanOutbound::new(&c, server, sockets).unwrap().with_extra_roots(&c, roots).unwrap(),
+            ),
+            OutboundConfig::Vless(mut c) => {
+                c.allow_plaintext = !tls;
+                c.mux = false;
+                Arc::new(VlessOutbound::new(&c, server, sockets).unwrap().with_extra_roots(&c, roots).unwrap())
+            }
+            other => panic!("{other:?}"),
+        };
+        eprintln!("sing-box {proto} grpc tls={tls}");
+        roundtrip(ob.as_ref(), echo).await;
+        let mut tasks = Vec::new();
+        for _ in 0..3 {
+            let ob = ob.clone();
+            tasks.push(tokio::spawn(async move { roundtrip(ob.as_ref(), echo).await }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

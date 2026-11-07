@@ -172,6 +172,7 @@ pub struct TrojanOutbound {
     ws: Option<WsConfig>,
     /// `Host` of the WebSocket request when the config names none.
     ws_host: String,
+    grpc: Option<Arc<super::grpc::GrpcClient>>,
     sockets: Arc<SocketFactory>,
 }
 
@@ -185,13 +186,13 @@ impl TrojanOutbound {
         cfg.validate()?;
         let reality = cfg.reality.as_ref().map(RealityClient::new).transpose()?;
         let tls = match &cfg.tls {
-            Some(t) if t.enabled && cfg.ws.is_some() => {
-                Some(TlsClient::new(&super::ws::http1_tls(t), &cfg.server)?)
-            }
-            Some(t) if t.enabled => Some(TlsClient::new(t, &cfg.server)?),
+            Some(t) if t.enabled => Some(TlsClient::new(
+                &super::grpc::transport_tls(t, cfg.ws.is_some(), cfg.grpc.is_some()),
+                &cfg.server,
+            )?),
             _ => None,
         };
-        Ok(TrojanOutbound {
+        let mut ob = TrojanOutbound {
             tag: cfg.tag.clone(),
             hash: password_hash(cfg.password.expose()),
             server,
@@ -200,8 +201,24 @@ impl TrojanOutbound {
             fragment: cfg.fragment.clone(),
             ws: cfg.ws.clone(),
             ws_host: super::ws::default_host(cfg.tls.as_ref(), &cfg.server),
+            grpc: None,
             sockets,
-        })
+        };
+        ob.build_grpc(cfg)?;
+        Ok(ob)
+    }
+
+    fn build_grpc(&mut self, cfg: &TrojanConfig) -> Result<()> {
+        self.grpc = super::grpc::GrpcClient::for_outbound(
+            cfg.grpc.as_ref(),
+            &self.server,
+            &self.sockets,
+            self.tls.as_ref(),
+            cfg.tls.as_ref(),
+            self.reality.as_ref(),
+            self.fragment.as_ref(),
+        )?;
+        Ok(())
     }
 
     /// Test only: trust extra roots (a self-signed test CA) for plain TLS.
@@ -212,18 +229,18 @@ impl TrojanOutbound {
         roots: Vec<rustls::pki_types::CertificateDer<'static>>,
     ) -> Result<Self> {
         if let Some(t) = cfg.tls.as_ref().filter(|t| t.enabled) {
-            let t = if cfg.ws.is_some() {
-                super::ws::http1_tls(t)
-            } else {
-                t.clone()
-            };
+            let t = super::grpc::transport_tls(t, cfg.ws.is_some(), cfg.grpc.is_some());
             self.tls = Some(TlsClient::with_extra_roots(&t, &cfg.server, roots)?);
+            self.build_grpc(cfg)?;
         }
         Ok(self)
     }
 
     /// TCP, then REALITY or TLS, then the WebSocket/HTTPUpgrade handshake.
     async fn transport(&self) -> Result<BoxStream> {
+        if let Some(g) = &self.grpc {
+            return g.open().await;
+        }
         let tcp = self.server.connect(&self.sockets).await?;
         if let Some(r) = &self.reality {
             let mut s = r.connect(tcp, self.fragment.as_ref()).await?;

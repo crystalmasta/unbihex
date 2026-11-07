@@ -224,6 +224,22 @@ fn host_port(s: &str) -> Result<(String, u16)> {
     Ok((host, t.port))
 }
 
+/// gRPC settings from a share link: `serviceName` (some links put it in `path`),
+/// `authority`, `mode=multi` (Xray's share-link format, v2rayN).
+pub(crate) fn grpc_link_config(
+    service_name: &str,
+    path: &str,
+    authority: &str,
+    mode: &str,
+) -> crate::outbound::grpc::GrpcConfig {
+    crate::outbound::grpc::GrpcConfig {
+        service_name: if service_name.is_empty() { path } else { service_name }.to_string(),
+        authority: Some(authority.to_string()).filter(|a| !a.is_empty()),
+        multi_mode: mode.eq_ignore_ascii_case("multi"),
+        user_agent: None,
+    }
+}
+
 fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let (body, query) = split_parts(rest);
     let (uuid, hostport) = body
@@ -261,7 +277,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
                     .collect()
             }
             "type" => net = v.to_ascii_lowercase(),
-            "path" | "host" | "mode" if !v.is_empty() => {
+            "path" | "host" | "mode" | "serviceName" | "authority" if !v.is_empty() => {
                 xhttp_fields.insert(k.into_owned(), serde_json::Value::String(v));
             }
             "extra" if !v.is_empty() => {
@@ -290,8 +306,11 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
         }
     }
     let field = |k: &str| xhttp_fields.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let grpc = matches!(net.as_str(), "grpc" | "gun").then(|| {
+        grpc_link_config(field("serviceName"), field("path"), field("authority"), field("mode"))
+    });
     let (xhttp, ws) = match net.as_str() {
-        "" | "tcp" | "raw" => (None, None),
+        "" | "tcp" | "raw" | "grpc" | "gun" => (None, None),
         "xhttp" | "splithttp" => (
             Some(crate::outbound::xhttp::XhttpConfig::from_xray(&serde_json::Value::Object(
                 xhttp_fields.clone(),
@@ -355,6 +374,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
         fragment,
         xhttp,
         ws,
+        grpc,
         mux: true,
     };
     cfg.check_flow()?;
@@ -500,8 +520,39 @@ mod tests {
     }
 
     #[test]
+    fn grpc_links() {
+        let l = format!(
+            "vless://{UUID}@h.example:443?type=grpc&security=reality&sni=r.example&pbk=wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE&sid=ab&serviceName=svc&mode=multi&authority=a.example"
+        );
+        let OutboundConfig::Vless(v) = parse_link(&l, "p").unwrap() else { panic!() };
+        let g = v.grpc.unwrap();
+        assert_eq!((g.service_name.as_str(), g.multi_mode), ("svc", true));
+        assert_eq!(g.authority.as_deref(), Some("a.example"));
+        assert!(v.reality.is_some() && v.ws.is_none() && v.xhttp.is_none());
+        let OutboundConfig::Trojan(t) =
+            parse_link("trojan://pw@h.example:443?type=grpc&security=tls&sni=s.example&serviceName=%2Fa%2Ftun&mode=gun#t", "p").unwrap()
+        else {
+            panic!()
+        };
+        let g = t.grpc.unwrap();
+        assert_eq!((g.path().as_str(), g.multi_mode), ("/a/tun", false));
+        assert_eq!(t.tls.unwrap().sni.as_deref(), Some("s.example"));
+        // v2rayN's VMess JSON: serviceName in path, authority in host, mode in type.
+        use base64::Engine as _;
+        let j = serde_json::json!({"add":"h.example","port":"443","id":UUID,"net":"grpc","path":"svc","host":"a.example","type":"multi","tls":"tls","sni":"s.example"});
+        let l = format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(j.to_string()));
+        let OutboundConfig::Vmess(m) = parse_link(&l, "p").unwrap() else { panic!() };
+        let g = m.grpc.unwrap();
+        assert_eq!(g.path(), "/svc/TunMulti");
+        assert_eq!(g.authority.as_deref(), Some("a.example"));
+        // Both transports at once are refused.
+        let l = format!("vless://{UUID}@h:443?type=grpc&security=tls&flow=xtls-rprx-vision");
+        assert!(parse_link(&l, "p").is_err());
+    }
+
+    #[test]
     fn vless_unsupported() {
-        for q in ["type=grpc", "type=h2", "flow=xtls-rprx-direct", "security=xtls"] {
+        for q in ["type=h2", "flow=xtls-rprx-direct", "security=xtls"] {
             let l = format!("vless://{UUID}@h:443?{q}");
             assert!(
                 matches!(parse_link(&l, "p"), Err(Error::Unsupported(_))),

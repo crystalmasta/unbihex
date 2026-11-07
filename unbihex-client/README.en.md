@@ -123,7 +123,7 @@ Works:
 Not supported yet — such servers are listed, but greyed out:
 
 - the Hysteria 1, TUIC and WireGuard protocols;
-- for VLESS: the grpc transport, XHTTP over HTTP/3, and `flow` kinds other than Vision;
+- for VLESS: XHTTP over HTTP/3 and `flow` kinds other than Vision;
 - for Shadowsocks: Shadowsocks 2022 and plugins.
 
 The engine refuses VLESS without TLS or REALITY on purpose: the UUID and traffic would go in the clear.

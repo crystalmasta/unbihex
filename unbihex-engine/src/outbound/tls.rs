@@ -188,6 +188,73 @@ impl TlsClient {
             .await
             .map_err(|e| Error::Tls(e.to_string()))
     }
+
+    /// [`TlsClient::connect`] for a proxy tunnel: a server that closes the TCP
+    /// connection without a close_notify ends the stream instead of failing it.
+    pub async fn connect_tunnel<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: S,
+    ) -> Result<CleanEof<TlsStream<S>>> {
+        Ok(CleanEof(self.connect(stream).await?))
+    }
+}
+
+/// A TLS stream on which a TCP close without close_notify reads as the end of the
+/// stream, as Go's `crypto/tls` (Xray, sing-box) reports it. rustls calls it an
+/// error, which would tear down both directions of a relay at once instead of
+/// passing the end on; the tunnelled protocol has its own integrity.
+pub struct CleanEof<S>(pub S);
+
+impl<S: AsyncRead + Unpin> AsyncRead for CleanEof<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match std::pin::Pin::new(&mut self.0).poll_read(cx, buf) {
+            std::task::Poll::Ready(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                tracing::trace!("tls: closed without close_notify");
+                std::task::Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for CleanEof<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write(cx, data)
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.0.is_write_vectored()
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+    }
 }
 
 /// Who is trusted and for which name, beyond the defaults (WebPKI roots, the SNI).
@@ -295,5 +362,64 @@ impl ServerCertVerifier for PinningVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A TLS server that sends "hello" and drops the TCP connection without a
+    /// close_notify, as a server behind a broken middlebox or fallback can.
+    async fn abrupt_server() -> (std::net::SocketAddr, CertificateDer<'static>) {
+        let ck = rcgen::generate_simple_self_signed(vec!["abrupt.test".into()]).unwrap();
+        let cert = ck.cert.der().clone();
+        let key = rustls::pki_types::PrivateKeyDer::try_from(ck.signing_key.serialize_der()).unwrap();
+        let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = l.accept().await {
+                let mut tls = acceptor.accept(s).await.unwrap();
+                tls.write_all(b"hello").await.unwrap();
+                tls.flush().await.unwrap();
+                // Close the socket itself: no close_notify.
+                let (tcp, _) = tls.into_inner();
+                drop(tcp);
+            }
+        });
+        (addr, cert)
+    }
+
+    #[tokio::test]
+    async fn a_close_without_close_notify_ends_a_tunnel_cleanly() {
+        let (addr, cert) = abrupt_server().await;
+        let cfg = TlsConfig {
+            enabled: true,
+            sni: Some("abrupt.test".into()),
+            alpn: Vec::new(),
+            pinned_sha256: Vec::new(),
+            fingerprint: None,
+        };
+        let client = TlsClient::with_extra_roots(&cfg, "abrupt.test", vec![cert]).unwrap();
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut s = client.connect_tunnel(tcp).await.unwrap();
+        let mut got = Vec::new();
+        s.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"hello");
+        // rustls alone calls it an error.
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut s = client.connect(tcp).await.unwrap();
+        let mut got = Vec::new();
+        let e = s.read_to_end(&mut got).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }

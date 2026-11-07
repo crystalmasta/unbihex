@@ -20,6 +20,7 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut net = String::new();
     let (mut sni, mut alpn, mut fp, mut pbk) = (None, Vec::new(), None, None);
     let (mut sid, mut path, mut host) = (String::new(), String::new(), None);
+    let (mut service, mut authority, mut mode) = (String::new(), String::new(), String::new());
     let mut headers = WsHeaders::default();
     let mut frag = LinkFragment::default();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
@@ -44,6 +45,9 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
             "sid" | "shortId" => sid = v,
             "type" => net = v.to_ascii_lowercase(),
             "path" => path = v,
+            "serviceName" => service = v,
+            "authority" => authority = v,
+            "mode" => mode = v,
             // Like v2rayN: the first of a comma list.
             "host" => {
                 host = v
@@ -64,8 +68,10 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
             _ => {}
         }
     }
+    let grpc = matches!(net.as_str(), "grpc" | "gun")
+        .then(|| super::grpc_link_config(&service, &path, &authority, &mode));
     let ws = match net.as_str() {
-        "" | "tcp" | "raw" => None,
+        "" | "tcp" | "raw" | "grpc" | "gun" => None,
         "ws" | "websocket" | "httpupgrade" => Some(WsConfig {
             path,
             host,
@@ -115,6 +121,7 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
         fragment: frag.build(tag, true)?,
         reality,
         ws,
+        grpc,
     };
     cfg.validate()?;
     Ok(OutboundConfig::Trojan(cfg))
@@ -189,7 +196,6 @@ mod tests {
         for q in [
             "security=none",
             "security=xtls",
-            "type=grpc",
             "type=xhttp",
             "headerType=http",
             "flow=xtls-rprx-direct",

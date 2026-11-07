@@ -265,6 +265,8 @@ percent-decoded, the host may be IPv6 in brackets.
   - `type=tcp|raw` (or none), or `type=xhttp|splithttp` with `path`, `host`, `mode`, `extra` (Xray settings JSON, §11.5),
     or `type=ws|httpupgrade` with `path` and `host` (§11.10; `host` is the first of a comma list and, without `sni`,
     the TLS name, as in v2rayN); Vision and REALITY over WebSocket are an error, as in Xray;
+    or `type=grpc` (or `gun`) with `serviceName` (else `path`), `authority`, `mode=multi|gun` (§11.18; TLS, REALITY
+    or none; Vision over gRPC is an error, as in Xray);
   - `fm` / `finalmask` (Xray 26's `finalmask`, JSON) and the older `fragment=tlshello,<length>,<interval>` give the
     ClientHello fragmentation (§11.6); the same on `vmess://` (in v2rayN JSON `fm` is an object or a string) and
     `trojan://`;
@@ -274,7 +276,7 @@ percent-decoded, the host may be IPv6 in brackets.
     `headers` counts when there is no `host` and also gives the TLS name. Not a JSON object, a non-string value or
     CR/LF is an error;
   - `flow=xtls-rprx-vision` (`-udp443` too);
-  - other `type` values (`grpc`, `h2`, …), `flow`, `encryption`, `headerType` and
+  - other `type` values (`h2`, …), `flow`, `encryption`, `headerType` and
     `security` values give a clear
     `Unsupported("...")` error.
 - `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002) and the legacy
@@ -290,14 +292,17 @@ as Xray 26 writes it; `obfs` wins; `salamander` with `packetSize` and other mask
   parameters.
 - `vmess://` (§11.9): v2rayN base64 JSON (`add`, `port`, `id`, `scy`, `net`, `type`, `host`, `path`, `tls`, `sni`,
   `alpn`, `fp`) or the URL form `vmess://<uuid>@<host>:<port>?type=…&security=…&encryption=…#<name>`. `net`/`type`:
-  `tcp`/`raw` without header camouflage, `ws`, `httpupgrade` (§11.10); `host` is the first of a comma list; without
+  `tcp`/`raw` without header camouflage, `ws`, `httpupgrade` (§11.10), `grpc` (§11.18; in v2rayN JSON `serviceName`
+  is in `path`, `authority` in `host`, the `multi`/`gun` mode in `type`; the URL form has `serviceName`, `authority`,
+  `mode`); `host` is the first of a comma list; without
   `sni` the TLS name comes from `host`, then the server (as in v2rayN). `headers` and `ua` as with VLESS (in v2rayN
-  JSON `headers` is an object or the same JSON as a string). Refused: other transports (`grpc`, `h2`,
+  JSON `headers` is an object or the same JSON as a string). Refused: other transports (`h2`,
   `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, `allowInsecure=1`, an unknown cipher
   (the error names it); `scy=none`/`zero` mean `auto` (§11.9).
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, `tls` by default; `sni` / `peer` /
   `serverName`, `alpn`, `fp`, and `pbk`, `sid` for REALITY; `type=tcp|raw|ws|httpupgrade` with `path`, `host`,
-  `headers` and `ua` (as with VLESS: without `sni` the WebSocket's TLS name comes from `host`). Refused: `security=none` and others, other
+  `headers` and `ua` (as with VLESS: without `sni` the WebSocket's TLS name comes from `host`), or `type=grpc` with
+  `serviceName`, `authority`, `mode` (as with VLESS, over TLS or REALITY). Refused: `security=none` and others, other
   transports, `headerType` other than `none`, `flow`, `allowInsecure=1`, an empty password.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, versions 0–2, §11.11): `hostname`, `addresses` (port 443 by
   default), `custom_sni`, `has_ipv6`, user and password, `certificate` (a DER chain), `anti_dpi` → `fragment`, `name`.
@@ -651,6 +656,9 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
   encapsulation key (1184 B) and X25519 (32 B), the server share the ciphertext (1088 B) and X25519, the secret the
   ML-KEM key and the X25519 secret. The X25519 half is also offered as a separate key share, so a server without ML-KEM
   still completes in one RTT.
+- **An end without close_notify.** A server that closes TCP without a close_notify ends a tunnel's stream (TLS of
+  VLESS, VMess, Trojan, their WebSocket and gRPC) as a normal end, as Go's `crypto/tls` in Xray and sing-box does:
+  rustls calls it an error, and the relay would tear down both directions instead of passing the end on.
 - **Bulk reads.** Without Vision, TLS is read in large blocks: one socket `read` of up to 64 KB, rustls parses records
   from memory; a write goes out as one `write` (`write_vectored`). With Vision, reads take exactly one record at a time
   (`tls_stream.rs`): after the direct-copy command nothing more may have been read.
@@ -986,6 +994,28 @@ is a NaiveProxy client (issue #15), as NaiveProxy and sing-box (`protocol/naive`
   CONNECT without `padding` (400).
 - NaiveProxy has no UDP: `connect_udp` is `Unsupported` (sing-box's UoT is its own extension and not supported).
   HTTP/3 (`naive+quic`) is not there yet.
+
+### 11.18 gRPC
+
+`grpc: {"service_name": "svc", "authority"?, "multi_mode"?, "user_agent"?}` (on VLESS, VMess and Trojan): the gRPC
+("gun") transport of Xray (`grpcSettings`) and sing-box (`transport.type = grpc`), `outbound/grpc.rs`.
+
+- One HTTP/2 connection per outbound (over TLS, REALITY or TCP) for every stream, like Xray's shared `ClientConn`; a
+  connection idle for 30 s is checked with a PING (5 s) before a new call, and after a GOAWAY or a break there is one
+  retry on a fresh one. TLS offers `h2`: when the link's `alpn` lacks it, Xray's default list `h2, http/1.1` (with a
+  fingerprint the profile puts its own ALPN, as uTLS does in Xray). The negotiated ALPN is not checked, as gRPC-Go in
+  Xray does not.
+- Each TCP connection (and UDP / Mux.Cool stream) is a bidirectional call `POST /<serviceName>/Tun`
+  (`/<serviceName>/TunMulti` with `multi_mode`) with `content-type: application/grpc`, `user-agent`, `te: trailers`.
+  The service name is escaped like Go's `url.PathEscape`; a name starting with `/` is a whole path, as in Xray:
+  `/a/b/tun` calls `/a/b/tun`, the server form `/a/b/tun|tunMulti` gives the second name for `multi_mode`; an empty
+  name is `//Tun`. `:authority` is `authority`, else the TLS SNI, else the server name (not under REALITY), else
+  `host:port`. `user_agent`: `chrome` (the default, as Xray 26), `firefox`, `edge`, `golang` (empty) or a literal.
+- A call does not wait for the server's answer: the protocol header leaves with the first data. A message is
+  `0 | length (be32) | Hunk { bytes data = 1; }` (up to 32 KiB of data); `Hunk` and `MultiHunk` (several `data`
+  joined, unknown fields skipped) are accepted up to 4 MiB; a compressed message is an error. An answer other than
+  200, or a body-less `grpc-status` other than 0, is an error (12 means "no such service", a wrong `serviceName`).
+  Closing the write side is END_STREAM; the end of the answer (trailers or RST_STREAM NO_ERROR) ends the read.
 
 ---
 

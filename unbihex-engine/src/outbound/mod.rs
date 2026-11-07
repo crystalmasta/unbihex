@@ -6,6 +6,7 @@ pub mod block;
 pub mod direct;
 pub mod fingerprint;
 pub mod fragment;
+pub mod grpc;
 pub mod hysteria2;
 pub mod naive;
 pub(crate) mod mux;

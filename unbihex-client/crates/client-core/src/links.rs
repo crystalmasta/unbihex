@@ -506,8 +506,9 @@ mod tests {
         assert!(s.is_supported(), "{:?}", s.unsupported);
         let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=ws&flow=xtls-rprx-vision#V")).unwrap();
         assert!(s.unsupported.unwrap().contains("Vision работает только поверх TCP"));
-        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=grpc#G")).unwrap();
-        assert!(s.unsupported.unwrap().contains("grpc"));
+        let s = parse_server(&format!("vless://{UUID}@h.com:443?security=tls&type=grpc&serviceName=svc#G")).unwrap();
+        assert_eq!(s.transport, "grpc+tls");
+        assert!(s.is_supported(), "{:?}", s.unsupported);
         let s = parse_server(&format!("vless://{UUID}@h.com:80?type=tcp#P")).unwrap();
         assert!(s.unsupported.unwrap().contains("без TLS"));
     }
@@ -539,8 +540,8 @@ mod tests {
         let s = parse_server(&format!("vmess://{UUID}@vm.example:8443?type=httpupgrade&security=tls#U")).unwrap();
         assert_eq!((s.name.as_str(), s.port, s.transport.as_str()), ("U", 8443, "httpupgrade+tls"));
         assert!(s.is_supported(), "{:?}", s.unsupported);
-        let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","net":"grpc"}}"#))).unwrap();
-        assert!(s.unsupported.unwrap().contains("grpc"));
+        let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","net":"grpc","path":"svc","tls":"tls"}}"#))).unwrap();
+        assert!(s.is_supported(), "{:?}", s.unsupported);
         // Like Xray's client, `none` and `zero` work (issue #49); an unknown mode is named.
         for scy in ["none", "zero"] {
             let s = parse_server(&vmess(&format!(r#"{{"add":"a.example","port":1,"id":"{UUID}","scy":"{scy}"}}"#))).unwrap();
@@ -587,13 +588,16 @@ mod tests {
         assert_eq!(s.transport, "tcp+tls");
         assert!(s.is_supported(), "{:?}", s.unsupported);
         assert_eq!(outbound_json(&s).unwrap()["url"], s.link);
+        let s = parse_server("trojan://pw@t.example:443?type=grpc&serviceName=svc&mode=multi&fp=chrome&alpn=h2#G").unwrap();
+        assert_eq!(s.transport, "grpc+tls");
+        assert!(s.is_supported(), "{:?}", s.unsupported);
         let s = parse_server("trojan://pw@[2001:db8::1]:8443?type=ws&path=%2Fws&host=cdn.example#W").unwrap();
         assert_eq!((s.host.as_str(), s.port, s.transport.as_str()), ("2001:db8::1", 8443, "ws+tls"));
         assert!(s.is_supported(), "{:?}", s.unsupported);
         for (query, why) in [
             ("security=none", "без TLS"),
             ("allowInsecure=1", "без проверки сертификата"),
-            ("type=grpc", "grpc"),
+            ("type=xhttp", "xhttp"),
             ("security=reality&sni=a.example", "REALITY"),
         ] {
             let s = parse_server(&format!("trojan://pw@t.example:443?{query}")).unwrap();

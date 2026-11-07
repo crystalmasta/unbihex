@@ -754,6 +754,7 @@ pub struct VmessOutbound {
     ws: Option<WsConfig>,
     /// `Host` of the WebSocket request when the config names none.
     ws_host: String,
+    grpc: Option<Arc<super::grpc::GrpcClient>>,
     sockets: Arc<SocketFactory>,
 }
 
@@ -768,14 +769,14 @@ impl VmessOutbound {
         let uuid = uuid::Uuid::parse_str(cfg.uuid.expose())
             .map_err(|_| Error::config(format!("outbound {}: invalid uuid", cfg.tag)))?;
         let tls = match &cfg.tls {
-            Some(t) if t.enabled => {
-                let t = if cfg.ws.is_some() { super::ws::http1_tls(t) } else { t.clone() };
-                Some(TlsClient::new(&t, &cfg.server)?)
-            }
+            Some(t) if t.enabled => Some(TlsClient::new(
+                &super::grpc::transport_tls(t, cfg.ws.is_some(), cfg.grpc.is_some()),
+                &cfg.server,
+            )?),
             _ => None,
         };
         let ws_host = super::ws::default_host(cfg.tls.as_ref(), &cfg.server);
-        Ok(VmessOutbound {
+        let mut ob = VmessOutbound {
             tag: cfg.tag.clone(),
             uuid: *uuid.as_bytes(),
             security: Security::parse(&cfg.security)?,
@@ -784,8 +785,24 @@ impl VmessOutbound {
             fragment: cfg.fragment.clone(),
             ws: cfg.ws.clone(),
             ws_host,
+            grpc: None,
             sockets,
-        })
+        };
+        ob.build_grpc(cfg)?;
+        Ok(ob)
+    }
+
+    fn build_grpc(&mut self, cfg: &VmessConfig) -> Result<()> {
+        self.grpc = super::grpc::GrpcClient::for_outbound(
+            cfg.grpc.as_ref(),
+            &self.server,
+            &self.sockets,
+            self.tls.as_ref(),
+            cfg.tls.as_ref(),
+            None,
+            self.fragment.as_ref(),
+        )?;
+        Ok(())
     }
 
     /// Test only: trust extra roots (a self-signed test CA).
@@ -796,14 +813,18 @@ impl VmessOutbound {
         roots: Vec<rustls::pki_types::CertificateDer<'static>>,
     ) -> Result<Self> {
         if let Some(t) = cfg.tls.as_ref().filter(|t| t.enabled) {
-            let t = if cfg.ws.is_some() { super::ws::http1_tls(t) } else { t.clone() };
+            let t = super::grpc::transport_tls(t, cfg.ws.is_some(), cfg.grpc.is_some());
             self.tls = Some(TlsClient::with_extra_roots(&t, &cfg.server, roots)?);
+            self.build_grpc(cfg)?;
         }
         Ok(self)
     }
 
     /// TCP, then TLS, then the WebSocket/HTTPUpgrade handshake.
     async fn transport(&self) -> Result<BoxStream> {
+        if let Some(g) = &self.grpc {
+            return g.open().await;
+        }
         let tcp = self.server.connect(&self.sockets).await?;
         super::ws::dial(
             tcp,

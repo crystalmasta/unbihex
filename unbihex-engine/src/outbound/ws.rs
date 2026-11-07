@@ -205,7 +205,7 @@ pub async fn dial(
             s.set_bulk();
             Box::new(s)
         }
-        Some(tls) => Box::new(tls.connect(tcp).await?),
+        Some(tls) => Box::new(tls.connect_tunnel(tcp).await?),
         None => Box::new(tcp),
     };
     match ws {

@@ -121,7 +121,7 @@ VPN-клиент для подписок на собственном ядре **
 Пока не поддерживается — такие серверы видны в списке, но серые:
 
 - протоколы Hysteria 1, TUIC, WireGuard;
-- у VLESS — транспорт grpc, XHTTP поверх HTTP/3 и другие виды `flow`, кроме Vision;
+- у VLESS — XHTTP поверх HTTP/3 и другие виды `flow`, кроме Vision;
 - у Shadowsocks — Shadowsocks 2022 и плагины.
 
 VLESS без TLS и REALITY ядро отклоняет намеренно: UUID и трафик шли бы открытым текстом.

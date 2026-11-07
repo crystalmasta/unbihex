@@ -183,6 +183,31 @@ fn xray_ws(stream: &Value) -> Option<Value> {
     }
 }
 
+/// `serviceName`, `authority` and `mode` of an Xray gRPC `streamSettings`.
+fn xray_grpc(stream: &Value) -> Vec<(&'static str, String)> {
+    if str_of(stream, "network") != "grpc" {
+        return Vec::new();
+    }
+    let g = stream.get("grpcSettings").cloned().unwrap_or(Value::Null);
+    let multi = g.get("multiMode").and_then(Value::as_bool).unwrap_or(false);
+    vec![
+        ("serviceName", str_of(&g, "serviceName").to_string()),
+        ("authority", str_of(&g, "authority").to_string()),
+        ("mode", if multi { "multi" } else { "gun" }.to_string()),
+    ]
+}
+
+/// `serviceName` of a sing-box `grpc` transport.
+fn sing_box_grpc_params(ob: &Value, network: &str) -> Vec<(&'static str, String)> {
+    match network {
+        "grpc" => {
+            let t = ob.get("transport").unwrap_or(&Value::Null);
+            vec![("serviceName", str_of(t, "service_name").to_string())]
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn ss_link(method: &str, password: &str, host: &str, port: u64, name: &str) -> String {
     let ui = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!("{method}:{password}"));
     format!("ss://{ui}@{}#{}", host_port(host, port), enc(name))
@@ -385,6 +410,7 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
             if let Some(t) = xray_ws(&stream) {
                 params.extend(ws_params(&t));
             }
+            params.extend(xray_grpc(&stream));
             if network == "xhttp" || network == "splithttp" {
                 let x = stream
                     .get("xhttpSettings")
@@ -438,6 +464,7 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
             if let Some(t) = xray_ws(&stream) {
                 params.extend(ws_params(&t));
             }
+            params.extend(xray_grpc(&stream));
             if stream.pointer("/tlsSettings/allowInsecure") == Some(&Value::Bool(true)) {
                 params.push(("allowInsecure", "1".into()));
             }
@@ -475,6 +502,12 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
             });
             if let Some(h) = ws_headers(&t) {
                 j["headers"] = h;
+            }
+            // v2rayN's fields for gRPC: serviceName in path, authority in host, mode in type.
+            if let [(_, service), (_, authority), (_, mode)] = xray_grpc(&stream).as_slice() {
+                j["path"] = json!(service);
+                j["host"] = json!(authority);
+                j["type"] = json!(mode);
             }
             if let Some(m) = xray_finalmask(&stream) {
                 j["fm"] = m;
@@ -632,6 +665,7 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
                 ("sid", str_of(&reality, "short_id").to_string()),
             ];
             params.extend(sing_box_ws_params(ob, &network));
+            params.extend(sing_box_grpc_params(ob, &network));
             Some(vless_link(
                 str_of(ob, "uuid"),
                 host,
@@ -688,6 +722,7 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
                 ("sid", str_of(&reality, "short_id").to_string()),
             ];
             params.extend(sing_box_ws_params(ob, &network));
+            params.extend(sing_box_grpc_params(ob, &network));
             if tls.get("insecure") == Some(&Value::Bool(true)) {
                 params.push(("allowInsecure", "1".into()));
             }
@@ -769,6 +804,9 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
                 "allowInsecure": json_bool_flag(tls.get("insecure")) });
             if let Some(h) = ws_headers(&t) {
                 j["headers"] = h;
+            }
+            if network == "grpc" {
+                j["path"] = json!(str_of(&t, "service_name"));
             }
             Some(format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(j.to_string())))
         }
@@ -1148,6 +1186,46 @@ mod tests {
     /// The provider's Xray JSON fragments the ClientHello through `finalmask`; it
     /// reaches the engine as `fm` for VLESS, VMess and Trojan. So does the older
     /// `sockopt.dialerProxy` to a `freedom` with `fragment`.
+    /// gRPC from Xray (`grpcSettings`) and sing-box (`transport.service_name`) for
+    /// every protocol that has it.
+    #[test]
+    fn grpc_settings_reach_the_engine() {
+        let stream = json!({"network": "grpc", "security": "tls",
+            "tlsSettings": {"serverName": "app.example", "fingerprint": "chrome"},
+            "grpcSettings": {"serviceName": "svc", "authority": "cdn.example", "multiMode": true}});
+        let tls = json!({"enabled": true, "server_name": "app.example"});
+        let grpc = json!({"type": "grpc", "service_name": "svc"});
+        let body = json!({"outbounds": [
+            {"protocol": "vless", "settings": {"address": "s.example", "port": 443, "id": UUID}, "streamSettings": stream},
+            {"protocol": "vmess", "settings": {"vnext": [{"address": "s.example", "port": 443,
+                "users": [{"id": UUID}]}]}, "streamSettings": stream},
+            {"protocol": "trojan", "settings": {"servers": [{"address": "s.example", "port": 443,
+                "password": "pw"}]}, "streamSettings": stream}]});
+        let mut links = links_from_json(&body.to_string()).unwrap();
+        let sing_box = json!({"outbounds": [
+            {"type": "vless", "server": "s.example", "server_port": 443, "uuid": UUID, "tls": tls, "transport": grpc},
+            {"type": "vmess", "server": "s.example", "server_port": 443, "uuid": UUID, "tls": tls, "transport": grpc},
+            {"type": "trojan", "server": "s.example", "server_port": 443, "password": "pw", "tls": tls, "transport": grpc}]});
+        links.extend(links_from_json(&sing_box.to_string()).unwrap());
+        assert_eq!(links.len(), 6);
+        for (i, link) in links.iter().enumerate() {
+            let s = parse_server(link).unwrap();
+            assert!(s.is_supported(), "{link}: {:?}", s.unsupported);
+            let g = match unbihex_engine::link::parse_link(link, "proxy").unwrap() {
+                OutboundConfig::Vless(v) => v.grpc,
+                OutboundConfig::Vmess(v) => v.grpc,
+                OutboundConfig::Trojan(t) => t.grpc,
+                other => panic!("{other:?}"),
+            }
+            .unwrap_or_else(|| panic!("no grpc: {link}"));
+            assert_eq!(g.service_name, "svc", "{link}");
+            if i < 3 {
+                assert!(g.multi_mode, "{link}");
+                assert_eq!(g.authority.as_deref(), Some("cdn.example"), "{link}");
+            }
+        }
+    }
+
     #[test]
     fn finalmask_fragment_reaches_the_engine() {
         let stream = json!({"network": "ws", "security": "tls",

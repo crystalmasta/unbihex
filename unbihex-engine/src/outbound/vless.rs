@@ -289,6 +289,7 @@ struct Dialer {
     ws: Option<WsConfig>,
     /// `Host` of the WebSocket request when the config names none.
     ws_host: String,
+    grpc: Option<Arc<super::grpc::GrpcClient>>,
     sockets: Arc<SocketFactory>,
 }
 
@@ -321,6 +322,9 @@ impl VlessOutbound {
         let tls = match &cfg.tls {
             Some(t) if t.enabled && cfg.ws.is_some() => {
                 Some(TlsClient::new(&super::ws::http1_tls(t), &cfg.server)?)
+            }
+            Some(t) if t.enabled && cfg.grpc.is_some() => {
+                Some(TlsClient::new(&super::grpc::h2_tls(t), &cfg.server)?)
             }
             Some(t) if t.enabled => Some(TlsClient::new(t, &cfg.server)?),
             _ if reality.is_some() => None,
@@ -374,6 +378,7 @@ impl VlessOutbound {
         ob.dialer.xhttp = xhttp;
         ob.dialer.ws = cfg.ws.clone();
         ob.dialer.ws_host = super::ws::default_host(cfg.tls.as_ref(), &cfg.server);
+        ob.dialer.build_grpc(cfg)?;
         Ok(ob)
     }
 
@@ -385,8 +390,15 @@ impl VlessOutbound {
         roots: Vec<rustls::pki_types::CertificateDer<'static>>,
     ) -> Result<Self> {
         if let Some(t) = cfg.tls.as_ref().filter(|t| t.enabled) {
-            let t = if cfg.ws.is_some() { super::ws::http1_tls(t) } else { t.clone() };
+            let t = if cfg.ws.is_some() {
+                super::ws::http1_tls(t)
+            } else if cfg.grpc.is_some() {
+                super::grpc::h2_tls(t)
+            } else {
+                t.clone()
+            };
             self.dialer.tls = Some(TlsClient::with_extra_roots(&t, &cfg.server, roots)?);
+            self.dialer.build_grpc(cfg)?;
         }
         Ok(self)
     }
@@ -441,6 +453,7 @@ impl VlessOutbound {
                 xhttp: None,
                 ws: None,
                 ws_host: String::new(),
+                grpc: None,
                 sockets,
             },
             mux: OnceLock::new(),
@@ -455,7 +468,25 @@ impl VlessOutbound {
 }
 
 impl Dialer {
+    /// The gRPC client of `cfg`, over this dialer's TLS or REALITY.
+    fn build_grpc(&mut self, cfg: &VlessConfig) -> Result<()> {
+        self.grpc = super::grpc::GrpcClient::for_outbound(
+            cfg.grpc.as_ref(),
+            &self.server,
+            &self.sockets,
+            self.tls.as_ref(),
+            cfg.tls.as_ref(),
+            self.reality.as_ref(),
+            self.fragment.as_ref(),
+        )?;
+        Ok(())
+    }
+
     async fn open(&self, cmd: u8, target: &TargetAddr) -> Result<BoxStream> {
+        if let Some(g) = &self.grpc {
+            let header = encode_request(&self.uuid, cmd, target)?;
+            return Ok(Box::new(VlessStream::new(g.open().await?, header)));
+        }
         if let Some(x) = &self.xhttp {
             let header = encode_request(&self.uuid, cmd, target)?;
             // UDP streams are tiny and numerous; sharing the h2 connection
@@ -484,7 +515,7 @@ impl Dialer {
         if !self.vision && self.reality.is_none() && self.fragment.is_none() {
             let header = encode_request(&self.uuid, cmd, target)?;
             let stream: BoxStream = match &self.tls {
-                Some(tls) => Box::new(tls.connect(tcp).await?),
+                Some(tls) => Box::new(tls.connect_tunnel(tcp).await?),
                 None => Box::new(tcp),
             };
             return Ok(Box::new(VlessStream::new(stream, header)));

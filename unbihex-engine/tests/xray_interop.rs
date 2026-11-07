@@ -5,7 +5,8 @@
 //! Covers VLESS + TLS + Vision and VLESS + REALITY + Vision with plain TCP and with
 //! inner TLS 1.3 (which makes the server switch to direct copy), XHTTP, VLESS over
 //! WebSocket and HTTPUpgrade, VMess (with `none` and `zero` too) over TCP, WebSocket
-//! and HTTPUpgrade with and without TLS, and Trojan over TLS (TCP, WebSocket, HTTPUpgrade) and REALITY.
+//! and HTTPUpgrade with and without TLS, Trojan over TLS (TCP, WebSocket, HTTPUpgrade) and REALITY, and gRPC
+//! for VLESS, VMess and Trojan.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -946,6 +947,7 @@ async fn vmess_against_xray() {
             for security in ["aes-128-gcm", "chacha20-poly1305", "auto", "none", "zero"] {
                 let cfg = VmessConfig {
                     tag: "vm".into(),
+                    grpc: None,
                     server: "127.0.0.1".into(),
                     port,
                     uuid: unbihex_engine::config::Secret(UUID.into()),
@@ -1053,6 +1055,7 @@ async fn vless_websocket_against_xray() {
             let _xray = start_xray(&bin, config).await;
             let cfg = VlessConfig {
                 tag: "vless-ws".into(),
+                grpc: None,
                 server: "127.0.0.1".into(),
                 port,
                 uuid: Secret(UUID.into()),
@@ -1202,6 +1205,7 @@ async fn trojan_against_xray() {
         .await;
         let cfg = TrojanConfig {
             tag: "trojan".into(),
+            grpc: None,
             server: "127.0.0.1".into(),
             port,
             password: Secret(password.into()),
@@ -1256,6 +1260,174 @@ async fn trojan_against_xray() {
                 .expect("a wrong password must be cut off");
             assert!(!matches!(r, Ok(n) if n > 0), "a wrong password must not be relayed");
         }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// gRPC ("gun") against Xray's gRPC inbound, from share links as a panel gives them
+/// (`type=grpc`, `fp=chrome`, `alpn=h2`): Trojan, VLESS and VMess over TLS, Trojan
+/// and VLESS over REALITY, VLESS and VMess without TLS; `Tun` and `TunMulti`, an
+/// empty and a full-path service name. TCP and UDP echo through each, several calls
+/// at once on the shared HTTP/2 connection, a half-close, and a wrong service name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grpc_against_xray() {
+    use unbihex_engine::config::OutboundConfig;
+    use unbihex_engine::outbound::trojan::TrojanOutbound;
+    use unbihex_engine::outbound::vmess::VmessOutbound;
+
+    let Some(bin) = xray_bin() else {
+        eprintln!("XRAY_BIN is not set: skipping the gRPC interop test");
+        return;
+    };
+    init_tracing();
+    let pem = cert("grpc.test");
+    let site = cert("reality.test");
+    let echo = tcp_echo().await;
+    let uecho = udp_echo().await;
+    let dir = std::env::temp_dir().join(format!("unbihex-pem-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("cert.pem"), &pem.cert_pem).unwrap();
+    std::fs::write(dir.join("key.pem"), &pem.key_pem).unwrap();
+    let password = "grpc-pass";
+    let (private_key, public_key) = x25519_keys(&bin);
+
+    // (protocol, security, the server's serviceName, the link's, mode)
+    let cases = [
+        ("trojan", "tls", "svc", "svc", "gun"),
+        ("trojan", "tls", "svc", "svc", "multi"),
+        ("trojan", "tls", "", "", "gun"),
+        ("trojan", "reality", "svc", "svc", "gun"),
+        ("vless", "tls", "/my/path/tun|tunm", "/my/path/tun", "gun"),
+        ("vless", "tls", "/my/path/tun|tunm", "/my/path/tunm", "multi"),
+        ("vless", "reality", "svc", "svc", "multi"),
+        ("vless", "none", "svc", "svc", "gun"),
+        ("vmess", "tls", "svc", "svc", "gun"),
+        ("vmess", "none", "svc", "svc", "multi"),
+    ];
+    for (proto, security, server_name, client_name, mode) in cases {
+        let port = free_port();
+        let mut inbounds = Vec::new();
+        let mut stream = serde_json::json!({
+            "network": "grpc", "grpcSettings": { "serviceName": server_name }
+        });
+        match security {
+            "tls" => {
+                stream["security"] = "tls".into();
+                stream["tlsSettings"] = serde_json::json!({ "alpn": ["h2"], "certificates": [{
+                    "certificateFile": dir.join("cert.pem"), "keyFile": dir.join("key.pem")
+                }]});
+            }
+            "reality" => {
+                let (dest, site_inbound) = site_inbound(&site, &dir);
+                inbounds.push(site_inbound);
+                stream["security"] = "reality".into();
+                stream["realitySettings"] = serde_json::json!({
+                    "dest": dest.to_string(), "serverNames": ["reality.test"],
+                    "privateKey": private_key, "shortIds": ["0123abcd"]
+                });
+            }
+            _ => {}
+        }
+        let settings = match proto {
+            "trojan" => serde_json::json!({ "clients": [{ "password": password }] }),
+            "vless" => serde_json::json!({ "clients": [{ "id": UUID }], "decryption": "none" }),
+            _ => serde_json::json!({ "clients": [{ "id": UUID }] }),
+        };
+        inbounds.insert(
+            0,
+            serde_json::json!({
+                "listen": "127.0.0.1", "port": port, "protocol": proto,
+                "settings": settings, "streamSettings": stream
+            }),
+        );
+        let _xray = start_xray(
+            &bin,
+            serde_json::json!({
+                "log": { "loglevel": "debug" }, "inbounds": inbounds,
+                "outbounds": [loopback_freedom()]
+            }),
+        )
+        .await;
+
+        let link = |service: &str| {
+            let sec = match security {
+                "tls" => "security=tls&sni=grpc.test&fp=chrome&alpn=h2".to_string(),
+                "reality" => format!(
+                    "security=reality&sni=reality.test&fp=chrome&pbk={public_key}&sid=0123abcd"
+                ),
+                _ => "security=none".to_string(),
+            };
+            let service: String = url::form_urlencoded::byte_serialize(service.as_bytes()).collect();
+            let q = format!("type=grpc&{sec}&serviceName={service}&mode={mode}");
+            match proto {
+                "trojan" => format!("trojan://{password}@127.0.0.1:{port}?{q}#g"),
+                "vless" => format!("vless://{UUID}@127.0.0.1:{port}?{q}#g"),
+                _ => format!("vmess://{UUID}@127.0.0.1:{port}?{q}&encryption=auto#g"),
+            }
+        };
+        let build = |service: &str| -> Arc<dyn Outbound> {
+            let roots = vec![pem.cert_der.clone()];
+            let sockets = Arc::new(SocketFactory::default());
+            match unbihex_engine::link::parse_link(&link(service), "grpc").unwrap() {
+                OutboundConfig::Trojan(c) => Arc::new(
+                    TrojanOutbound::new(&c, endpoint(port), sockets)
+                        .unwrap()
+                        .with_extra_roots(&c, roots)
+                        .unwrap(),
+                ),
+                OutboundConfig::Vless(mut c) => {
+                    c.allow_plaintext = security == "none";
+                    Arc::new(
+                        VlessOutbound::new(&c, endpoint(port), sockets)
+                            .unwrap()
+                            .with_extra_roots(&c, roots)
+                            .unwrap(),
+                    )
+                }
+                OutboundConfig::Vmess(c) => Arc::new(
+                    VmessOutbound::new(&c, endpoint(port), sockets)
+                        .unwrap()
+                        .with_extra_roots(&c, roots)
+                        .unwrap(),
+                ),
+                other => panic!("{other:?}"),
+            }
+        };
+        eprintln!("{proto} grpc {security} service {client_name:?} {mode}");
+        let ob = build(client_name);
+        plain_roundtrip(ob.as_ref(), echo).await;
+        udp_roundtrip(ob.as_ref(), uecho).await;
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let ob = ob.clone();
+            tasks.push(tokio::spawn(async move { plain_roundtrip(ob.as_ref(), echo).await }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        // The client's half-close reaches the echo, whose close ends the read cleanly.
+        let mut s = ob.connect_tcp(&session(echo)).await.unwrap();
+        s.write_all(b"bye").await.unwrap();
+        s.shutdown().await.unwrap();
+        let mut back = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), s.read_to_end(&mut back))
+            .await
+            .expect("half-close timed out")
+            .unwrap();
+        assert_eq!(back, b"bye");
+        // A service the server does not have: the call fails, nothing comes back.
+        let wrong = build("other");
+        let r = match wrong.connect_tcp(&session(echo)).await {
+            Ok(mut s) => {
+                let _ = s.write_all(b"ping").await;
+                let mut b = [0u8; 4];
+                tokio::time::timeout(Duration::from_secs(10), s.read(&mut b))
+                    .await
+                    .expect("a wrong service name must be answered")
+            }
+            Err(e) => Err(std::io::Error::other(e.to_string())),
+        };
+        assert!(!matches!(r, Ok(n) if n > 0), "a wrong service name must not relay: {r:?}");
     }
     let _ = std::fs::remove_dir_all(dir);
 }

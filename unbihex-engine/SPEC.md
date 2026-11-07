@@ -264,6 +264,8 @@ IPv6 в скобках:
   - `type=tcp|raw` (или нет) либо `type=xhttp|splithttp` с `path`, `host`, `mode`, `extra` (JSON настроек Xray, §11.5),
     либо `type=ws|httpupgrade` с `path` и `host` (§11.10; `host` — первый из списка через запятую, без `sni` имя для
     TLS берётся из него — как в v2rayN); Vision и REALITY поверх WebSocket — ошибка, как в Xray;
+    либо `type=grpc` (или `gun`) с `serviceName` (если его нет — `path`), `authority`, `mode=multi|gun` (§11.18;
+    TLS, REALITY или без шифрования; Vision поверх gRPC — ошибка, как в Xray);
   - `fm` / `finalmask` — `finalmask` Xray 26 (JSON) и старый `fragment=tlshello,<length>,<interval>` дают
     фрагментацию ClientHello (§11.6); то же у `vmess://` (в JSON v2rayN `fm` — объект или строка) и `trojan://`;
   - у `ws`/`httpupgrade` — свои параметры клиента для заголовков запроса (§11.10): `headers` — JSON-объект строк
@@ -271,7 +273,7 @@ IPv6 в скобках:
     sing-box), `ua` — один `User-Agent`, он главнее `User-Agent` из `headers`; `Host` из `headers` работает, когда
     нет `host`, и тоже даёт имя для TLS. Не JSON-объект, не строка в значении, CR/LF — ошибка;
   - `flow=xtls-rprx-vision` (`-udp443` тоже);
-  - другие `type` (`grpc`, `h2`, …), `flow`, `encryption`, `headerType`, а также `security` — понятная ошибка
+  - другие `type` (`h2`, …), `flow`, `encryption`, `headerType`, а также `security` — понятная ошибка
     `Unsupported("...")`.
 - `ss://<base64url(method:password)>@<host>:<port>#<name>` (SIP002) и legacy `ss://<base64(method:password@host:port)>#name`;
   base64 с паддингом и без. Плагины (`?plugin=`) — ошибка.
@@ -284,14 +286,16 @@ IPv6 в скобках:
   (`up`, `down`, `upmbps`, `downmbps` — просят Brutal, его нет) и прочие незнакомые параметры.
 - `vmess://` (§11.9): base64 JSON v2rayN (`add`, `port`, `id`, `scy`, `net`, `type`, `host`, `path`, `tls`, `sni`,
   `alpn`, `fp`) или URL-вид `vmess://<uuid>@<host>:<port>?type=…&security=…&encryption=…#<name>`. `net`/`type`:
-  `tcp`/`raw` без маскировки заголовка, `ws`, `httpupgrade` (§11.10); `host` — первый из списка через запятую; без
+  `tcp`/`raw` без маскировки заголовка, `ws`, `httpupgrade` (§11.10), `grpc` (§11.18; в JSON v2rayN `serviceName` в
+  `path`, `authority` в `host`, режим `multi`/`gun` в `type`; в URL-виде — `serviceName`, `authority`, `mode`); `host` — первый из списка через запятую; без
   `sni` имя для TLS берётся из `host`, затем сервера (как в v2rayN). `headers` и `ua` — как у VLESS (в JSON v2rayN
-  `headers` — объект или та же JSON-строка). Отклоняются: другие транспорты (`grpc`, `h2`,
+  `headers` — объект или та же JSON-строка). Отклоняются: другие транспорты (`h2`,
   `xhttp`, …), `headerType` кроме `none`, `security` кроме `tls`, `allowInsecure=1`, незнакомый шифр (ошибка
   называет его); `scy=none`/`zero` — это `auto` (§11.9).
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, по умолчанию `tls`; `sni` / `peer` /
   `serverName`, `alpn`, `fp`, для REALITY — `pbk`, `sid`; `type=tcp|raw|ws|httpupgrade` с `path`, `host`, `headers` и
-  `ua` (как у VLESS, без `sni` имя для TLS у WebSocket — из `host`). Отклоняются: `security=none` и другие, другие транспорты,
+  `ua` (как у VLESS, без `sni` имя для TLS у WebSocket — из `host`) или `type=grpc` с `serviceName`, `authority`,
+  `mode` (как у VLESS, поверх TLS или REALITY). Отклоняются: `security=none` и другие, другие транспорты,
   `headerType` кроме `none`, `flow`, `allowInsecure=1`, пустой пароль.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, версии 0–2, §11.11): `hostname`, `addresses` (порт по умолчанию
   443), `custom_sni`, `has_ipv6`, логин и пароль, `certificate` (цепочка DER), `anti_dpi` → `fragment`, `name`.
@@ -636,6 +640,9 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = домен (1 B длина + байты), 0x0
 - **X25519MLKEM768** (0x11ec, draft-ietf-tls-ecdhe-mlkem; `outbound/pq.rs`): share клиента — ключ инкапсуляции
   ML-KEM-768 (1184 Б) и X25519 (32 Б), share сервера — шифртекст (1088 Б) и X25519, секрет — ключ ML-KEM и секрет X25519.
   Половина X25519 предлагается и отдельным key share, поэтому сервер без ML-KEM укладывается в один RTT.
+- **Конец без close_notify.** Сервер, закрывший TCP без close_notify, для туннеля (TLS у VLESS, VMess, Trojan, их
+  WebSocket и gRPC) — обычный конец потока, как в Go `crypto/tls` у Xray и sing-box: rustls называет его ошибкой, и
+  ретранслятор рвал бы сразу оба направления вместо передачи конца дальше.
 - **Чтение блоками.** Без Vision TLS читается крупно: один `read` сокета до 64 КБ, rustls разбирает записи из памяти;
   запись уходит одним `write` (`write_vectored`). С Vision чтение идёт ровно по одной записи (`tls_stream.rs`): после
   команды перехода на прямое копирование ничего лишнего не должно быть прочитано.
@@ -956,6 +963,27 @@ RFC 1928/1929: CONNECT, опционально логин и пароль. До�
   заголовка в ответе (старые серверы) — без дополнения. sing-box отвергает CONNECT без `padding` (400).
 - UDP в NaiveProxy нет: `connect_udp` — `Unsupported` (UoT sing-box — его собственное расширение, не поддерживается).
   HTTP/3 (`naive+quic`) — пока нет.
+
+### 11.18 gRPC
+
+`grpc: {"service_name": "svc", "authority"?, "multi_mode"?, "user_agent"?}` (у VLESS, VMess и Trojan) — транспорт gRPC
+(«gun») Xray (`grpcSettings`) и sing-box (`transport.type = grpc`), `outbound/grpc.rs`.
+
+- Одно соединение HTTP/2 на outbound (поверх TLS, REALITY или TCP) на все потоки, как общий `ClientConn` Xray;
+  соединение, простоявшее 30 с, проверяется PING (5 с) перед новым вызовом, после GOAWAY или обрыва — одна повторная
+  попытка на новом. TLS предлагает `h2`: если в `alpn` ссылки его нет — список Xray по умолчанию `h2, http/1.1`
+  (с отпечатком профиль ставит свой ALPN, как uTLS в Xray). Согласованный ALPN не проверяется — так же gRPC-Go в Xray.
+- Каждое TCP-соединение (и поток UDP / Mux.Cool) — двунаправленный вызов `POST /<serviceName>/Tun`
+  (`/<serviceName>/TunMulti` при `multi_mode`) с `content-type: application/grpc`, `user-agent`, `te: trailers`.
+  Имя сервиса экранируется как `url.PathEscape` Go; имя, начинающееся с `/`, — целый путь, как в Xray: `/a/b/tun`
+  вызывает `/a/b/tun`, серверная форма `/a/b/tun|tunMulti` даёт второе имя для `multi_mode`; пустое имя — `//Tun`.
+  `:authority` — `authority`, иначе SNI TLS, иначе имя сервера (без REALITY), иначе `host:port`. `user_agent`:
+  `chrome` (по умолчанию, как Xray 26), `firefox`, `edge`, `golang` (пустой) или значение как есть.
+- Вызов не ждёт ответа сервера: заголовок протокола уходит с первыми данными. Сообщение — `0 | длина (be32) |
+  Hunk { bytes data = 1; }` (до 32 КиБ данных); принимаются `Hunk` и `MultiHunk` (несколько `data` склеиваются,
+  незнакомые поля пропускаются) до 4 МиБ; сжатое сообщение — ошибка. Ответ не 200 или `grpc-status` ≠ 0 без тела —
+  ошибка (12 — «нет такого сервиса», неверный `serviceName`). Закрытие записи — END_STREAM, конец ответа (трейлеры или
+  RST_STREAM NO_ERROR) — конец чтения.
 
 ---
 
