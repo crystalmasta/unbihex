@@ -20,7 +20,7 @@ pub mod subscription;
 pub use client::{AddReport, Client, PingResult};
 pub use controller::{ConnectionInfo, Controller, Status};
 pub use error::{ClientError, Result};
-pub use model::{AdblockStatus, AppData, AutoGroup, AutoSelect, GeoStatus, PingMethod, ProxyMode, RoutingMode, Server, Settings, Subscription};
+pub use model::{AdblockStatus, AppData, AutoSelect, AutoTemplate, GeoStatus, PingMethod, ProxyMode, RoutingMode, Server, Settings, Subscription};
 
 /// Version of the engine this client is built with.
 pub const ENGINE_VERSION: &str = unbihex_engine::VERSION;

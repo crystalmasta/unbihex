@@ -100,7 +100,6 @@ fn blank(protocol: &str) -> Server {
         ping_ms: None,
         ping_error: None,
         auto_excluded: false,
-        auto_marked: false,
         fingerprint: None,
     }
 }

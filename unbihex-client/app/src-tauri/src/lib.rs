@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use unbihex_client_core::{
-    AddReport, AppData, Client, ClientError, ConnectionInfo, PingMethod, PingResult, Settings, Status,
+    AddReport, AppData, AutoTemplate, Client, ClientError, ConnectionInfo, PingMethod, PingResult, Settings, Status,
 };
 use uuid::Uuid;
 
@@ -481,22 +481,90 @@ fn remove_server(app: AppHandle, state: State<'_, AppState>, id: Uuid) -> Result
     r
 }
 
-/// Excludes a server from auto-select or marks it for it; a running group is
-/// rebuilt right away.
+/// Excludes a server from auto-select (without a template) or takes it back; a
+/// running group is rebuilt right away.
 #[tauri::command]
 async fn set_server_auto(
     app: AppHandle,
     state: State<'_, AppState>,
     id: Uuid,
-    excluded: Option<bool>,
-    marked: Option<bool>,
+    excluded: bool,
 ) -> Result<Option<ConnectionInfo>, String> {
-    state.client.set_server_auto(id, excluded, marked).map_err(err)?;
+    state.client.set_server_auto(id, excluded).map_err(err)?;
     notify(&app);
-    if state.client.settings().auto_select == unbihex_client_core::AutoSelect::Off {
+    regroup(&app, &state, None).await
+}
+
+/// After a change of auto-select servers: rebuilds a running group when auto-select
+/// is on and the change touched what it uses (`template`: the template changed,
+/// `None`: the servers without a template).
+async fn regroup(
+    app: &AppHandle,
+    state: &AppState,
+    template: Option<Uuid>,
+) -> Result<Option<ConnectionInfo>, String> {
+    let s = state.client.settings();
+    if s.auto_select == unbihex_client_core::AutoSelect::Off || s.auto_template != template {
         return Ok(None);
     }
-    reconnect_if_connected(&app, &state).await
+    reconnect_if_connected(app, state).await
+}
+
+/// A new auto-select template (issue #46).
+#[tauri::command]
+fn create_template(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    servers: Vec<Uuid>,
+) -> Result<AutoTemplate, String> {
+    let t = state.client.create_template(&name, servers).map_err(err)?;
+    notify(&app);
+    Ok(t)
+}
+
+/// Renames a template and/or replaces its servers.
+#[tauri::command]
+async fn update_template(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: Uuid,
+    name: Option<String>,
+    servers: Option<Vec<Uuid>>,
+) -> Result<Option<ConnectionInfo>, String> {
+    state.client.update_template(id, name, servers).map_err(err)?;
+    notify(&app);
+    regroup(&app, &state, Some(id)).await
+}
+
+/// Adds a server to a template or takes it out (the server's "⋯" menu).
+#[tauri::command]
+async fn set_template_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: Uuid,
+    server: Uuid,
+    member: bool,
+) -> Result<Option<ConnectionInfo>, String> {
+    state.client.set_template_server(id, server, member).map_err(err)?;
+    notify(&app);
+    regroup(&app, &state, Some(id)).await
+}
+
+/// Deletes a template; the active one gives way to all servers.
+#[tauri::command]
+async fn delete_template(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: Uuid,
+) -> Result<Option<ConnectionInfo>, String> {
+    let active = state.client.settings().auto_template == Some(id);
+    state.client.delete_template(id).map_err(err)?;
+    notify(&app);
+    if active {
+        return regroup(&app, &state, None).await;
+    }
+    Ok(None)
 }
 
 #[tauri::command]
@@ -1041,6 +1109,10 @@ pub fn run() {
             remove_subscription,
             remove_server,
             set_server_auto,
+            create_template,
+            update_template,
+            set_template_server,
+            delete_template,
             set_server_fingerprint,
             select_server,
             save_settings,

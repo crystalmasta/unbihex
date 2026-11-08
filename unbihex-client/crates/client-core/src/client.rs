@@ -10,7 +10,7 @@ use crate::controller::{Controller, Status};
 use crate::error::{ClientError, Result};
 use crate::geo::Geo;
 use crate::links::{b64_decode, is_share_link, parse_server};
-use crate::model::{AppData, AutoGroup, Server, Settings, Subscription, now_secs};
+use crate::model::{AppData, AutoTemplate, Server, Settings, Subscription, now_secs};
 use crate::ping::{describe_error, measure};
 use crate::subscription::{Device, FetchOptions, JSON_USER_AGENT, fallback_name, fetch_with};
 
@@ -19,6 +19,8 @@ const STATE_FILE: &str = "state.json";
 const MIN_LAN_PASSWORD: usize = 8;
 /// Delay tests running at the same time.
 const PING_PARALLEL: usize = 12;
+/// Longest auto-select template name, in characters.
+const MAX_TEMPLATE_NAME: usize = 60;
 
 /// Result of [`Client::add_input`].
 #[derive(Clone, Debug, Default, Serialize)]
@@ -50,13 +52,17 @@ pub struct Client {
     pub controller: Arc<Controller>,
 }
 
-/// The saved state, and whether it lacked the LAN password (a new one was generated
-/// and must be saved so LAN devices keep working after a restart).
+/// The saved state, and whether it must be saved right away: it lacked the LAN
+/// password (a new one was generated, LAN devices must keep working after a
+/// restart) or had the old auto-select marks (now a template).
 fn load(path: &Path) -> (AppData, bool) {
     let parsed = std::fs::read(path).map(|bytes| {
         serde_json::from_slice::<serde_json::Value>(&bytes).and_then(|v| {
             let fresh = v.pointer("/settings/lan_password").is_none();
-            serde_json::from_value::<AppData>(v).map(|d| (d, fresh))
+            serde_json::from_value::<AppData>(v.clone()).map(|mut d| {
+                let migrated = d.migrate_marks(&v);
+                (d, fresh || migrated)
+            })
         })
     });
     match parsed {
@@ -322,6 +328,7 @@ impl Client {
         self.mutate(|d| {
             d.subscriptions.retain(|s| s.id != id);
             d.servers.retain(|s| s.subscription_id != Some(id));
+            d.prune_templates();
             d.ensure_selection();
         })
     }
@@ -330,6 +337,7 @@ impl Client {
     pub fn remove_server(&self, id: Uuid) -> Result<()> {
         self.mutate(|d| {
             d.servers.retain(|s| s.id != id);
+            d.prune_templates();
             d.ensure_selection();
         })
     }
@@ -381,6 +389,12 @@ impl Client {
             s.lan_username = s.lan_username.trim().to_string();
             if s.lan_username.is_empty() {
                 s.lan_username = crate::model::DEFAULT_LAN_USERNAME.into();
+            }
+            // A template deleted meanwhile (another window): all servers.
+            if let Some(t) = s.auto_template
+                && !d.auto_templates.iter().any(|x| x.id == t)
+            {
+                s.auto_template = None;
             }
             d.settings = s;
         })
@@ -476,23 +490,23 @@ impl Client {
 
     /// The selected server and, with auto-select on, the rest of its group the
     /// engine supports, in list order, up to `plan::MAX_GROUP` in all. The group
-    /// ([`AutoGroup`]) is the other servers of its subscription (manual servers:
-    /// the other manual ones) except the excluded ones, or the marked servers of
-    /// any subscription. The selected server always comes first, even when it is
-    /// excluded or not marked.
+    /// is the servers of the active template (any subscriptions), or without one
+    /// the other servers of its subscription (manual servers: the other manual
+    /// ones) except the excluded ones. The selected server always comes first,
+    /// even when it is excluded or not in the template.
     pub fn connect_servers(&self) -> Result<Vec<Server>> {
         let first = self.selected_server()?;
         let mut out = vec![first.clone()];
         let d = self.data.read();
         if d.settings.auto_select != crate::model::AutoSelect::Off {
-            let mode = d.settings.auto_group;
+            let template = d.active_template();
             out.extend(
                 d.servers
                     .iter()
                     .filter(|s| s.id != first.id && s.is_supported())
-                    .filter(|s| match mode {
-                        AutoGroup::Subscription => s.subscription_id == first.subscription_id && !s.auto_excluded,
-                        AutoGroup::Marked => s.auto_marked,
+                    .filter(|s| match template {
+                        Some(t) => t.servers.contains(&s.id),
+                        None => s.subscription_id == first.subscription_id && !s.auto_excluded,
                     })
                     .take(crate::plan::MAX_GROUP - 1)
                     .cloned(),
@@ -501,23 +515,78 @@ impl Client {
         Ok(out)
     }
 
-    /// Excludes a server from the auto-select group of its subscription
-    /// (`excluded`) or marks it for the group of marked servers (`marked`);
-    /// `None` leaves that flag as it is.
-    pub fn set_server_auto(&self, id: Uuid, excluded: Option<bool>, marked: Option<bool>) -> Result<Server> {
+    /// Excludes a server from the auto-select group of its subscription (used
+    /// while no template is active) or takes it back.
+    pub fn set_server_auto(&self, id: Uuid, excluded: bool) -> Result<Server> {
         self.mutate(|d| {
             let s = d
                 .servers
                 .iter_mut()
                 .find(|s| s.id == id)
                 .ok_or_else(|| ClientError::NotFound("сервер".into()))?;
-            if let Some(v) = excluded {
-                s.auto_excluded = v;
-            }
-            if let Some(v) = marked {
-                s.auto_marked = v;
-            }
+            s.auto_excluded = excluded;
             Ok(s.clone())
+        })?
+    }
+
+    /// Creates an auto-select template; servers that do not exist are left out.
+    pub fn create_template(&self, name: &str, servers: Vec<Uuid>) -> Result<AutoTemplate> {
+        self.mutate(|d| {
+            let name = template_name(d, name, None)?;
+            let servers = known_servers(d, servers);
+            let t = AutoTemplate { id: Uuid::new_v4(), name, servers };
+            d.auto_templates.push(t.clone());
+            Ok(t)
+        })?
+    }
+
+    /// Renames a template and/or replaces its servers; `None` leaves that as it is.
+    pub fn update_template(&self, id: Uuid, name: Option<String>, servers: Option<Vec<Uuid>>) -> Result<AutoTemplate> {
+        self.mutate(|d| {
+            let name = name.map(|n| template_name(d, &n, Some(id))).transpose()?;
+            let servers = servers.map(|s| known_servers(d, s));
+            let t = template_mut(d, id)?;
+            if let Some(n) = name {
+                t.name = n;
+            }
+            if let Some(s) = servers {
+                t.servers = s;
+            }
+            Ok(t.clone())
+        })?
+    }
+
+    /// Adds a server to a template or takes it out.
+    pub fn set_template_server(&self, id: Uuid, server: Uuid, member: bool) -> Result<AutoTemplate> {
+        self.mutate(|d| {
+            if d.server(server).is_none() {
+                return Err(ClientError::NotFound("сервер".into()));
+            }
+            let t = template_mut(d, id)?;
+            let at = t.servers.iter().position(|s| *s == server);
+            match (member, at) {
+                (true, None) => t.servers.push(server),
+                (false, Some(i)) => {
+                    t.servers.remove(i);
+                }
+                _ => {}
+            }
+            Ok(t.clone())
+        })?
+    }
+
+    /// Deletes a template; when it was the active one, "all servers" takes over.
+    pub fn delete_template(&self, id: Uuid) -> Result<()> {
+        self.mutate(|d| {
+            let before = d.auto_templates.len();
+            d.auto_templates.retain(|t| t.id != id);
+            if d.auto_templates.len() == before {
+                return Err(ClientError::NotFound("шаблон".into()));
+            }
+            if d.settings.auto_template == Some(id) {
+                d.settings.auto_template = None;
+            }
+            Ok(())
         })?
     }
 
@@ -663,6 +732,31 @@ fn check_fingerprint(fp: &str) -> Result<()> {
     } else {
         Err(ClientError::Input(format!("неизвестный отпечаток TLS «{fp}»: {}", FINGERPRINTS.join(", "))))
     }
+}
+
+/// A template name: trimmed, not empty, not too long, not taken by another one.
+fn template_name(d: &AppData, name: &str, id: Option<Uuid>) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ClientError::Input("введите название шаблона".into()));
+    }
+    if name.chars().count() > MAX_TEMPLATE_NAME {
+        return Err(ClientError::Input(format!("название шаблона — не длиннее {MAX_TEMPLATE_NAME} символов")));
+    }
+    if d.auto_templates.iter().any(|t| Some(t.id) != id && t.name == name) {
+        return Err(ClientError::Input(format!("шаблон «{name}» уже есть")));
+    }
+    Ok(name.to_string())
+}
+
+/// `servers` without unknown ids and repeats, in the given order.
+fn known_servers(d: &AppData, servers: Vec<Uuid>) -> Vec<Uuid> {
+    let mut seen = std::collections::HashSet::new();
+    servers.into_iter().filter(|id| d.server(*id).is_some() && seen.insert(*id)).collect()
+}
+
+fn template_mut(d: &mut AppData, id: Uuid) -> Result<&mut AutoTemplate> {
+    d.auto_templates.iter_mut().find(|t| t.id == id).ok_or_else(|| ClientError::NotFound("шаблон".into()))
 }
 
 fn shorten(s: &str) -> String {
@@ -868,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_group_follows_exclusions_and_marks() {
+    fn auto_group_follows_exclusions_and_templates() {
         let link = |host: &str| parse_server(&format!("vless://{UUID}@{host}:443?security=tls&sid=1#{host}")).unwrap();
         let c = Client::open(tmp());
         let (s1, s2) = (Uuid::new_v4(), Uuid::new_v4());
@@ -887,16 +981,31 @@ mod tests {
         c.select(ids[1]).unwrap();
         assert_eq!(group(&c), [ids[1], ids[0], ids[2]]);
         // Excluded: out of the group, but still first while selected.
-        c.set_server_auto(ids[0], Some(true), None).unwrap();
+        c.set_server_auto(ids[0], true).unwrap();
         assert_eq!(group(&c), [ids[1], ids[2]]);
-        c.set_server_auto(ids[1], Some(true), None).unwrap();
+        c.set_server_auto(ids[1], true).unwrap();
         assert_eq!(group(&c), [ids[1], ids[2]]);
-        // Marked: across subscriptions, unsupported ones left out.
-        c.mutate(|d| d.settings.auto_group = AutoGroup::Marked).unwrap();
+        // A template: across subscriptions, exclusions ignored, unsupported ones left out.
+        let t = c.create_template(" Быстрые ", vec![ids[3], Uuid::new_v4(), ids[3]]).unwrap();
+        assert_eq!((t.name.as_str(), t.servers.clone()), ("Быстрые", vec![ids[3]]));
+        assert!(c.create_template("Быстрые", vec![]).is_err(), "names are unique");
+        assert!(c.create_template("  ", vec![]).is_err());
+        assert_eq!(group(&c), [ids[1], ids[2]], "not active yet");
+        let mut s = c.settings();
+        s.auto_template = Some(t.id);
+        c.set_settings(s).unwrap();
         assert_eq!(group(&c), [ids[1]]);
-        for i in [0, 3, 4] {
-            c.set_server_auto(ids[i], None, Some(true)).unwrap();
+        for i in [0, 4] {
+            c.set_template_server(t.id, ids[i], true).unwrap();
         }
+        c.set_template_server(t.id, ids[4], true).unwrap();
+        assert_eq!(group(&c), [ids[1], ids[0], ids[4]]);
+        assert!(c.set_template_server(t.id, Uuid::new_v4(), true).is_err());
+        // Another template is not used while this one is active.
+        let other = c.create_template("Другой", vec![ids[2]]).unwrap();
+        assert!(c.update_template(other.id, Some("Быстрые".into()), None).is_err());
+        let other = c.update_template(other.id, Some("Запасные".into()), Some(vec![ids[2], ids[4]])).unwrap();
+        assert_eq!(other.servers, [ids[2], ids[4]]);
         assert_eq!(group(&c), [ids[1], ids[0], ids[4]]);
         // So does a server's own TLS fingerprint; an unknown one is refused.
         c.set_server_fingerprint(ids[0], Some(" Firefox ".into())).unwrap();
@@ -906,15 +1015,91 @@ mod tests {
         c.mutate(|d| d.replace_servers(s1, vec![fresh("c.com"), fresh("a.com"), fresh("b.com")])).unwrap();
         let d = c.snapshot();
         let a = d.server(ids[0]).unwrap();
-        assert!(a.auto_excluded && a.auto_marked);
+        assert!(a.auto_excluded);
         assert_eq!(a.fingerprint.as_deref(), Some("firefox"));
-        assert!(!d.server(ids[2]).unwrap().auto_marked);
+        assert_eq!(d.active_template().unwrap().servers, [ids[3], ids[0], ids[4]]);
         // Updated servers go after the other subscription's: list order.
         assert_eq!(group(&c), [ids[1], ids[4], ids[0]]);
+        // A server gone from the subscription leaves the templates.
+        c.mutate(|d| d.replace_servers(s1, vec![fresh("c.com"), fresh("b.com")])).unwrap();
+        assert_eq!(c.snapshot().active_template().unwrap().servers, [ids[3], ids[4]]);
+        c.set_template_server(t.id, ids[4], false).unwrap();
+        assert_eq!(group(&c), [ids[1]]);
+        // Deleting the active template: all servers of the subscription again.
+        c.delete_template(t.id).unwrap();
+        assert_eq!(c.settings().auto_template, None);
+        assert_eq!(group(&c), [ids[1], ids[2]]);
+        assert!(c.delete_template(t.id).is_err());
+        // An unknown active template (deleted elsewhere) is dropped on save.
+        let mut s = c.settings();
+        s.auto_template = Some(t.id);
+        c.set_settings(s).unwrap();
+        assert_eq!(c.settings().auto_template, None);
         // Off: only the selected server.
         c.mutate(|d| d.settings.auto_select = crate::model::AutoSelect::Off).unwrap();
         assert_eq!(group(&c), [ids[1]]);
-        assert!(c.set_server_auto(Uuid::new_v4(), Some(true), None).is_err());
+        assert!(c.set_server_auto(Uuid::new_v4(), true).is_err());
+    }
+
+    /// State files from before templates: the marks become the template
+    /// "Отмеченные", active when "only the marked servers" was on.
+    #[test]
+    fn old_marks_become_a_template() {
+        let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let srv = |id: Uuid, marked: bool| {
+            format!(
+                r#"{{"id":"{id}","subscription_id":null,"name":"x","link":"vless://{UUID}@x.com:443?security=tls#x","protocol":"vless",
+                "host":"x.com","port":443,"transport":"tcp+tls","unsupported":null,"ping_ms":null,"ping_error":null,
+                "auto_excluded":{marked},"auto_marked":{marked}}}"#
+            )
+        };
+        let state = |group: &str| {
+            format!(
+                r#"{{"servers":[{},{},{}],"selected":"{a}","settings":{{"auto_select":"fallback","auto_group":"{group}","lan_password":"0123456789"}}}}"#,
+                srv(a, true),
+                srv(b, false),
+                srv(c, true)
+            )
+        };
+        // Marked mode: the template is active, the group stays the same.
+        let dir = tmp();
+        std::fs::write(dir.join(STATE_FILE), state("marked")).unwrap();
+        let cl = Client::open(&dir);
+        let d = cl.snapshot();
+        assert_eq!(d.auto_templates.len(), 1);
+        let t = &d.auto_templates[0];
+        assert_eq!((t.name.as_str(), t.servers.clone()), (crate::model::MARKED_TEMPLATE, vec![a, c]));
+        assert_eq!(d.settings.auto_template, Some(t.id));
+        assert!(d.server(a).unwrap().auto_excluded, "exclusions stay");
+        let group: Vec<Uuid> = cl.connect_servers().unwrap().iter().map(|s| s.id).collect();
+        assert_eq!(group, [a, c]);
+        // Saved at once and only once: opening again keeps the same template.
+        let saved = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
+        assert!(!saved.contains("auto_marked") && !saved.contains("auto_group"), "{saved}");
+        let again = Client::open(&dir).snapshot();
+        assert_eq!(again.auto_templates, d.auto_templates);
+        assert_eq!(again.settings.auto_template, Some(t.id));
+        drop(cl);
+        // Subscription mode: the marks are kept as a template, not active.
+        let dir = tmp();
+        std::fs::write(dir.join(STATE_FILE), state("subscription")).unwrap();
+        let d = Client::open(&dir).snapshot();
+        assert_eq!(d.auto_templates.len(), 1);
+        assert_eq!(d.auto_templates[0].servers, [a, c]);
+        assert_eq!(d.settings.auto_template, None);
+        // Marked mode without marks: an empty active template, as the group was.
+        let dir = tmp();
+        let none = state("marked").replace(r#""auto_marked":true"#, r#""auto_marked":false"#);
+        std::fs::write(dir.join(STATE_FILE), none).unwrap();
+        let d = Client::open(&dir).snapshot();
+        assert_eq!(d.auto_templates.len(), 1);
+        assert!(d.auto_templates[0].servers.is_empty());
+        assert_eq!(d.settings.auto_template, Some(d.auto_templates[0].id));
+        // No marks, no marked mode: nothing to migrate.
+        let dir = tmp();
+        let plain = state("subscription").replace(r#""auto_marked":true"#, r#""auto_marked":false"#);
+        std::fs::write(dir.join(STATE_FILE), plain).unwrap();
+        assert!(Client::open(&dir).snapshot().auto_templates.is_empty());
     }
 
     #[test]

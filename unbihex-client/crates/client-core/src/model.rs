@@ -112,12 +112,10 @@ pub struct Server {
     pub ping_ms: Option<u32>,
     /// Last ping error.
     pub ping_error: Option<String>,
-    /// Left out of the auto-select group in [`AutoGroup::Subscription`] mode.
+    /// Left out of the auto-select group when no template is active
+    /// ([`Settings::auto_template`]).
     #[serde(default)]
     pub auto_excluded: bool,
-    /// Taken into the auto-select group in [`AutoGroup::Marked`] mode.
-    #[serde(default)]
-    pub auto_marked: bool,
     /// TLS fingerprint for this server instead of [`Settings::tls_fingerprint`]
     /// and the link's `fp`; kept across subscription updates.
     #[serde(default)]
@@ -160,7 +158,8 @@ pub enum RoutingMode {
 }
 
 /// Auto-select (issue #46): the selected server and the rest of its group
-/// ([`AutoGroup`]) become one balancer in the engine (SPEC §11.16).
+/// (the active [`AutoTemplate`], or its subscription) become one balancer in
+/// the engine (SPEC §11.16).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoSelect {
@@ -173,16 +172,21 @@ pub enum AutoSelect {
     LeastPing,
 }
 
-/// Which servers join the selected one in the auto-select group.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutoGroup {
-    /// The other servers of its subscription, except the excluded ones.
-    #[default]
-    Subscription,
-    /// The marked servers of any subscription.
-    Marked,
+/// A named set of servers, from any subscriptions, for auto-select: while it
+/// is active, auto-select moves only among them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoTemplate {
+    /// Stable id.
+    pub id: Uuid,
+    /// Name shown in the settings.
+    pub name: String,
+    /// Server ids ([`Server::id`], kept across subscription updates).
+    #[serde(default)]
+    pub servers: Vec<Uuid>,
 }
+
+/// Name of the template the old marks (`auto_marked`) become.
+pub const MARKED_TEMPLATE: &str = "Отмеченные";
 
 /// Android: which apps go through the VPN (issue #16).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,10 +332,11 @@ pub struct Settings {
     pub fragment_interval: String,
     /// How "Проверить пинг" measures the delay.
     pub ping_method: PingMethod,
-    /// Auto-select among the servers of the group (see `auto_group`).
+    /// Auto-select among the servers of the group (see `auto_template`).
     pub auto_select: AutoSelect,
-    /// Which servers make up the auto-select group.
-    pub auto_group: AutoGroup,
+    /// The active [`AutoTemplate`]; `None`: the selected server's subscription
+    /// except the excluded servers.
+    pub auto_template: Option<Uuid>,
 }
 
 /// Default proxy login for LAN devices.
@@ -384,7 +389,7 @@ impl Default for Settings {
             fragment_interval: "10-20".into(),
             ping_method: PingMethod::default(),
             auto_select: AutoSelect::default(),
-            auto_group: AutoGroup::default(),
+            auto_template: None,
         }
     }
 }
@@ -405,6 +410,8 @@ pub struct AppData {
     pub geo: GeoStatus,
     /// Downloaded ad-blocking lists.
     pub adblock: AdblockStatus,
+    /// Auto-select templates, in display order.
+    pub auto_templates: Vec<AutoTemplate>,
 }
 
 /// State of the downloaded ad-blocking lists.
@@ -445,6 +452,51 @@ impl AppData {
     /// A server by id.
     pub fn server(&self, id: Uuid) -> Option<&Server> {
         self.servers.iter().find(|s| s.id == id)
+    }
+
+    /// The active auto-select template, if it still exists.
+    pub fn active_template(&self) -> Option<&AutoTemplate> {
+        let id = self.settings.auto_template?;
+        self.auto_templates.iter().find(|t| t.id == id)
+    }
+
+    /// Drops servers that are gone from the templates (a server that comes
+    /// back gets a new id anyway).
+    pub fn prune_templates(&mut self) {
+        let ids: std::collections::HashSet<Uuid> = self.servers.iter().map(|s| s.id).collect();
+        for t in &mut self.auto_templates {
+            t.servers.retain(|id| ids.contains(id));
+        }
+    }
+
+    /// State files from before templates kept marks on the servers
+    /// (`auto_marked`) and a group mode (`settings.auto_group`: `marked` used
+    /// only the marked servers). The marks become the template
+    /// [`MARKED_TEMPLATE`], active when that mode was on. `raw` is the file as
+    /// read; returns whether anything changed (the state should be saved).
+    pub fn migrate_marks(&mut self, raw: &serde_json::Value) -> bool {
+        if raw.get("auto_templates").is_some() {
+            return false;
+        }
+        let marked: Vec<Uuid> = raw
+            .get("servers")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|s| s.get("auto_marked").and_then(|m| m.as_bool()) == Some(true))
+            .filter_map(|s| s.get("id")?.as_str()?.parse().ok())
+            .filter(|id| self.servers.iter().any(|s| s.id == *id))
+            .collect();
+        let active = raw.pointer("/settings/auto_group").and_then(|v| v.as_str()) == Some("marked");
+        if marked.is_empty() && !active {
+            return false;
+        }
+        let t = AutoTemplate { id: Uuid::new_v4(), name: MARKED_TEMPLATE.into(), servers: marked };
+        if active {
+            self.settings.auto_template = Some(t.id);
+        }
+        self.auto_templates.push(t);
+        true
     }
 
     /// A subscription by id.
@@ -493,12 +545,12 @@ impl AppData {
                 s.ping_ms = o.ping_ms;
                 s.ping_error = o.ping_error.clone();
                 s.auto_excluded = o.auto_excluded;
-                s.auto_marked = o.auto_marked;
                 s.fingerprint = o.fingerprint.clone();
             }
             s.subscription_id = Some(sub_id);
             self.servers.push(s);
         }
+        self.prune_templates();
         if let Some(sel) = self.selected
             && !self.servers.iter().any(|s| s.id == sel)
         {

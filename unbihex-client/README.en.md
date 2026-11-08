@@ -40,7 +40,7 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   rustls's recognisable one; `fp=none` in a link turns this off. "TLS fingerprint" in the settings is "As in the
   link" (the default) or one for every server: chrome, firefox, safari, ios, android, edge, 360, qq, random,
   randomized (VLESS, VMess, Trojan, TrustTunnel, NaiveProxy). A button in a server's row sets one for that server only;
-  like the auto-select marks, it survives subscription updates. With REALITY, fingerprints without ML-KEM (ios,
+  like the auto-select exclusions and templates, it survives subscription updates. With REALITY, fingerprints without ML-KEM (ios,
   android, edge, 360, qq) are refused by an Xray 26 server.
 - A choice of ping tests: through the proxy with GET or HEAD (the request goes through the engine itself to
   `cp.cloudflare.com/generate_204`, so the whole chain is checked), TCP (a connection to the server port only) or ICMP.
@@ -85,9 +85,11 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   become the remote DNS on update. Presets: Cloudflare, Google, Quad9, AdGuard, and Yandex (`77.88.8.8`) for the home
   DNS.
 - Auto-select (off by default): the selected server and the other servers of its subscription (up to 20) form a
-  group. A server can be left out of it with the button in its row, and in the "Only marked" mode the group is the
-  marked servers of any subscriptions; the marks survive subscription updates, and the selected server always comes
-  first. New connections go through the first working one in order or through the one with the lowest delay. Servers
+  group ("All servers"); a server can be left out of it in its row's "⋯" menu. A template is a named set of servers
+  from any subscriptions: while one is active, the group is its servers only. Templates are created, renamed and
+  deleted on the "Автовыбор" tab; a server goes in or out of a template there or in its "⋯" menu. Exclusions and
+  templates survive subscription updates, and the selected server always comes first; the old "Only marked" marks
+  became the template "Отмеченные". New connections go through the first working one in order or through the one with the lowest delay. Servers
   are checked with a request to `www.gstatic.com/generate_204` every minute and right after a failure; switching never
   drops open connections, and the current server shows under the connect button.
 - Speed and traffic statistics, a log, a tray icon, auto-connect.

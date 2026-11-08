@@ -272,9 +272,18 @@ function openServerMenu(id) {
   $("#srv-select").hidden = !!s.unsupported || s.id === S.data.selected;
   $("#srv-fp").hidden = !hasFp(s);
   $("#srv-fp").textContent = `Отпечаток TLS: ${s.fingerprint || "как в настройках"}…`;
-  const auto = S.data.settings.auto_select !== "off" && !s.unsupported;
+  const auto = S.data.settings.auto_select !== "off" && !s.unsupported && !activeTemplate();
   $("#srv-auto").hidden = !auto;
   $("#srv-auto").textContent = auto ? autoTitle(s) : "";
+  $("#srv-tpls").innerHTML = s.unsupported
+    ? ""
+    : [
+        ...templates().map((t) => {
+          const on = t.servers.includes(s.id);
+          return `<button type="button" class="btn" data-tpl-toggle="${t.id}" data-on="${on}">${on ? `✓ В шаблоне «${esc(t.name)}» — убрать` : `Добавить в шаблон «${esc(t.name)}»`}</button>`;
+        }),
+        '<button type="button" class="btn" data-tpl-new-with="1">Новый шаблон с этим сервером…</button>',
+      ].join("");
   $("#srv-del").hidden = !!s.subscription_id;
   $("#dlg-server").showModal();
 }
@@ -286,21 +295,120 @@ function serverMenuAction(fn) {
   if (id) fn(id);
 }
 
-// Auto-select group (issue #46): the subscription minus the excluded servers, or only the marked ones.
-const autoMarked = () => S.data.settings.auto_group === "marked";
+// Auto-select group (issue #46): the subscription minus the excluded servers, or the active template.
+const templates = () => S.data.auto_templates || [];
+const activeTemplate = () => templates().find((t) => t.id === S.data.settings.auto_template) || null;
 
 // The server is outside the auto-select group (the selected one is always in it).
 function autoOff(s) {
   if (S.data.settings.auto_select === "off" || s.unsupported) return false;
-  return autoMarked() ? !s.auto_marked : s.auto_excluded;
+  const t = activeTemplate();
+  return t ? !t.servers.includes(s.id) : s.auto_excluded;
 }
 
-// The menu item that flips the server's place in the auto-select group.
+// The menu item that excludes the server from the group without a template, or takes it back.
 function autoTitle(s) {
-  const on = autoMarked() ? s.auto_marked : !s.auto_excluded;
-  return autoMarked()
-    ? on ? "Отмечен для автовыбора — снять отметку" : "Отметить для автовыбора"
-    : on ? "В автовыборе — исключить" : "Исключён из автовыбора — вернуть";
+  return s.auto_excluded ? "Исключён из автовыбора — вернуть" : "В автовыборе — исключить";
+}
+
+const plural = (n, one, few, many) => {
+  const m10 = n % 10, m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+};
+
+// The template picker and the list of templates on the "Автовыбор" tab; `value`
+// is the template to show as chosen ("" — all servers).
+function renderTemplates(value) {
+  const sel = $("#auto-template");
+  const want = value ?? sel.value;
+  sel.innerHTML = [
+    '<option value="">Все серверы (подписка, кроме исключённых)</option>',
+    ...templates().map((t) => `<option value="${t.id}">Шаблон «${esc(t.name)}»</option>`),
+  ].join("");
+  sel.value = templates().some((t) => t.id === want) ? want : "";
+  $("#templates-list").innerHTML = templates()
+    .map((t) => {
+      const n = t.servers.filter((id) => S.data.servers.some((s) => s.id === id)).length;
+      return `<div class="tpl-row"><span class="tpl-name">${esc(t.name)}<small>${n} ${plural(n, "сервер", "сервера", "серверов")}${t.id === S.data.settings.auto_template ? " · используется" : ""}</small></span>
+        <button type="button" class="btn small" data-tpl-edit="${t.id}">Изменить</button></div>`;
+    })
+    .join("");
+}
+
+// The template dialog: a new template (`id` null) or an existing one.
+let tplEdit = null;
+let tplPicked = new Set();
+function openTemplateDialog(id, withServer) {
+  const t = templates().find((x) => x.id === id) || null;
+  tplEdit = t ? t.id : null;
+  tplPicked = new Set(t ? t.servers : withServer ? [withServer] : []);
+  $("#tpl-title").textContent = t ? "Шаблон" : "Новый шаблон";
+  $("#tpl-name").value = t ? t.name : "";
+  $("#tpl-search").value = "";
+  $("#tpl-del").hidden = !t;
+  renderTemplateServers();
+  $("#dlg-tpl").showModal();
+}
+
+function renderTemplateServers() {
+  const q = $("#tpl-search").value.trim().toLowerCase();
+  const match = (s) => !s.unsupported && (!q || s.name.toLowerCase().includes(q) || s.host.toLowerCase().includes(q));
+  const groups = S.data.subscriptions.map((sub) => [sub.name, S.data.servers.filter((s) => s.subscription_id === sub.id)]);
+  groups.push(["Добавлены вручную", S.data.servers.filter((s) => !s.subscription_id)]);
+  const html = groups
+    .map(([title, list]) => {
+      const rows = list.filter(match);
+      if (!rows.length) return "";
+      return `<div class="tpl-sub">${esc(title)}</div>${rows
+        .map(
+          (s) => `<label title="${esc(s.host)}:${s.port}"><span class="app-name">${esc(s.name)}</span>
+        <input type="checkbox" data-tpl-server="${s.id}" ${tplPicked.has(s.id) ? "checked" : ""} /></label>`,
+        )
+        .join("")}`;
+    })
+    .join("");
+  $("#tpl-servers").innerHTML = html || '<p class="hint">Ничего не найдено</p>';
+  tplCount();
+}
+
+function tplCount() {
+  const n = [...tplPicked].filter((id) => S.data.servers.some((s) => s.id === id)).length;
+  $("#tpl-count").textContent = `выбрано: ${n}`;
+}
+
+async function saveTemplate() {
+  const name = $("#tpl-name").value.trim();
+  if (!name) {
+    toast("Введите название шаблона", "error");
+    $("#tpl-name").focus();
+    return;
+  }
+  const servers = S.data.servers.filter((s) => tplPicked.has(s.id)).map((s) => s.id);
+  try {
+    if (tplEdit) await invoke("update_template", { id: tplEdit, name, servers });
+    else await invoke("create_template", { name, servers });
+  } catch (e) {
+    toast(String(e), "error");
+    return;
+  }
+  $("#dlg-tpl").close();
+  await refresh();
+  renderTemplates();
+}
+
+async function deleteTemplate() {
+  const t = templates().find((x) => x.id === tplEdit);
+  if (!t || !confirm(`Удалить шаблон «${t.name}»? Серверы останутся.`)) return;
+  $("#dlg-tpl").close();
+  await call("delete_template", { id: t.id }).catch(() => {});
+  await refresh();
+  renderTemplates();
+}
+
+async function toggleTemplateServer(templateId, serverId, member) {
+  await call("set_template_server", { id: templateId, server: serverId, member }).catch(() => {});
+  await refresh();
+  renderTemplates();
 }
 
 // TLS fingerprint of one server: kept across subscription updates, like the auto-select marks.
@@ -328,8 +436,7 @@ async function saveFp() {
 async function toggleAuto(id) {
   const s = S.data.servers.find((x) => x.id === id);
   if (!s) return;
-  const args = autoMarked() ? { id, marked: !s.auto_marked } : { id, excluded: !s.auto_excluded };
-  await call("set_server_auto", args).catch(() => {});
+  await call("set_server_auto", { id, excluded: !s.auto_excluded }).catch(() => {});
   await refresh();
 }
 
@@ -517,7 +624,7 @@ function fillSettings() {
   f.udp_mux.checked = s.mux !== false;
   f.user_agent.value = s.user_agent;
   f.auto_select.value = s.auto_select || "off";
-  f.auto_group.value = s.auto_group || "subscription";
+  renderTemplates(s.auto_template || "");
   f.send_hwid.checked = s.send_hwid;
   f.device_name.value = s.device_name || "";
   f.device_name.placeholder = S.device_name || "";
@@ -630,7 +737,7 @@ function readSettings() {
     mux: f.udp_mux.checked,
     user_agent: f.user_agent.value.trim(),
     auto_select: f.auto_select.value,
-    auto_group: f.auto_group.value,
+    auto_template: f.auto_template.value || null,
     send_hwid: f.send_hwid.checked,
     device_name: f.device_name.value.trim(),
     auto_start: f.auto_start.checked,
@@ -844,6 +951,31 @@ function bind() {
   $("#srv-select").addEventListener("click", () => serverMenuAction(selectServer));
   $("#srv-fp").addEventListener("click", () => serverMenuAction(openFpDialog));
   $("#srv-auto").addEventListener("click", () => serverMenuAction(toggleAuto));
+  $("#srv-tpls").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.tplToggle) {
+      const on = b.dataset.on === "true";
+      serverMenuAction((id) => toggleTemplateServer(b.dataset.tplToggle, id, !on));
+    } else if (b.dataset.tplNewWith) {
+      serverMenuAction((id) => openTemplateDialog(null, id));
+    }
+  });
+  $("#tpl-new").addEventListener("click", () => openTemplateDialog(null));
+  $("#templates-list").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tpl-edit]");
+    if (b) openTemplateDialog(b.dataset.tplEdit);
+  });
+  $("#tpl-search").addEventListener("input", renderTemplateServers);
+  $("#tpl-servers").addEventListener("change", (e) => {
+    const id = e.target.dataset.tplServer;
+    if (!id) return;
+    if (e.target.checked) tplPicked.add(id);
+    else tplPicked.delete(id);
+    tplCount();
+  });
+  $("#tpl-save").addEventListener("click", saveTemplate);
+  $("#tpl-del").addEventListener("click", deleteTemplate);
   $("#srv-del").addEventListener("click", () =>
     serverMenuAction((id) => call("remove_server", { id }).then(refresh).catch(() => {})),
   );
@@ -979,7 +1111,7 @@ function bind() {
   });
   $("#settings-reset").addEventListener("click", async () => {
     const restart = S.status.connected ? " Подключение перезапустится." : "";
-    if (!confirm(`Сбросить все настройки к значениям по умолчанию? Серверы, подписки и отметки автовыбора останутся.${restart}`)) return;
+    if (!confirm(`Сбросить все настройки к значениям по умолчанию? Серверы, подписки, исключения и шаблоны автовыбора останутся.${restart}`)) return;
     try {
       applySettings(await invoke("default_settings"), "Настройки сброшены");
     } catch (err) {

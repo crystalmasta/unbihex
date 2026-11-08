@@ -201,6 +201,14 @@ textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consola
 .srv-name { overflow-wrap: anywhere; }
 .menu-list { display: grid; gap: 8px; }
 .menu-list .btn { text-align: left; white-space: normal; }
+.menu-sub { display: contents; }
+.tpl-list { display: grid; gap: 0; }
+.tpl-list:empty { display: none; }
+.tpl-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+.tpl-row + .tpl-row { border-top: 1px solid var(--border); }
+.tpl-row .tpl-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.tpl-row .tpl-name small { display: block; color: var(--muted); font-size: 12px; }
+.apps-list .tpl-sub { padding: 10px 4px 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .badge { display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .02em; padding: 1px 6px; border-radius: 6px; background: var(--surface-2); color: var(--muted); margin-right: 6px; }
 .reason { color: var(--warn); }
 .ping { font-variant-numeric: tabular-nums; font-size: 13px; min-width: 64px; text-align: right; color: var(--muted); }
