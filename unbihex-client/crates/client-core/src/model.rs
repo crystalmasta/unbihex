@@ -337,7 +337,13 @@ pub struct Settings {
     /// The active [`AutoTemplate`]; `None`: the selected server's subscription
     /// except the excluded servers.
     pub auto_template: Option<Uuid>,
+    /// Auto-select leaves a server whose checks show more than this many ms
+    /// twice in a row for a clearly faster one below it; 0 turns this off.
+    pub auto_threshold_ms: u32,
 }
+
+/// Default of [`Settings::auto_threshold_ms`].
+pub const DEFAULT_AUTO_THRESHOLD_MS: u32 = 500;
 
 /// Default proxy login for LAN devices.
 pub const DEFAULT_LAN_USERNAME: &str = "unbihex";
@@ -390,6 +396,7 @@ impl Default for Settings {
             ping_method: PingMethod::default(),
             auto_select: AutoSelect::default(),
             auto_template: None,
+            auto_threshold_ms: DEFAULT_AUTO_THRESHOLD_MS,
         }
     }
 }

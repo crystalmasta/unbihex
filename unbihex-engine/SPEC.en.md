@@ -954,7 +954,7 @@ stack allows it). Names a domain rule blocks are not resolved by the TUN DNS ser
 
 ### 11.16 Balancer
 
-`{"type": "balancer", "tag", "outbounds": [tags], "strategy"?, "probe_url"?, "probe_interval_secs"?, "probe_timeout_secs"?}`
+`{"type": "balancer", "tag", "outbounds": [tags], "strategy"?, "probe_url"?, "probe_interval_secs"?, "probe_timeout_secs"?, "latency_threshold_ms"?}`
 is a group of other outbounds (issue #46); every **new** connection goes through one of them, open ones stay where
 they are.
 
@@ -965,6 +965,11 @@ they are.
   with the lowest delay of the last check; the current one stays unless another is faster by more than 50 ms. Members
   not checked yet count as live and come after the measured ones; those known to be down come last (when none works,
   all are tried).
+- `latency_threshold_ms` (0, the default, turns it off): when the member the strategy picks shows a delay over the
+  threshold (or fails) in 2 checks in a row, it gives way to the fastest live member below the threshold, if that one
+  is faster by at least a fifth of the threshold (50 ms or more). A current member that is fine stays; with no such
+  member below the threshold the current one stays too, so a group that is slow all over does not go round in
+  circles. The decision is made after every check and becomes the current member at once.
 - Checks: a `GET` of `probe_url` (default `https://www.gstatic.com/generate_204`, `http://` or `https://`; TLS with
   rustls's own ClientHello, ALPN `http/1.1`) through every member in parallel: at once when built, then every
   `probe_interval_secs` (60), and no sooner than 5 s after a failed connection. Live means a 2xx/3xx answer within

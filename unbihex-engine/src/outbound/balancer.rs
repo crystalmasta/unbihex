@@ -3,7 +3,9 @@
 //! `leastPing` the live member with the lowest delay. Every member is checked
 //! with an HTTP(S) request through it, every `probe_interval_secs` and soon
 //! after a connection through it fails; a failed connection moves on to the
-//! next member at once. Connections already open stay where they are.
+//! next member at once. Connections already open stay where they are. With a
+//! latency threshold, a member over it for two checks in a row gives way to a
+//! clearly faster member below it.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,6 +33,8 @@ const MEMBER_TIMEOUT: Duration = Duration::from_secs(4);
 const TOLERANCE: Duration = Duration::from_millis(50);
 /// Checks after a failure are at least this far apart.
 const MIN_RECHECK: Duration = Duration::from_secs(5);
+/// Checks in a row over the latency threshold before a member counts as slow.
+const SLOW_CHECKS: u8 = 2;
 /// Longest status line read from the probe URL.
 const MAX_STATUS_LINE: usize = 1024;
 /// `inbound_tag` of probe sessions (no rule sees them: they go to a member directly).
@@ -62,6 +66,28 @@ pub struct BalancerState {
 struct Health {
     alive: Option<bool>,
     delay: Option<Duration>,
+    /// Checks in a row over the latency threshold or failed.
+    over: u8,
+}
+
+impl Health {
+    /// Records one check: its delay, or `None` when it failed.
+    fn checked(&mut self, delay: Option<Duration>, threshold: Option<Duration>) {
+        self.alive = Some(delay.is_some());
+        self.delay = delay;
+        let over = match (delay, threshold) {
+            (_, None) => false,
+            (Some(d), Some(t)) => d > t,
+            (None, Some(_)) => true,
+        };
+        self.over = if over { self.over.saturating_add(1) } else { 0 };
+    }
+}
+
+/// How much faster a member below the threshold must be than a slow one to take
+/// its place: a fifth of the threshold, at least [`TOLERANCE`].
+fn switch_margin(threshold: Duration) -> Duration {
+    (threshold / 5).max(TOLERANCE)
 }
 
 /// The probe request.
@@ -77,6 +103,8 @@ struct Inner {
     tag: String,
     members: Vec<Arc<dyn Outbound>>,
     strategy: BalancerStrategy,
+    /// See [`BalancerConfig::latency_threshold_ms`].
+    threshold: Option<Duration>,
     health: Mutex<Vec<Health>>,
     /// The member the last connection went to.
     current: AtomicUsize,
@@ -153,6 +181,8 @@ impl BalancerOutbound {
             health: Mutex::new(vec![Health::default(); members.len()]),
             members,
             strategy: cfg.strategy,
+            threshold: (cfg.latency_threshold_ms > 0)
+                .then(|| Duration::from_millis(cfg.latency_threshold_ms.into())),
             current: AtomicUsize::new(0),
             probe,
             recheck: Arc::new(Notify::new()),
@@ -178,38 +208,88 @@ fn spawn_checker(inner: Weak<Inner>) {
     });
 }
 
+/// Members to try for a new connection, best first. Members known to be down
+/// come last: when everything is down, they are still tried. `current` is the
+/// member the last connection went to.
+fn order(
+    health: &[Health],
+    strategy: BalancerStrategy,
+    current: usize,
+    threshold: Option<Duration>,
+) -> Vec<usize> {
+    let down = |i: usize| health[i].alive == Some(false);
+    let mut up: Vec<usize> = (0..health.len()).filter(|&i| !down(i)).collect();
+    let to_front = |up: &mut Vec<usize>, i: usize| {
+        if let Some(pos) = up.iter().position(|&x| x == i) {
+            up.remove(pos);
+            up.insert(0, i);
+        }
+    };
+    if strategy == BalancerStrategy::LeastPing {
+        // Measured ones by delay, then the not yet measured in order.
+        up.sort_by_key(|&i| (health[i].delay.is_none(), health[i].delay));
+        if let (Some(&best), Some(cur)) = (up.first(), health.get(current))
+            && best != current
+            && !down(current)
+            && let (Some(b), Some(c)) = (health[best].delay, cur.delay)
+            && c <= b + TOLERANCE
+        {
+            to_front(&mut up, current);
+        }
+    }
+    if let (Some(t), Some(&first)) = (threshold, up.first()) {
+        apply_threshold(health, &mut up, first, current, t, to_front);
+    }
+    up.extend((0..health.len()).filter(|&i| down(i)));
+    up
+}
+
+/// The latency threshold over the strategy's choice `first`: a member over it
+/// for [`SLOW_CHECKS`] checks in a row gives way to the fastest member below it,
+/// if that one is faster by [`switch_margin`]. A current member that is fine
+/// stays; with nothing better below the threshold, the current one stays too,
+/// so a group that is slow all over does not go round in circles.
+fn apply_threshold(
+    health: &[Health],
+    up: &mut Vec<usize>,
+    first: usize,
+    current: usize,
+    threshold: Duration,
+    to_front: impl Fn(&mut Vec<usize>, usize),
+) {
+    let slow = |i: usize| health[i].over >= SLOW_CHECKS;
+    if !slow(first) {
+        return;
+    }
+    let live_current = current != first && up.contains(&current);
+    if live_current && !slow(current) {
+        return to_front(up, current);
+    }
+    let first_delay = health[first].delay.unwrap_or(Duration::MAX);
+    let margin = switch_margin(threshold);
+    let better = up
+        .iter()
+        .copied()
+        .filter(|&i| i != first)
+        .filter_map(|i| Some((health[i].delay?, i)))
+        .filter(|&(d, _)| d < threshold && d.saturating_add(margin) <= first_delay)
+        .min();
+    match better {
+        Some((_, i)) => to_front(up, i),
+        None if live_current => to_front(up, current),
+        None => {}
+    }
+}
+
 impl Inner {
-    /// Members to try for a new connection, best first. Members known to be
-    /// down come last: when everything is down, they are still tried.
     fn order(&self) -> Vec<usize> {
         let health = self.health.lock().clone();
-        let down = |i: usize| health[i].alive == Some(false);
-        let mut up: Vec<usize> = (0..health.len()).filter(|&i| !down(i)).collect();
-        if self.strategy == BalancerStrategy::LeastPing {
-            // Measured ones by delay, then the not yet measured in order.
-            up.sort_by_key(|&i| (health[i].delay.is_none(), health[i].delay));
-            let current = self.current.load(Ordering::Relaxed);
-            if let (Some(&best), Some(cur)) = (up.first(), health.get(current))
-                && best != current
-                && !down(current)
-                && let (Some(b), Some(c)) = (health[best].delay, cur.delay)
-                && c <= b + TOLERANCE
-                && let Some(pos) = up.iter().position(|&i| i == current)
-            {
-                up.remove(pos);
-                up.insert(0, current);
-            }
-        }
-        up.extend((0..health.len()).filter(|&i| down(i)));
-        up
-    }
-
-    fn mark(&self, i: usize, alive: bool, delay: Option<Duration>) {
-        let mut health = self.health.lock();
-        health[i].alive = Some(alive);
-        if delay.is_some() || !alive {
-            health[i].delay = delay;
-        }
+        order(
+            &health,
+            self.strategy,
+            self.current.load(Ordering::Relaxed),
+            self.threshold,
+        )
     }
 
     fn failed(&self, i: usize, e: &Error) {
@@ -218,7 +298,10 @@ impl Inner {
             self.tag,
             self.members[i].tag()
         );
-        self.mark(i, false, None);
+        let mut health = self.health.lock();
+        health[i].alive = Some(false);
+        health[i].delay = None;
+        drop(health);
         self.recheck.notify_one();
     }
 
@@ -251,18 +334,24 @@ impl Inner {
             }
         })
         .await;
+        let mut health = self.health.lock();
         for (i, r) in results.into_iter().enumerate() {
-            match r {
-                Ok(d) => self.mark(i, true, Some(d)),
-                Err(e) => {
-                    tracing::debug!(
-                        "balancer {}: check through {}: {e}",
-                        self.tag,
-                        self.members[i].tag()
-                    );
-                    self.mark(i, false, None);
-                }
+            if let Err(e) = &r {
+                tracing::debug!(
+                    "balancer {}: check through {}: {e}",
+                    self.tag,
+                    self.members[i].tag()
+                );
             }
+            health[i].checked(r.ok(), self.threshold);
+        }
+        drop(health);
+        // A move the checks decided is the current member from now on, also
+        // for UI and while no new connection has gone out yet.
+        if self.threshold.is_some()
+            && let Some(&best) = self.order().first()
+        {
+            self.current.store(best, Ordering::Relaxed);
         }
     }
 
@@ -478,7 +567,107 @@ mod tests {
             probe_url: "http://probe.test/generate_204".into(),
             probe_interval_secs: 3600,
             probe_timeout_secs: 2,
+            latency_threshold_ms: 0,
         }
+    }
+
+    #[allow(non_snake_case)]
+    fn MS(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
+
+    /// Members measured at `delays` (ms; `None`: the check failed), `checks`
+    /// times in a row, through the threshold logic.
+    fn measured(delays: &[Option<u64>], checks: u8, threshold: u64) -> Vec<Health> {
+        let mut h = vec![Health::default(); delays.len()];
+        for _ in 0..checks {
+            for (h, d) in h.iter_mut().zip(delays) {
+                h.checked(d.map(MS), Some(MS(threshold)));
+            }
+        }
+        h
+    }
+
+    #[test]
+    fn threshold_moves_after_two_slow_checks_only() {
+        let fb = BalancerStrategy::Fallback;
+        // One check over 500 ms: no move yet (a single slow answer is noise).
+        let h = measured(&[Some(800), Some(100)], 1, 500);
+        assert_eq!(order(&h, fb, 0, Some(MS(500)))[0], 0);
+        // Two in a row: the member below the threshold takes over.
+        let h = measured(&[Some(800), Some(100)], 2, 500);
+        assert_eq!(order(&h, fb, 0, Some(MS(500)))[0], 1);
+        // Without a threshold the fallback order stays.
+        assert_eq!(order(&h, fb, 0, None)[0], 0);
+        // A good check in between starts the count again.
+        let mut h = measured(&[Some(800), Some(100)], 1, 500);
+        for (h, d) in h.iter_mut().zip([300, 100]) {
+            h.checked(Some(MS(d)), Some(MS(500)));
+        }
+        for (h, d) in h.iter_mut().zip([800, 100]) {
+            h.checked(Some(MS(d)), Some(MS(500)));
+        }
+        assert_eq!(h[0].over, 1);
+        assert_eq!(order(&h, fb, 0, Some(MS(500)))[0], 0);
+    }
+
+    #[test]
+    fn threshold_needs_a_clearly_better_member_below_it() {
+        let fb = BalancerStrategy::Fallback;
+        let t = Some(MS(500));
+        // 520 ms against 490 ms: below the threshold, but not better by 100 ms.
+        let h = measured(&[Some(520), Some(490)], 3, 500);
+        assert_eq!(order(&h, fb, 0, t)[0], 0);
+        // 520 against 400: clearly better.
+        let h = measured(&[Some(520), Some(400)], 3, 500);
+        assert_eq!(order(&h, fb, 0, t)[0], 1);
+        // Everything over the threshold: stay on the current member, wherever
+        // the fallback order would go.
+        let h = measured(&[Some(900), Some(700), Some(600)], 3, 500);
+        assert_eq!(order(&h, fb, 0, t)[0], 0);
+        assert_eq!(order(&h, fb, 1, t)[0], 1);
+        let lp = BalancerStrategy::LeastPing;
+        assert_eq!(order(&h, lp, 0, t)[0], 0, "leastPing does not hop either");
+        assert_eq!(order(&h, lp, 0, None)[0], 2);
+        // The fastest one below the threshold wins; slow and down ones are not candidates.
+        let h = measured(&[Some(900), Some(450), None, Some(200)], 2, 500);
+        let o = order(&h, fb, 0, t);
+        assert_eq!(o[0], 3);
+        assert_eq!(*o.last().unwrap(), 2, "down comes last");
+    }
+
+    #[test]
+    fn threshold_keeps_a_current_member_that_is_fine() {
+        let fb = BalancerStrategy::Fallback;
+        let t = Some(MS(500));
+        // The first one is slow, the current (second) one is fine: no hop to
+        // the even faster third one.
+        let h = measured(&[Some(900), Some(300), Some(50)], 2, 500);
+        assert_eq!(order(&h, fb, 1, t)[0], 1);
+        // The first one is back below the threshold: fallback returns to it.
+        let h = measured(&[Some(200), Some(300), Some(50)], 1, 500);
+        assert_eq!(order(&h, fb, 1, t)[0], 0);
+        // A check that fails counts as over the threshold; the member is down
+        // anyway and the next one takes over at once.
+        let h = measured(&[None, Some(300)], 1, 500);
+        assert_eq!(h[0].over, 1);
+        assert_eq!(order(&h, fb, 0, t)[0], 1);
+    }
+
+    #[tokio::test]
+    async fn threshold_moves_the_current_member_after_checks() {
+        let slow = http(Duration::from_millis(400)).await;
+        let fast = http(Duration::ZERO).await;
+        let members: Vec<Arc<dyn Outbound>> = vec![fake("slow", slow), fake("fast", fast)];
+        let mut cfg = config(BalancerStrategy::Fallback);
+        cfg.latency_threshold_ms = 250;
+        let lb = BalancerOutbound::new(&cfg, members).unwrap();
+        // Two checks over the threshold (the checker may add a third).
+        lb.inner.check_all().await;
+        lb.inner.check_all().await;
+        assert_eq!(lb.balancer().unwrap().current.as_deref(), Some("fast"));
+        lb.connect_tcp(&sess()).await.unwrap();
+        assert_eq!(lb.balancer().unwrap().current.as_deref(), Some("fast"));
     }
 
     fn sess() -> Session {

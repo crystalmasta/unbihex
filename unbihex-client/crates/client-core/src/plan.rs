@@ -302,7 +302,13 @@ fn proxy_outbounds(servers: &[Server], settings: &Settings) -> Result<Vec<Value>
                 _ => "fallback",
             };
             let members: Vec<String> = (0..group.len()).map(member_tag).collect();
-            out.push(json!({ "type": "balancer", "tag": "proxy", "outbounds": members, "strategy": strategy }));
+            out.push(json!({
+                "type": "balancer",
+                "tag": "proxy",
+                "outbounds": members,
+                "strategy": strategy,
+                "latency_threshold_ms": settings.auto_threshold_ms,
+            }));
             Ok(out)
         }
     }
@@ -584,7 +590,17 @@ mod tests {
         };
         assert_eq!(b.outbounds, ["proxy-0", "proxy-1"]);
         assert_eq!(b.strategy, unbihex_engine::config::BalancerStrategy::LeastPing);
+        assert_eq!(b.latency_threshold_ms, 500, "on by default");
         assert_eq!(cfg.final_outbound(), "proxy");
+        // Settings saved before the threshold existed get the default; 0 turns it off.
+        let old: Settings = serde_json::from_str(r#"{"auto_select":"fallback"}"#).unwrap();
+        assert_eq!(old.auto_threshold_ms, crate::model::DEFAULT_AUTO_THRESHOLD_MS);
+        let s = Settings { auto_threshold_ms: 0, ..s };
+        let cfg = build_config(&servers, &s, &Geo::default(), Target::DesktopProxy).unwrap();
+        let unbihex_engine::config::OutboundConfig::Balancer(b) = &cfg.outbounds[2] else {
+            panic!("expected a balancer")
+        };
+        assert_eq!(b.latency_threshold_ms, 0);
         // A group of one is just that server.
         let cfg = build_config(&servers[..1], &s, &Geo::default(), Target::DesktopProxy).unwrap();
         assert_eq!(cfg.outbounds[0].tag(), "proxy");

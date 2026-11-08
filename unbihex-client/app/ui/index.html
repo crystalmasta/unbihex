@@ -257,6 +257,8 @@
             <label><span class="lbl">Серверы</span>
               <select name="auto_template" id="auto-template"></select>
             </label>
+            <label><span class="lbl">Порог задержки, мс<button type="button" class="info-btn" data-info="i-threshold" aria-label="Подробнее">ⓘ</button></span><input name="auto_threshold_ms" type="number" min="0" max="60000" step="50" inputmode="numeric" placeholder="выключено" /></label>
+            <p class="info" id="i-threshold" hidden>Если у текущего сервера две проверки подряд показали задержку выше порога (или не прошли), автовыбор переходит на самый быстрый сервер группы с задержкой ниже порога — когда тот заметно быстрее. Если все серверы выше порога, остаётся текущий. 0 или пусто — выключено.</p>
           </fieldset>
 
           <fieldset data-tab="auto">

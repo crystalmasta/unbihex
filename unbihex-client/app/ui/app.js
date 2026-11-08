@@ -625,6 +625,7 @@ function fillSettings() {
   f.user_agent.value = s.user_agent;
   f.auto_select.value = s.auto_select || "off";
   renderTemplates(s.auto_template || "");
+  f.auto_threshold_ms.value = s.auto_threshold_ms ? s.auto_threshold_ms : "";
   f.send_hwid.checked = s.send_hwid;
   f.device_name.value = s.device_name || "";
   f.device_name.placeholder = S.device_name || "";
@@ -738,6 +739,7 @@ function readSettings() {
     user_agent: f.user_agent.value.trim(),
     auto_select: f.auto_select.value,
     auto_template: f.auto_template.value || null,
+    auto_threshold_ms: Math.min(60000, Math.max(0, parseInt(f.auto_threshold_ms.value, 10) || 0)),
     send_hwid: f.send_hwid.checked,
     device_name: f.device_name.value.trim(),
     auto_start: f.auto_start.checked,

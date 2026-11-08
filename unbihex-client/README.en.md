@@ -89,7 +89,9 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   from any subscriptions: while one is active, the group is its servers only. Templates are created, renamed and
   deleted on the "Автовыбор" tab; a server goes in or out of a template there or in its "⋯" menu. Exclusions and
   templates survive subscription updates, and the selected server always comes first; the old "Only marked" marks
-  became the template "Отмеченные". New connections go through the first working one in order or through the one with the lowest delay. Servers
+  became the template "Отмеченные". Latency threshold (500 ms by default, 0 turns it off): when the current server's
+  checks show more than that twice in a row, auto-select moves to the group's fastest server below it, if that one is
+  clearly faster; when all are over it, the current one stays. New connections go through the first working one in order or through the one with the lowest delay. Servers
   are checked with a request to `www.gstatic.com/generate_204` every minute and right after a failure; switching never
   drops open connections, and the current server shows under the connect button.
 - Speed and traffic statistics, a log, a tray icon, auto-connect.

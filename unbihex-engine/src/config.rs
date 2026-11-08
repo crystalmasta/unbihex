@@ -449,6 +449,10 @@ pub struct BalancerConfig {
     /// Time limit of one check, in seconds.
     #[serde(default = "default_probe_timeout")]
     pub probe_timeout_secs: u64,
+    /// Move away from a member whose checks show more than this many ms (or
+    /// fail) twice in a row, to a member below it; 0 turns this off.
+    #[serde(default)]
+    pub latency_threshold_ms: u32,
 }
 
 /// How a balancer picks a member.
@@ -1886,9 +1890,9 @@ mod tests {
         };
         assert_eq!(b.strategy, BalancerStrategy::LeastPing);
         assert_eq!(b.probe_url, DEFAULT_PROBE_URL);
-        assert_eq!((b.probe_interval_secs, b.probe_timeout_secs), (60, 5));
-        let c = cfg(r#"{"type":"balancer","tag":"auto","outbounds":["a"]}"#).unwrap();
-        assert!(matches!(&c.outbounds[2], OutboundConfig::Balancer(b) if b.strategy == BalancerStrategy::Fallback));
+        assert_eq!((b.probe_interval_secs, b.probe_timeout_secs, b.latency_threshold_ms), (60, 5, 0));
+        let c = cfg(r#"{"type":"balancer","tag":"auto","outbounds":["a"],"latency_threshold_ms":500}"#).unwrap();
+        assert!(matches!(&c.outbounds[2], OutboundConfig::Balancer(b) if b.strategy == BalancerStrategy::Fallback && b.latency_threshold_ms == 500));
         for (bad, why) in [
             (r#"{"type":"balancer","tag":"auto","outbounds":[]}"#, "no outbounds"),
             (r#"{"type":"balancer","tag":"auto","outbounds":["x"]}"#, "unknown"),
