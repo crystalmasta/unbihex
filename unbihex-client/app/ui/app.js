@@ -239,20 +239,51 @@ function pingHtml(s) {
   return '<span class="ping">—</span>';
 }
 
+// A server row: the name gets the width (two lines at most; the whole name and the
+// address are in the row's menu); protocol, transport and ping go small underneath.
+// The row's actions sit in the "⋯" menu, also opened by a long press or a right click.
 function serverHtml(s) {
   const sel = s.id === S.data.selected;
-  const meta = s.unsupported
-    ? `<span class="reason">${esc(s.unsupported)}</span>`
-    : `${esc(s.host)}:${s.port} · ${esc(s.transport)}`;
-  const del = s.subscription_id
-    ? ""
-    : `<button class="icon-btn" data-del-server="${s.id}" title="Удалить"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg></button>`;
+  const meta = [];
+  if (!s.unsupported) meta.push(esc(s.transport));
+  // An unsupported server shows a ping only once one was measured (TCP/ICMP).
+  if (!s.unsupported || pinging.has(s.id) || s.ping_ms != null || s.ping_error) meta.push(pingHtml(s));
+  if (s.fingerprint && hasFp(s)) meta.push(`<span class="s-fp">отпечаток ${esc(s.fingerprint)}</span>`);
+  if (s.unsupported) meta.push(`<span class="reason">${esc(s.unsupported)}</span>`);
   const off = autoOff(s);
-  return `<div class="server${sel ? " selected" : ""}${s.unsupported ? " unsupported" : ""}${off ? " auto-off" : ""}" data-server="${s.id}">
-    <span class="radio"></span>
-    <div class="s-main"><div class="s-name">${esc(s.name)}</div><div class="s-meta"><span class="badge">${esc(s.protocol)}</span>${meta}</div></div>
-    ${pingHtml(s)}${fpHtml(s)}${autoHtml(s)}${del || "<span></span>"}
+  return `<div class="server${sel ? " selected" : ""}${s.unsupported ? " unsupported" : ""}${off ? " auto-off" : ""}" data-server="${s.id}"${sel ? ' aria-current="true"' : ""}>
+    <div class="s-main"><div class="s-name" title="${esc(s.name)}">${esc(s.name)}</div><div class="s-meta"><span class="badge">${esc(s.protocol)}</span>${meta.join('<span class="dot">·</span>')}</div></div>
+    <button class="icon-btn more-btn" data-menu-server="${s.id}" aria-label="Действия с сервером" title="Действия"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></button>
   </div>`;
+}
+
+// The "⋯" menu of one server: its whole name and every action of the row.
+let menuServer = null;
+function openServerMenu(id) {
+  const s = S.data.servers.find((x) => x.id === id);
+  if (!s) return;
+  menuServer = id;
+  $("#srv-name").textContent = s.name;
+  $("#srv-meta").textContent = [s.protocol, s.unsupported ? "" : s.transport, `${s.host}:${s.port}`]
+    .filter(Boolean)
+    .join(" · ");
+  $("#srv-reason").hidden = !s.unsupported;
+  $("#srv-reason").textContent = s.unsupported ? `Не поддерживается: ${s.unsupported}` : "";
+  $("#srv-select").hidden = !!s.unsupported || s.id === S.data.selected;
+  $("#srv-fp").hidden = !hasFp(s);
+  $("#srv-fp").textContent = `Отпечаток TLS: ${s.fingerprint || "как в настройках"}…`;
+  const auto = S.data.settings.auto_select !== "off" && !s.unsupported;
+  $("#srv-auto").hidden = !auto;
+  $("#srv-auto").textContent = auto ? autoTitle(s) : "";
+  $("#srv-del").hidden = !!s.subscription_id;
+  $("#dlg-server").showModal();
+}
+
+// Runs a menu action on the server the menu was opened for.
+function serverMenuAction(fn) {
+  const id = menuServer;
+  $("#dlg-server").close();
+  if (id) fn(id);
 }
 
 // Auto-select group (issue #46): the subscription minus the excluded servers, or only the marked ones.
@@ -264,23 +295,18 @@ function autoOff(s) {
   return autoMarked() ? !s.auto_marked : s.auto_excluded;
 }
 
-function autoHtml(s) {
-  if (S.data.settings.auto_select === "off" || s.unsupported) return "<span></span>";
+// The menu item that flips the server's place in the auto-select group.
+function autoTitle(s) {
   const on = autoMarked() ? s.auto_marked : !s.auto_excluded;
-  const title = autoMarked()
+  return autoMarked()
     ? on ? "Отмечен для автовыбора — снять отметку" : "Отметить для автовыбора"
     : on ? "В автовыборе — исключить" : "Исключён из автовыбора — вернуть";
-  return `<button class="icon-btn auto-btn${on ? " on" : ""}" data-auto-server="${s.id}" title="${title}"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3M18 3v4h-4M6 21v-4h4"/></svg></button>`;
 }
 
 // TLS fingerprint of one server: kept across subscription updates, like the auto-select marks.
 const FP_PROTOCOLS = ["vless", "vmess", "trojan", "trusttunnel", "naive"];
 
-function fpHtml(s) {
-  if (s.unsupported || !FP_PROTOCOLS.includes(s.protocol)) return "<span></span>";
-  const title = s.fingerprint ? `Отпечаток TLS: ${s.fingerprint}` : "Отпечаток TLS: как в настройках";
-  return `<button class="icon-btn fp-btn${s.fingerprint ? " on" : ""}" data-fp-server="${s.id}" title="${esc(title)}"><svg viewBox="0 0 24 24"><path d="M12 11v3a8 8 0 0 1-1.5 4.7M8 9.5a4 4 0 0 1 8 0v2.5a12 12 0 0 1-1 4.8M5 12a7 7 0 0 1 12.6-4.2M19 12v1.5a14 14 0 0 1-.6 4"/></svg></button>`;
-}
+const hasFp = (s) => !s.unsupported && FP_PROTOCOLS.includes(s.protocol);
 
 let fpServer = null;
 function openFpDialog(id) {
@@ -744,22 +770,16 @@ function bind() {
   );
 
   document.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-open],[data-goto],[data-server],[data-del-server],[data-auto-server],[data-fp-server],[data-toggle-group],[data-update-sub],[data-edit-sub],[data-href]");
+    const t = e.target.closest("[data-open],[data-goto],[data-menu-server],[data-server],[data-toggle-group],[data-update-sub],[data-edit-sub],[data-href]");
     if (!t) return;
     if (t.dataset.open === "add") {
       $("#add-text").value = "";
       $("#dlg-add").showModal();
     } else if (t.dataset.goto) {
       switchView(t.dataset.goto);
-    } else if (t.dataset.delServer) {
+    } else if (t.dataset.menuServer) {
       e.stopPropagation();
-      call("remove_server", { id: t.dataset.delServer }).then(refresh).catch(() => {});
-    } else if (t.dataset.autoServer) {
-      e.stopPropagation();
-      toggleAuto(t.dataset.autoServer);
-    } else if (t.dataset.fpServer) {
-      e.stopPropagation();
-      openFpDialog(t.dataset.fpServer);
+      openServerMenu(t.dataset.menuServer);
     } else if (t.dataset.server) {
       selectServer(t.dataset.server);
     } else if (t.dataset.toggleGroup) {
@@ -780,6 +800,29 @@ function bind() {
       invoke("plugin:opener|open_url", { url: t.dataset.href }).catch((err) => toast(String(err), "error"));
     }
   });
+
+  // A long press (Android) or a right click on a server row opens its menu.
+  $("#server-groups").addEventListener("contextmenu", (e) => {
+    const row = e.target.closest("[data-server]");
+    if (!row) return;
+    e.preventDefault();
+    openServerMenu(row.dataset.server);
+  });
+  $("#srv-select").addEventListener("click", () => serverMenuAction(selectServer));
+  $("#srv-fp").addEventListener("click", () => serverMenuAction(openFpDialog));
+  $("#srv-auto").addEventListener("click", () => serverMenuAction(toggleAuto));
+  $("#srv-del").addEventListener("click", () =>
+    serverMenuAction((id) => call("remove_server", { id }).then(refresh).catch(() => {})),
+  );
+  $("#srv-copy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("#srv-name").textContent);
+      toast("Скопировано", "ok");
+    } catch {
+      toast("Не удалось скопировать", "error");
+    }
+  });
+  $("#srv-close").addEventListener("click", () => $("#dlg-server").close());
 
   $("#server-search").addEventListener("input", renderServers);
   $("#sort-btn").addEventListener("click", () => {
