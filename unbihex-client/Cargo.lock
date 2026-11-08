@@ -5085,7 +5085,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-unbihex-vpn"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -5658,7 +5658,7 @@ dependencies = [
 
 [[package]]
 name = "unbihex-cli"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "ratatui",
  "serde",
@@ -5673,7 +5673,7 @@ dependencies = [
 
 [[package]]
 name = "unbihex-client"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "jni 0.21.1",
  "parking_lot",
@@ -5692,7 +5692,7 @@ dependencies = [
 
 [[package]]
 name = "unbihex-client-core"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "base64 0.22.1",
  "ipnet",
@@ -5715,7 +5715,7 @@ dependencies = [
 
 [[package]]
 name = "unbihex-engine"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -5769,7 +5769,7 @@ dependencies = [
 
 [[package]]
 name = "unbihex-ffi"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "tokio",
  "tracing",

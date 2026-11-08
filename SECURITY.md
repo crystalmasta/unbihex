@@ -10,9 +10,9 @@
 
 | Компонент | Версия |
 |---|---|
-| Клиент Unbihex (Windows, Android, `unbihex-cli`) | 0.2.x (последняя 0.2.8) |
+| Клиент Unbihex (Windows, Android, `unbihex-cli`) | 0.2.x (последняя 0.2.10) |
 | Неофициальная сборка для macOS | не поддерживается |
-| Ядро `unbihex-engine` | 0.1.x (последняя 0.1.8) |
+| Ядро `unbihex-engine` | 0.1.x (последняя 0.1.9) |
 | `test_server` | не поддерживается: только для тестов |
 
 Более старые версии не исправляются: обновитесь до последнего [релиза](https://github.com/crystalmasta/unbihex/releases/latest).
@@ -37,9 +37,9 @@ Security fixes are released for the latest versions:
 
 | Component | Version |
 |---|---|
-| Unbihex client (Windows, Android, `unbihex-cli`) | 0.2.x (latest 0.2.8) |
+| Unbihex client (Windows, Android, `unbihex-cli`) | 0.2.x (latest 0.2.10) |
 | Unofficial macOS build | not supported |
-| `unbihex-engine` | 0.1.x (latest 0.1.8) |
+| `unbihex-engine` | 0.1.x (latest 0.1.9) |
 | `test_server` | not supported: for tests only |
 
 Older versions are not patched: please update to the latest [release](https://github.com/crystalmasta/unbihex/releases/latest).

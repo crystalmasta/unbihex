@@ -2,7 +2,7 @@
 
 [Русский](SPEC.md) · **English**
 
-Engine 0.1.6, crate `unbihex-engine`, Rust edition 2024 (stable, ≥ 1.88).
+Engine 0.1.9, crate `unbihex-engine`, Rust edition 2024 (stable, ≥ 1.88).
 This document describes the **behaviour and interfaces** of the engine. Wire formats come from public specifications,
 linked in each section. A change of engine behaviour updates this document and its Russian version first.
 
