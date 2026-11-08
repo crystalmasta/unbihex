@@ -12,7 +12,7 @@ default-run = "unbihex-client"
 [lib]
 # The suffix keeps the lib name distinct from the bin name on Windows.
 name = "unbihex_client_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
 # Embeds the UI and serves it over the tauri:// protocol (what `cargo tauri build` turns on).

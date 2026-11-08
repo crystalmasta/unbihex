@@ -415,6 +415,72 @@ function openSubDialog(id) {
 
 // ------------------------------------------------------------------ settings
 
+function isSettingsDirty() {
+  if (!S || !S.data || !S.data.settings) return false;
+  const f = $("#settings-form");
+  if (!f) return false;
+
+  const current = readSettings();
+  const orig = S.data.settings;
+
+  const arrEq = (a, b) => {
+    const x = a || [];
+    const y = b || [];
+    if (x.length !== y.length) return false;
+    for (let i = 0; i < x.length; i++) {
+      if (x[i] !== y[i]) return false;
+    }
+    return true;
+  };
+
+  const listKeys = ["proxy_list", "direct_list", "private_names", "block_list", "dns_upstream"];
+  for (const k of listKeys) {
+    if (!arrEq(current[k], orig[k])) return true;
+  }
+
+  // Set comparison for adblock_lists
+  const curAd = new Set(current.adblock_lists || []);
+  const origAd = new Set(orig.adblock_lists || []);
+  if (curAd.size !== origAd.size) return true;
+  for (const url of curAd) {
+    if (!origAd.has(url)) return true;
+  }
+
+  if (Boolean(current.adblock) !== Boolean(orig.adblock)) return true;
+  if (Boolean(current.allow_lan) !== Boolean(orig.allow_lan)) return true;
+  if (Boolean(current.send_hwid) !== Boolean(orig.send_hwid)) return true;
+  if (Boolean(current.auto_start) !== Boolean(orig.auto_start)) return true;
+  if (Boolean(current.auto_start_admin) !== Boolean(orig.auto_start_admin)) return true;
+  if (Boolean(current.auto_connect) !== Boolean(orig.auto_connect)) return true;
+  if (Boolean(current.android_notification) !== Boolean(orig.android_notification)) return true;
+  if (Boolean(current.geo_auto_update) !== Boolean(orig.geo_auto_update)) return true;
+  if (Boolean(current.fragment) !== Boolean(orig.fragment)) return true;
+
+  if (Number(current.socks_port) !== Number(orig.socks_port)) return true;
+  if (Number(current.http_port) !== Number(orig.http_port)) return true;
+  if (Number(current.mtu) !== Number(orig.mtu)) return true;
+
+  if (String(current.lan_username || "") !== String(orig.lan_username || "")) return true;
+  if (String(current.lan_password || "") !== String(orig.lan_password || "")) return true;
+  if (String(current.user_agent || "") !== String(orig.user_agent || "")) return true;
+  if (String(current.device_name || "") !== String(orig.device_name || "")) return true;
+  if (String(current.auto_select || "off") !== String(orig.auto_select || "off")) return true;
+  if (String(current.auto_group || "subscription") !== String(orig.auto_group || "subscription")) return true;
+  if (String(current.log_level || "info") !== String(orig.log_level || "info")) return true;
+  if (String(current.geosite_url || "") !== String(orig.geosite_url || "")) return true;
+  if (String(current.geoip_url || "") !== String(orig.geoip_url || "")) return true;
+  if (String(current.fragment_length || "") !== String(orig.fragment_length || "")) return true;
+  if (String(current.fragment_interval || "") !== String(orig.fragment_interval || "")) return true;
+
+  return false;
+}
+
+function checkSettingsDirty() {
+  const dirty = isSettingsDirty();
+  const bar = $("#save-bar");
+  if (bar) bar.classList.toggle("visible", dirty);
+}
+
 function fillSettings() {
   const f = $("#settings-form");
   const s = S.data.settings;
@@ -452,6 +518,7 @@ function fillSettings() {
   f.fragment_interval.value = s.fragment_interval;
   renderGeo();
   fillAdblock(s);
+  checkSettingsDirty();
 }
 
 // Ad-blocking lists offered by the client: [{ name, url, license }].
@@ -565,7 +632,7 @@ function switchView(name) {
   currentView = name;
   $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${name}`));
-  if (name === "settings") fillSettings();
+  if (name === "settings" && !isSettingsDirty()) fillSettings();
   if (name === "logs") loadLogs();
   $(".main").scrollTop = 0;
 }
@@ -729,7 +796,8 @@ function bind() {
     } catch {}
   });
 
-  $("#settings-form").addEventListener("submit", async (e) => {
+  const settingsForm = $("#settings-form");
+  settingsForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const settings = readSettings();
     busy = S.status.connected;
@@ -745,8 +813,30 @@ function bind() {
     }
   });
 
+  settingsForm.addEventListener("input", checkSettingsDirty);
+  settingsForm.addEventListener("change", checkSettingsDirty);
+
+  // Floating save-bar actions
+  const saveBarSave = $("#save-bar-save");
+  if (saveBarSave) {
+    saveBarSave.addEventListener("click", () => {
+      if (settingsForm.requestSubmit) settingsForm.requestSubmit();
+      else settingsForm.dispatchEvent(new Event("submit", { cancelable: true }));
+    });
+  }
+  const saveBarCancel = $("#save-bar-cancel");
+  if (saveBarCancel) {
+    saveBarCancel.addEventListener("click", () => {
+      fillSettings();
+      toast("Изменения отменены");
+    });
+  }
+
   $("#dns-preset").addEventListener("change", (e) => {
-    if (e.target.value) $("#settings-form").dns_upstream.value = e.target.value;
+    if (e.target.value) {
+      $("#settings-form").dns_upstream.value = e.target.value;
+      checkSettingsDirty();
+    }
     e.target.value = "";
   });
   $("#settings-form").auto_start.addEventListener("change", (e) => {
@@ -767,6 +857,7 @@ function bind() {
   $("#lan-new-password").addEventListener("click", () => {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     $("#settings-form").lan_password.value = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    checkSettingsDirty();
     toast("Новый пароль начнёт действовать после сохранения");
   });
 
@@ -853,6 +944,9 @@ async function tick() {
 }
 
 bind();
-invoke("adblock_presets").then((p) => { adblockPresets = p; }).catch(() => {});
+invoke("adblock_presets").then((p) => {
+  adblockPresets = p;
+  if (currentView === "settings" && !isSettingsDirty()) fillSettings();
+}).catch(() => {});
 refresh().catch((e) => toast(String(e), "error"));
 setInterval(tick, 1000);

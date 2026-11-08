@@ -209,7 +209,7 @@ textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consola
 .sub-links a { color: var(--accent); cursor: pointer; text-decoration: none; }
 
 /* Settings */
-.settings { display: grid; gap: 14px; }
+.settings { display: grid; gap: 14px; position: relative; }
 fieldset { border: 0; margin: 0; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
 legend { font-weight: 600; padding: 0; float: left; width: 100%; margin-bottom: 4px; }
 fieldset > legend + * { clear: both; }
@@ -222,6 +222,59 @@ label.check input { width: 18px; height: 18px; margin: 1px 0 0; flex: none; acce
 .lan-auth { display: grid; gap: 10px; }
 .lan-auth .hint { margin: 0; }
 .lan-auth input[readonly] { background: var(--surface-2); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px; }
+
+/* Floating Save Bar */
+.save-bar {
+  position: sticky;
+  bottom: 16px;
+  z-index: 40;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .14), 0 2px 8px rgba(0, 0, 0, .06);
+  border-radius: 14px;
+  padding: 12px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 10px;
+  backdrop-filter: blur(12px);
+  transform: translateY(80px);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .25s cubic-bezier(0.16, 1, 0.3, 1), opacity .2s ease;
+}
+@media (prefers-color-scheme: dark) {
+  .save-bar {
+    box-shadow: 0 10px 32px rgba(0, 0, 0, .6), 0 2px 8px rgba(0, 0, 0, .4);
+  }
+}
+.save-bar.visible {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.save-bar-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.save-bar-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+}
+.save-bar-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+.save-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
 .about-card { margin-top: 14px; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
 .about-head { font-size: 14px; font-weight: 600; margin: 0; }
 .about-row { display: flex; align-items: flex-start; gap: 14px; }
@@ -277,4 +330,5 @@ body.mobile .desktop-only { display: none; }
   .segmented { flex-direction: column; }
   .power { width: 120px; height: 120px; }
   .toasts { left: 16px; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .save-bar { bottom: calc(76px + env(safe-area-inset-bottom)); }
 }

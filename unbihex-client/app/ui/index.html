@@ -216,21 +216,34 @@
             </div>
             <label class="check"><input name="auto_connect" type="checkbox" /> Подключаться при запуске</label>
             <div id="android-notification">
-              <label class="check"><input name="android_notification" type="checkbox" /> Уведомление «VPN включён»</label>
-              <p class="hint">Держит VPN включённым, когда приложение смахнули из недавних. Без уведомления Android может закрыть VPN в фоне. Действует со следующего подключения.</p>
+              <label class="check"><input name="android_notification" type="checkbox" /> Показывать постоянное уведомление, когда отключено (чтобы Android реже выгружал программу)</label>
             </div>
-            <label>Подробность журнала
+            <label>Уровень журнала
               <select name="log_level">
+                <option value="off">Отключён</option>
                 <option value="error">Только ошибки</option>
-                <option value="warn">Предупреждения</option>
-                <option value="info">Обычная</option>
-                <option value="debug">Отладка</option>
+                <option value="warn">Предупреждения и ошибки</option>
+                <option value="info">Обычный (подключения и ошибки)</option>
+                <option value="debug">Подробный</option>
+                <option value="trace">Максимальный</option>
               </select>
             </label>
           </fieldset>
           <div class="form-actions">
             <button type="submit" class="btn primary">Сохранить</button>
             <span class="hint" id="settings-note">При активном подключении оно перезапустится.</span>
+          </div>
+
+          <!-- Плавающая плашка сохранения настроек -->
+          <div class="save-bar" id="save-bar">
+            <div class="save-bar-info">
+              <div class="save-bar-title">Есть несохранённые изменения</div>
+              <div class="save-bar-sub">При активном VPN подключение перезапустится</div>
+            </div>
+            <div class="save-bar-actions">
+              <button type="button" class="btn" id="save-bar-cancel">Отменить</button>
+              <button type="button" class="btn primary" id="save-bar-save">Сохранить</button>
+            </div>
           </div>
         </form>
         <section class="about-card" aria-labelledby="about-head">
