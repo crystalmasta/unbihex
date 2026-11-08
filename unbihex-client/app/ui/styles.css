@@ -149,6 +149,9 @@ textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consola
 
 .panel { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; }
 .panel-title { font-weight: 600; margin-bottom: 10px; }
+label.panel-title { display: block; color: var(--text); font-size: inherit; }
+#template-panel select { text-overflow: ellipsis; }
+#template-panel .hint { margin: 8px 0 0; }
 .segmented { display: flex; background: var(--surface-2); border-radius: 12px; padding: 4px; gap: 4px; }
 .segmented button {
   flex: 1; border: 0; background: none; padding: 8px 6px; border-radius: 9px; cursor: pointer; color: var(--muted); font-size: 13px;

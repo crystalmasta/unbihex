@@ -155,6 +155,7 @@ function renderHome() {
   $("#store-apps").hidden = !(S.platform === "windows" && set.mode === "system_proxy");
   $$("#routing-seg button").forEach((b) => b.classList.toggle("active", b.dataset.routing === set.routing));
   $("#routing-hint").textContent = ROUTING_HINTS[set.routing] || "";
+  renderHomeTemplate(set);
 
   // Quota of the subscription the selected server belongs to.
   const sub = sel && S.data.subscriptions.find((x) => x.id === sel.subscription_id);
@@ -316,6 +317,23 @@ const plural = (n, one, few, many) => {
   const m10 = n % 10, m100 = n % 100;
   return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
 };
+
+// The home screen's template picker: shown while auto-select is on.
+function renderHomeTemplate(set) {
+  const on = set.auto_select !== "off";
+  $("#template-panel").hidden = !on;
+  if (!on) return;
+  const active = activeTemplate();
+  const sel = $("#home-template");
+  sel.innerHTML = [
+    '<option value="">Все серверы</option>',
+    ...templates().map((t) => `<option value="${t.id}">${esc(t.name)}</option>`),
+  ].join("");
+  sel.value = active ? active.id : "";
+  $("#template-hint").textContent = active
+    ? "Автовыбор переключается только по серверам этого шаблона."
+    : "Подписка выбранного сервера, кроме исключённых серверов.";
+}
 
 // The template picker and the list of templates on the "Автовыбор" tab; `value`
 // is the template to show as chosen ("" — all servers).
@@ -944,6 +962,11 @@ function bind() {
       if (S.data.settings.routing !== b.dataset.routing) updateSettings({ routing: b.dataset.routing });
     }),
   );
+  // Saved at once, as on the "Автовыбор" tab; a running group is rebuilt.
+  $("#home-template").addEventListener("change", (e) => {
+    const id = e.target.value || null;
+    if ((S.data.settings.auto_template || null) !== id) updateSettings({ auto_template: id });
+  });
   $("#relaunch-admin").addEventListener("click", () => call("relaunch_admin").catch(() => {}));
   // Needs administrator rights; without them the error explains it.
   $("#store-allow").addEventListener("click", () =>

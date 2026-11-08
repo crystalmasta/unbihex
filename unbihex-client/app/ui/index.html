@@ -73,6 +73,12 @@
             <p class="hint" id="routing-hint"></p>
           </div>
 
+          <div class="panel" id="template-panel" hidden>
+            <label class="panel-title" for="home-template">Серверы автовыбора</label>
+            <select id="home-template"></select>
+            <p class="hint" id="template-hint"></p>
+          </div>
+
           <div class="panel" id="quota-panel" hidden></div>
         </div>
       </section>
@@ -154,7 +160,7 @@
               <button type="button" class="btn danger" id="settings-reset">Сбросить все настройки</button>
               <button type="button" class="info-btn" data-info="i-reset" aria-label="Подробнее">ⓘ</button>
             </div>
-            <p class="info" id="i-reset" hidden>Все настройки, в том числе режим, маршрутизация, DNS, списки сайтов и приложения в VPN, вернутся к значениям по умолчанию и сразу сохранятся. Серверы, подписки, выбранный сервер, отметки автовыбора и отпечатки отдельных серверов останутся; пароль для устройств в сети и идентификатор устройства не меняются.</p>
+            <p class="info" id="i-reset" hidden>Все настройки, в том числе режим, маршрутизация, DNS, списки сайтов и приложения в VPN, вернутся к значениям по умолчанию и сразу сохранятся. Серверы, подписки, выбранный сервер, исключения и шаблоны автовыбора (выбранный шаблон сбросится на «Все серверы») и отпечатки отдельных серверов останутся; пароль для устройств в сети и идентификатор устройства не меняются.</p>
           </fieldset>
 
           <fieldset data-tab="network">
