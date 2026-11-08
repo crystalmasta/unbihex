@@ -60,8 +60,7 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   one working now; when disconnected, the selected one), without leading flags and emoji so the name fits.
   Long-press opens the app.
 - Android: apps in the VPN (#16): "All apps" (the default), "Only the chosen ones" or "All but the chosen ones";
-  a searchable list, system apps hidden unless "Show system apps" is on. Apps with a launcher icon are listed (no
-  QUERY_ALL_PACKAGES permission). Unbihex itself always stays outside the VPN; when none of the chosen apps is
+  one alphabetical, searchable list of every installed app, system ones too (QUERY_ALL_PACKAGES permission). Unbihex itself always stays outside the VPN; when none of the chosen apps is
   installed, every app uses the VPN. Applied on connect: after a change the app offers to reconnect. Android asks for VPN permission on first use.
 - Routing: "Everything through VPN", "Russia direct" (.ru/.su/.рф and major Russian services),
   "Only selected sites", "Only blocked sites" (by the geosite/geoip databases),

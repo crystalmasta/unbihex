@@ -182,8 +182,9 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /**
-     * Apps with a launcher entry (the manifest's `<queries>` makes them visible
-     * without QUERY_ALL_PACKAGES), Unbihex excluded, each with a small icon.
+     * Every installed package, system ones too (QUERY_ALL_PACKAGES in the
+     * manifest makes them visible on Android 11+), Unbihex excluded, each with
+     * a small icon.
      */
     @Command
     fun listApps(invoke: Invoke) {
@@ -191,17 +192,15 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         Thread {
             try {
                 val pm = context.packageManager
-                val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
                 val found = if (Build.VERSION.SDK_INT >= 33) {
-                    pm.queryIntentActivities(launcher, PackageManager.ResolveInfoFlags.of(0))
+                    pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0))
                 } else {
                     @Suppress("DEPRECATION")
-                    pm.queryIntentActivities(launcher, 0)
+                    pm.getInstalledApplications(0)
                 }
                 val seen = HashSet<String>()
                 val apps = JSArray()
-                for (info in found) {
-                    val app = info.activityInfo?.applicationInfo ?: continue
+                for (app in found) {
                     if (app.packageName == context.packageName || !seen.add(app.packageName)) continue
                     val item = JSObject()
                     item.put("package", app.packageName)

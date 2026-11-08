@@ -282,11 +282,13 @@ dialog::backdrop { background: rgba(10, 14, 22, .45); }
 .dlg h2 { margin: 0; font-size: 18px; }
 .dlg .hint { margin: 0; }
 .dlg-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.apps-list { max-height: min(50vh, 420px); overflow-y: auto; display: grid; gap: 2px; }
-.apps-list label { display: flex; align-items: center; gap: 10px; padding: 6px 4px; }
+.apps-list { max-height: min(60vh, 480px); overflow-y: auto; display: block; margin: 0 -4px; }
+.apps-list label { display: flex; align-items: center; gap: 12px; padding: 8px 4px; color: var(--text); font-size: 14px; cursor: pointer; }
+.apps-list label + label { border-top: 1px solid var(--border); }
 .apps-list img, .apps-list .noicon { width: 32px; height: 32px; flex: none; border-radius: 8px; }
-.apps-list .app-name { display: grid; min-width: 0; }
-.apps-list .app-name small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.apps-list .noicon { background: var(--surface-2); }
+.apps-list .app-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.apps-list input { width: 20px; height: 20px; margin: 0; padding: 0; flex: none; accent-color: var(--accent); }
 .spacer { flex: 1; }
 .toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 50; max-width: min(420px, calc(100vw - 32px)); }
 .toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 12px; box-shadow: var(--shadow); animation: slide .2s ease-out; }

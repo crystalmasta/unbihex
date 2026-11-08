@@ -47,7 +47,7 @@ pub struct AppInfo {
 /// Result of `list_apps`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AppsResponse {
-    /// Apps with a launcher entry, except Unbihex.
+    /// Every installed app, system ones too, except Unbihex.
     pub apps: Vec<AppInfo>,
 }
 

@@ -666,17 +666,16 @@ function appsCount() {
 
 function renderApps() {
   const q = $("#apps-search").value.trim().toLowerCase();
-  const system = $("#apps-system").checked;
   const list = (appsAll || [])
-    .filter((a) => system || !a.system || appsPicked.has(a.package))
     .filter((a) => !q || a.name.toLowerCase().includes(q) || a.package.toLowerCase().includes(q))
-    .sort((a, b) => (appsPicked.has(b.package) - appsPicked.has(a.package)) || a.name.localeCompare(b.name));
+    .sort((a, b) => a.name.localeCompare(b.name) || a.package.localeCompare(b.package));
   $("#apps-list").innerHTML = list.length
     ? list
         .map(
-          (a) => `<label><input type="checkbox" data-pkg="${esc(a.package)}" ${appsPicked.has(a.package) ? "checked" : ""} />
+          (a) => `<label title="${esc(a.package)}">
         ${a.icon ? `<img src="${esc(a.icon)}" alt="" />` : '<span class="noicon"></span>'}
-        <span class="app-name"><span>${esc(a.name)}</span><small>${esc(a.package)}</small></span></label>`,
+        <span class="app-name">${esc(a.name)}</span>
+        <input type="checkbox" data-pkg="${esc(a.package)}" ${appsPicked.has(a.package) ? "checked" : ""} /></label>`,
         )
         .join("")
     : '<p class="hint">Ничего не найдено</p>';
@@ -990,7 +989,6 @@ function bind() {
 
   $("#apps-pick").addEventListener("click", openAppsDialog);
   $("#apps-search").addEventListener("input", renderApps);
-  $("#apps-system").addEventListener("change", renderApps);
   $("#apps-list").addEventListener("change", (e) => {
     const pkg = e.target.dataset && e.target.dataset.pkg;
     if (!pkg) return;
