@@ -88,6 +88,7 @@ function render() {
   renderServers();
   renderSubs();
   renderAbout();
+  syncSavedTemplate();
   // Lists download in the background after saving: the status follows.
   renderAdblock();
 }
@@ -333,6 +334,7 @@ function renderTemplates(value) {
         <button type="button" class="btn small" data-tpl-edit="${t.id}">Изменить</button></div>`;
     })
     .join("");
+  checkSettingsDirty();
 }
 
 // The template dialog: a new template (`id` null) or an existing one.
@@ -652,6 +654,8 @@ function fillSettings() {
   renderGeo();
   fillAdblock(s);
   syncDnsPresets();
+  settingsBase = formSettings();
+  checkSettingsDirty();
 }
 
 // DNS sets the lists offer; a list shows the one the field holds, else "Свой".
@@ -714,7 +718,47 @@ function renderGeo() {
   if (g.last_error) el.textContent += ` · ошибка: ${g.last_error}`;
 }
 
+// The settings as saved: what the form showed when it was last filled (PR #58).
+let settingsBase = null;
+
+// The form has changes that are not saved yet.
+function settingsDirty() {
+  if (!settingsBase) return false;
+  const now = formSettings();
+  return Object.keys(now).some((k) => JSON.stringify(now[k]) !== JSON.stringify(settingsBase[k]));
+}
+
+// By Finorion (github.com/Finorion), PR #58: "Сохранить / Отменить" only while
+// something on any tab is not saved.
+function checkSettingsDirty() {
+  $("#save-bar").hidden = !settingsDirty();
+}
+
+// The active template changed outside the form (the home screen, a deleted
+// template): an untouched picker follows it, a changed one keeps the change.
+function syncSavedTemplate() {
+  if (!settingsBase) return;
+  const saved = S.data.settings.auto_template || null;
+  if (settingsBase.auto_template === saved) return;
+  const f = $("#settings-form");
+  if ((f.auto_template.value || null) === settingsBase.auto_template) f.auto_template.value = saved || "";
+  settingsBase.auto_template = saved;
+  checkSettingsDirty();
+}
+
+// A save the backend refused: the tab with the field it is about.
+function showSettingsError(msg) {
+  const field = /DNS/.test(msg) ? "dns_upstream" : /пароль/.test(msg) ? "lan_password" : /отпечаток TLS/.test(msg) ? "tls_fingerprint" : null;
+  const section = field && $("#settings-form")[field].closest("[data-tab]");
+  if (section) showSettingsTab(section.dataset.tab);
+}
+
 function readSettings() {
+  return { ...S.data.settings, ...formSettings() };
+}
+
+// The settings the form holds (without what it does not show).
+function formSettings() {
   const f = $("#settings-form");
   const lines = (t) => t.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
   const port = (v, d) => {
@@ -722,7 +766,6 @@ function readSettings() {
     return n > 0 && n < 65536 ? n : d;
   };
   return {
-    ...S.data.settings,
     proxy_list: lines(f.proxy_list.value),
     direct_list: lines(f.direct_list.value),
     private_names: lines(f.private_names.value),
@@ -833,10 +876,12 @@ async function applySettings(settings, done) {
     saved = true;
   } catch (err) {
     toast(String(err), "error");
+    showSettingsError(String(err));
   } finally {
     busy = false;
     await refresh();
-    fillSettings();
+    // A refused save keeps the edits, so they can be fixed.
+    if (saved) fillSettings();
   }
   if (saved) await offerAppsReconnect(before, settings);
 }
@@ -877,7 +922,8 @@ function switchView(name) {
   currentView = name;
   $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${name}`));
-  if (name === "settings") fillSettings();
+  // Unsaved edits wait for the user when they come back.
+  if (name === "settings" && !settingsDirty()) fillSettings();
   if (name === "logs") loadLogs();
   $(".main").scrollTop = 0;
 }
@@ -1111,6 +1157,12 @@ function bind() {
     e.preventDefault();
     applySettings(readSettings(), "Настройки сохранены");
   });
+  $("#settings-form").addEventListener("input", checkSettingsDirty);
+  $("#settings-form").addEventListener("change", checkSettingsDirty);
+  $("#save-bar-cancel").addEventListener("click", () => {
+    fillSettings();
+    toast("Изменения отменены");
+  });
   $("#settings-reset").addEventListener("click", async () => {
     const restart = S.status.connected ? " Подключение перезапустится." : "";
     if (!confirm(`Сбросить все настройки к значениям по умолчанию? Серверы, подписки, исключения и шаблоны автовыбора останутся.${restart}`)) return;
@@ -1158,6 +1210,7 @@ function bind() {
   $("#lan-new-password").addEventListener("click", () => {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     $("#settings-form").lan_password.value = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    checkSettingsDirty();
     toast("Новый пароль начнёт действовать после сохранения");
   });
 

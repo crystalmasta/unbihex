@@ -47,7 +47,7 @@ Windows SmartScreen может предупредить о неизвестно�
 - [dubr1k](https://github.com/dubr1k) — XHTTP для CDN (#32), Hysteria2 (#33), DNS физической сети на Android (#36),
   VMess (#37), TrustTunnel (#38);
 - [emiliya-central-uni](https://github.com/emiliya-central-uni) — разбор hosts-списков (#31);
-- [Finorion](https://github.com/Finorion) — значки трея (#43);
+- [Finorion](https://github.com/Finorion) — значки трея (#43), плашка сохранения настроек (#58);
 - [akurach](https://github.com/akurach) — сборка для macOS (#50), плитка быстрых настроек Android (#51).
 
 ## Автор и лицензия

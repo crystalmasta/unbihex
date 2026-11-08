@@ -48,7 +48,7 @@ Thanks to everyone whose changes are in the project:
 - [dubr1k](https://github.com/dubr1k) — XHTTP for CDNs (#32), Hysteria2 (#33), the physical network's DNS on
   Android (#36), VMess (#37), TrustTunnel (#38);
 - [emiliya-central-uni](https://github.com/emiliya-central-uni) — the hosts list parser (#31);
-- [Finorion](https://github.com/Finorion) — tray icons (#43);
+- [Finorion](https://github.com/Finorion) — tray icons (#43), the settings save bar (#58);
 - [akurach](https://github.com/akurach) — the macOS build (#50), the Android quick settings tile (#51).
 
 ## Author and license
