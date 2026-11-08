@@ -2,8 +2,9 @@
 
 [Русский](README.md) · **English**
 
-Unbihex's own network engine in Rust: TUN, routing, fake-IP DNS, VLESS (TLS, REALITY, XTLS Vision, XHTTP, XUDP),
-Shadowsocks, SOCKS5, local SOCKS5/HTTP proxies. Works with Xray servers.
+Unbihex's own network engine in Rust: TUN, routing, fake-IP DNS (DoT, DoH), VLESS (TLS, REALITY, XTLS Vision, XHTTP,
+WebSocket, HTTPUpgrade, gRPC, XUDP, Mux.Cool), VMess, Trojan, Hysteria 2, TrustTunnel, NaiveProxy, Shadowsocks, SOCKS5,
+a balancer, local SOCKS5/HTTP proxies. Works with Xray servers.
 It is used by the `../unbihex-client` app. Behaviour and interfaces are described in `SPEC.en.md`.
 
 ```

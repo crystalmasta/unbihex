@@ -13,9 +13,10 @@ linked in each section. A change of engine behaviour updates this document and i
 Unbihex is a client proxy engine. It takes traffic in (a TUN with all of the device's traffic, local SOCKS5/HTTP
 ports), routes connections by rules and sends them directly, blocks them or passes them through a proxy server.
 
-Protocols: VLESS (TLS, REALITY, XTLS Vision, XHTTP, WebSocket, XUDP), VMess, Trojan,
-Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
-TLS and REALITY send a Chrome ClientHello. Rules understand domains, addresses, ports, geosite/geoip databases and
+Protocols: VLESS (TLS, REALITY, XTLS Vision, XHTTP, WebSocket, HTTPUpgrade, gRPC; UDP over XUDP and Mux.Cool),
+VMess and Trojan (TCP, TLS, WebSocket, HTTPUpgrade, gRPC; Trojan also REALITY), Hysteria 2 (QUIC, Salamander),
+TrustTunnel and NaiveProxy (HTTP/2), Shadowsocks AEAD, SOCKS5; a balancer over a group of outbounds (§11.16).
+TLS and REALITY send the ClientHello of Chrome or another chosen browser (§11.2). Rules understand domains, addresses, ports, geosite/geoip databases and
 sing-box rule-sets. Routing and outbounds can be replaced on the fly without dropping open connections.
 
 Where it runs (engine hosts: §13):
@@ -38,13 +39,16 @@ unbihex-engine/
 ├─ SPEC.md, SPEC.en.md, HYSTERIA2.md, README*.md, LICENSE
 ├─ vendor/
 │  ├─ rustls/        # rustls 0.23.46 + a ClientHello rewrite hook (UNBIHEX-PATCH.md)
-│  └─ ipstack/       # ipstack 1.0.1 + 5 TCP stack changes (UNBIHEX-PATCH.md)
+│  ├─ ipstack/       # ipstack 1.0.1 + 5 TCP stack changes (UNBIHEX-PATCH.md)
+│  └─ h2/            # h2 0.4.20 + empty DATA frames for TrustTunnel (UNBIHEX-PATCH.md)
 ├─ src/
 │  ├─ lib.rs         # Instance, PlatformHooks (§4)
 │  ├─ address.rs     # Address, TargetAddr, SOCKS5-style addresses
 │  ├─ session.rs     # Session, Network
 │  ├─ config.rs      # config (§5) and checks
 │  ├─ link.rs        # vless://, vmess://, trojan://, ss://, hy2://, tt://, naive+https:// share links (§5.4)
+│  ├─ link/          # vmess, trojan, tt, naive, finalmask (fm → fragmentation, §11.6)
+│  ├─ mux.rs         # Mux.Cool frames shared by the client (outbound/mux.rs) and the server (§16)
 │  ├─ router.rs      # rules (§6)
 │  ├─ rules/         # geosite/geoip (geodata.rs), .srs (srs.rs), succinct trie, IP sets (§6.2)
 │  ├─ dispatcher.rs  # outbound choice, address checks, hot table swap (§7)
@@ -52,10 +56,10 @@ unbihex-engine/
 │  ├─ stats.rs       # traffic counters: proxied and direct
 │  ├─ sniff.rs       # name from TLS SNI / HTTP Host (§10.3)
 │  ├─ net/socket.rs  # SocketFactory (§9)
-│  ├─ dns/           # fake IP (§8.1), TUN DNS server (§8.2), upstream client and resolvers (§8.3)
+│  ├─ dns/           # fake IP (§8.1), TUN DNS server (§8.2), upstream client, DoT/DoH and resolvers (§8.3)
 │  ├─ inbound/       # socks, http, mixed, tun (§10); vless, reality, reality_shape, mux: `server` feature only (§16)
-│  └─ outbound/      # vless, trojan, vmess, ws, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
-│                    # hysteria2/, shadowsocks, socks, direct, block, balancer (§11)
+│  └─ outbound/      # vless, trojan, vmess, ws, grpc, tls, tls_stream, fingerprint, pq, reality, vision, xudp, mux,
+│                    # xhttp/, fragment, hysteria2/, shadowsocks, trusttunnel, naive, socks, direct, block, balancer (§11)
 └─ tests/            # integration.rs, xray_interop.rs, singbox_interop.rs, hysteria2_interop.rs (§15)
 ```
 
@@ -1081,8 +1085,15 @@ const char *unbihex_version(void);
 
 The engine runs inside the `unbihex-client` app process: the `tauri-plugin-unbihex-vpn` plugin starts a `VpnService`
 (a foreground service); `VpnService.Builder` gets the addresses `10.199.233.1/30` and `fdb5:2f3c:9a17::1/126`, the
-routes `0.0.0.0/0` and `::/0`, DNS `10.199.233.2`, the MTU and an exclusion of the app itself
-(`addDisallowedApplication`); the TUN fd and `protect` go to `Instance::start` with `system_dns_bypasses_tun = true`.
+routes `0.0.0.0/0` and `::/0`, DNS `10.199.233.2` and the MTU; the TUN fd and `protect` go to `Instance::start` with
+`system_dns_bypasses_tun = true`, and the physical network's DNS (taken before `establish()`) as `bootstrap_dns`.
+
+Apps in the VPN (the client settings `android_apps_mode` + `android_apps`, a list of packages): `all` (the default),
+every app except Unbihex itself (`addDisallowedApplication`); `only`, just the chosen ones (`addAllowedApplication`;
+Unbihex is not on the list and stays outside); `except`, every app but the chosen ones and Unbihex
+(`addDisallowedApplication`). Packages not installed are skipped; `only` with none of its packages found works as
+`all`. The picker lists every installed package, system ones too (the `QUERY_ALL_PACKAGES` permission). It applies the
+next time the `VpnService` starts.
 
 ---
 

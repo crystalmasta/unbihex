@@ -44,7 +44,7 @@ Thanks to everyone whose changes are in the project:
 
 - [Pavel Shakhmin (pshakhmin)](https://github.com/pshakhmin) — performance (TCP windows in TUN, socket buffers,
   REALITY; #18, #20, #25), TLS fingerprints (#41), the XHTTP connection pool (#42), the 16 KiB TUN MTU on Linux
-  (#45), the xray-bench test bench;
+  (#45), UDP over Mux.Cool (#53), the xray-bench test bench;
 - [dubr1k](https://github.com/dubr1k) — XHTTP for CDNs (#32), Hysteria2 (#33), the physical network's DNS on
   Android (#36), VMess (#37), TrustTunnel (#38);
 - [emiliya-central-uni](https://github.com/emiliya-central-uni) — the hosts list parser (#31);

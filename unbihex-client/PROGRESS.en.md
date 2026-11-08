@@ -1,4 +1,4 @@
-# Where things stand (06.11.2026)
+# Where things stand (08.11.2026)
 
 [Русский](PROGRESS.md) · **English**
 
@@ -174,11 +174,41 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
 - macOS (Apple Silicon): an unofficial build with `installer/build-macos.sh` and in CI on demand (by akurach, PR
   #50); TUN mode needs root, system proxy mode works without it.
 
+## 07.11 — client 0.2.9
+- Auto-select (#46): a server can be left out of its subscription's group or marked for an "only marked" group from
+  any subscriptions; the marks survive subscription updates.
+- Links and JSON subscriptions: `fm` (Xray's finalmask) fragments the TLS ClientHello, as in Xray 26.10.31.
+
+## 08.11 — client 0.2.10, engine 0.1.9
+- Subscriptions: when the panel cannot be reached directly (a mobile carrier's whitelist) and the VPN is up, the
+  request is repeated through the current server with the same headers.
+- DNS: `udp://` and `tcp://` servers with a port; two sets, as in Happ: the remote one (through the server) and the
+  home one (for "direct" sites, empty: none), with presets, Yandex among them. An unparsable server is not saved.
+- Routing (#24): the user's lists come before the private-network bypass: a subnet or name listed "through VPN" goes
+  through the server, and the name is resolved on its side.
+- VLESS UDP goes through one Mux.Cool connection per server with a session per socket, falling back to plain UDP
+  for servers without Mux.Cool; XHTTP gets its own h2 pool for UDP (PR #53, Pavel Shakhmin).
+- New protocols and transports: NaiveProxy over HTTP/2 (#15, `naive+https://` links and sing-box JSON); gRPC (Xray's
+  "gun") for VLESS, VMess and Trojan. A TCP close without a TLS close_notify ends the read, as in Go, instead of
+  tearing the stream down.
+- A choice of TLS fingerprint, for all servers or for one (chrome, firefox, safari, ios, android, edge, 360, qq,
+  random, randomized).
+- Android: apps in the VPN (#16): all, only the chosen ones, or all but the chosen ones; the list holds every
+  installed app, system ones too. The quick settings tile shows the server's name.
+- Auto-select: templates, named sets of servers from any subscriptions, picked on the "Автовыбор" tab and on the home
+  screen; the 0.2.9 marks became the template "Отмеченные". A latency threshold (500 ms by default): after two checks
+  in a row over it the balancer moves to a clearly faster server below it, and stays when all are slow
+  (`latency_threshold_ms`, SPEC §11.16).
+- Interface: the settings in tabs with descriptions behind an ⓘ button; a "Сохранить / Отменить" bar while there are
+  unsaved changes (PR #58, Finorion); "Сбросить все настройки"; server rows with a "⋯" menu (also a long press);
+  "О программе" at the end of General, with a tip link.
+
 ## Next
 1. Fuzzing and benchmarks, the engine README as an SDK.
-2. TrustTunnel over HTTP/3.
+2. TrustTunnel over HTTP/3; NaiveProxy over HTTP/3 (`naive+quic://`).
 
 ## To check by hand
-1. The APK on a phone: connecting, ping, Vision/REALITY servers, ICMP ping; the tile on Android 12–14 (release APK).
+1. The APK on a phone: connecting, ping, Vision/REALITY servers, ICMP ping; the tile on Android 12–14 (release APK);
+   apps in the VPN and the full package list, auto-select templates and the threshold on live servers.
 2. iOS: a build on a Mac following the README (needs Xcode and an Apple Developer account).
 3. macOS: the `build-macos.sh` build and system proxy mode.

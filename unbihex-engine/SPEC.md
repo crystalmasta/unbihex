@@ -13,9 +13,10 @@
 Unbihex — клиентское прокси-ядро. Оно принимает трафик (TUN со всем трафиком устройства, локальные SOCKS5/HTTP-порты),
 маршрутизирует соединения по правилам и отправляет их напрямую, блокирует или передаёт через прокси-сервер.
 
-Протоколы: VLESS (TLS, REALITY, XTLS Vision, XHTTP, WebSocket, XUDP), VMess, Trojan,
-Hysteria 2 (QUIC, Salamander), Shadowsocks AEAD, SOCKS5.
-TLS и REALITY отправляют ClientHello как у Chrome. Правила понимают домены, адреса, порты, базы geosite/geoip и
+Протоколы: VLESS (TLS, REALITY, XTLS Vision, XHTTP, WebSocket, HTTPUpgrade, gRPC; UDP через XUDP и Mux.Cool),
+VMess и Trojan (TCP, TLS, WebSocket, HTTPUpgrade, gRPC; у Trojan ещё REALITY), Hysteria 2 (QUIC, Salamander),
+TrustTunnel и NaiveProxy (HTTP/2), Shadowsocks AEAD, SOCKS5; балансировщик над группой outbound-ов (§11.16).
+TLS и REALITY отправляют ClientHello как у Chrome или другого выбранного браузера (§11.2). Правила понимают домены, адреса, порты, базы geosite/geoip и
 rule-set-ы sing-box. Маршрутизацию и outbound-ы можно сменить на лету, не разрывая открытые соединения.
 
 Где работает (хосты ядра — §13):
@@ -38,13 +39,16 @@ unbihex-engine/
 ├─ SPEC.md, SPEC.en.md, HYSTERIA2.md, README*.md, LICENSE
 ├─ vendor/
 │  ├─ rustls/        # rustls 0.23.46 + хук переписывания ClientHello (UNBIHEX-PATCH.md)
-│  └─ ipstack/       # ipstack 1.0.1 + 5 правок TCP-стека (UNBIHEX-PATCH.md)
+│  ├─ ipstack/       # ipstack 1.0.1 + 5 правок TCP-стека (UNBIHEX-PATCH.md)
+│  └─ h2/            # h2 0.4.20 + пустые DATA-кадры для TrustTunnel (UNBIHEX-PATCH.md)
 ├─ src/
 │  ├─ lib.rs         # Instance, PlatformHooks (§4)
 │  ├─ address.rs     # Address, TargetAddr, адреса в формате SOCKS5
 │  ├─ session.rs     # Session, Network
 │  ├─ config.rs      # конфиг (§5) и проверки
 │  ├─ link.rs        # share-ссылки vless://, vmess://, trojan://, ss://, hy2://, tt://, naive+https:// (§5.4)
+│  ├─ link/          # vmess, trojan, tt, naive, finalmask (fm → фрагментация, §11.6)
+│  ├─ mux.rs         # кадры Mux.Cool: общие для клиента (outbound/mux.rs) и сервера (§16)
 │  ├─ router.rs      # правила (§6)
 │  ├─ rules/         # geosite/geoip (geodata.rs), .srs (srs.rs), succinct-trie, наборы IP (§6.2)
 │  ├─ dispatcher.rs  # выбор outbound, проверки адресов, горячая замена таблицы (§7)
@@ -52,10 +56,10 @@ unbihex-engine/
 │  ├─ stats.rs       # счётчики трафика: через прокси и напрямую
 │  ├─ sniff.rs       # имя из TLS SNI / HTTP Host (§10.3)
 │  ├─ net/socket.rs  # SocketFactory (§9)
-│  ├─ dns/           # fake-IP (§8.1), DNS-сервер TUN (§8.2), клиент к upstream и резолверы (§8.3)
+│  ├─ dns/           # fake-IP (§8.1), DNS-сервер TUN (§8.2), клиент к upstream, DoT/DoH и резолверы (§8.3)
 │  ├─ inbound/       # socks, http, mixed, tun (§10); vless, reality, reality_shape, mux — только feature server (§16)
-│  └─ outbound/      # vless, trojan, vmess, ws, tls, tls_stream, fingerprint, pq, reality, vision, xudp, xhttp/, fragment,
-│                    # hysteria2/, shadowsocks, socks, direct, block, balancer (§11)
+│  └─ outbound/      # vless, trojan, vmess, ws, grpc, tls, tls_stream, fingerprint, pq, reality, vision, xudp, mux,
+│                    # xhttp/, fragment, hysteria2/, shadowsocks, trusttunnel, naive, socks, direct, block, balancer (§11)
 └─ tests/            # integration.rs, xray_interop.rs, singbox_interop.rs, hysteria2_interop.rs (§15)
 ```
 
@@ -1045,8 +1049,15 @@ const char *unbihex_version(void);
 
 Ядро работает внутри процесса приложения `unbihex-client`: плагин `tauri-plugin-unbihex-vpn` поднимает `VpnService`
 (служба переднего плана), `VpnService.Builder` получает адреса `10.199.233.1/30` и `fdb5:2f3c:9a17::1/126`, маршруты
-`0.0.0.0/0` и `::/0`, DNS `10.199.233.2`, MTU и исключение самого приложения (`addDisallowedApplication`); fd TUN и
-`protect` передаются в `Instance::start` с `system_dns_bypasses_tun = true`.
+`0.0.0.0/0` и `::/0`, DNS `10.199.233.2` и MTU; fd TUN и `protect` передаются в `Instance::start` с
+`system_dns_bypasses_tun = true`, а DNS физической сети (снимок до `establish()`) — как `bootstrap_dns`.
+
+Приложения в VPN (настройка клиента `android_apps_mode` + `android_apps`, список пакетов): `all` (по умолчанию) — все,
+кроме самого Unbihex (`addDisallowedApplication`); `only` — только выбранные (`addAllowedApplication`; Unbihex в
+список не входит и остаётся снаружи); `except` — все, кроме выбранных и Unbihex (`addDisallowedApplication`).
+Пакеты, которых нет на телефоне, пропускаются; `only`, в котором не нашлось ни одного пакета, работает как `all`.
+Список для выбора — все установленные пакеты, включая системные (разрешение `QUERY_ALL_PACKAGES`). Применяется при
+следующем запуске `VpnService`.
 
 ---
 

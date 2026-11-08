@@ -35,11 +35,12 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   of this computer and the local network (`127.0.0.1`, `localhost`, `192.168.x.x` and so on), and redirects to
   `http://` on the internet are refused. A subscription response is at most 8 MB, a database file at most 256 MB
   (written to disk as it downloads).
-- Adding `vless://`, `ss://`, `socks://`, `hy2://` and `hysteria2://` links by hand.
+- Adding `vless://`, `vmess://`, `trojan://`, `ss://`, `socks://`, `hy2://` / `hysteria2://`, `tt://` and `naive+https://`
+  links by hand, or pasting an Xray / sing-box JSON config.
 - VLESS TLS and REALITY send a Chrome ClientHello (JA4 `t13d1516h2_8daaf6152771_…`, GREASE, X25519MLKEM768) instead of
   rustls's recognisable one; `fp=none` in a link turns this off. "TLS fingerprint" in the settings is "As in the
   link" (the default) or one for every server: chrome, firefox, safari, ios, android, edge, 360, qq, random,
-  randomized (VLESS, VMess, Trojan, TrustTunnel, NaiveProxy). A button in a server's row sets one for that server only;
+  randomized (VLESS, VMess, Trojan, TrustTunnel, NaiveProxy). "Отпечаток TLS" in a server's "⋯" menu sets one for that server only;
   like the auto-select exclusions and templates, it survives subscription updates. With REALITY, fingerprints without ML-KEM (ios,
   android, edge, 360, qq) are refused by an Xray 26 server.
 - A choice of ping tests: through the proxy with GET or HEAD (the request goes through the engine itself to
@@ -91,9 +92,17 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   templates survive subscription updates, and the selected server always comes first; the old "Only marked" marks
   became the template "Отмеченные". Latency threshold (500 ms by default, 0 turns it off): when the current server's
   checks show more than that twice in a row, auto-select moves to the group's fastest server below it, if that one is
-  clearly faster; when all are over it, the current one stays. New connections go through the first working one in order or through the one with the lowest delay. Servers
+  clearly faster; when all are over it, the current one stays. The template can also be switched on the home screen
+  (the "Серверы автовыбора" list under the routing choice), at once, with a reconnect. New connections go through the first working one in order or through the one with the lowest delay. Servers
   are checked with a request to `www.gstatic.com/generate_204` every minute and right after a failure; switching never
   drops open connections, and the current server shows under the connect button.
+- Interface: the settings are split into tabs (General, Connection, DNS, Routing, Ads, Auto-select, Apps on Android
+  only, TLS, Subscriptions), descriptions open with an ⓘ button. A "Сохранить / Отменить" bar shows only while some tab
+  has unsaved changes (PR #58, Finorion); a field with an error on another tab opens that tab. "Сбросить все
+  настройки" in General restores the defaults (servers, subscriptions, auto-select exclusions and templates stay). A
+  server row gives the name the full width, with protocol, transport and ping underneath; its actions (select, TLS
+  fingerprint, auto-select and templates, copy the name, delete) are in a "⋯" menu, which a long press or a right
+  click also opens. "О программе" closes the General tab, with a "Чаевые автору" (tip) link.
 - Speed and traffic statistics, a log, a tray icon, auto-connect.
 - Start at Windows login: a plain one through the user's `Run` entry; one with administrator rights (TUN needs them)
   through a Task Scheduler task at this user's logon, with no password and no UAC prompt. Only Unbihex running as
@@ -106,12 +115,17 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
 
 Works:
 
-- **VLESS** with TLS or REALITY, including XTLS Vision (`flow=xtls-rprx-vision`) and UDP over XUDP;
-  the TCP and XHTTP transports (packet-up, stream-up and stream-one over HTTP/2; packet-up also over HTTP/1.1),
-  WebSocket and HTTPUpgrade (without Vision and REALITY, as in Xray).
-- **VMess** (AEAD, as Xray's client) with or without TLS, TCP and UDP; the TCP, WebSocket and HTTPUpgrade
-  transports; the auto, aes-128-gcm and chacha20-poly1305 ciphers (`none` and `zero` act as `auto`, as in Xray 26.x).
-- **Trojan** with TLS or REALITY, TCP and UDP; the TCP, WebSocket and HTTPUpgrade transports.
+- **VLESS** with TLS or REALITY, including XTLS Vision (`flow=xtls-rprx-vision`); the TCP and XHTTP transports
+  (packet-up, stream-up and stream-one over HTTP/2; packet-up also over HTTP/1.1), WebSocket and HTTPUpgrade (without
+  Vision and REALITY, as in Xray), gRPC. UDP goes through one Mux.Cool connection per server with a session per app
+  socket (PR #53, pshakhmin; in the XUDP format with Vision); the "UDP через одно
+  соединение Mux.Cool" setting on the Connection tab, when off, gives every address its own connection. A server
+  without Mux.Cool gets plain VLESS UDP.
+- **VMess** (AEAD, as Xray's client) with or without TLS, TCP and UDP; the TCP, WebSocket, HTTPUpgrade
+  and gRPC transports; the auto, aes-128-gcm and chacha20-poly1305 ciphers (`none` and `zero` act as `auto`, as in Xray 26.x).
+- **Trojan** with TLS or REALITY, TCP and UDP; the TCP, WebSocket, HTTPUpgrade and gRPC transports.
+- gRPC is Xray's "gun" transport (`type=grpc`, `serviceName`, `authority`, `mode=multi`) over TLS, REALITY or TCP;
+  links and `grpcSettings` / sing-box's `grpc` transport from JSON subscriptions.
 - WebSocket and HTTPUpgrade send the request headers from the subscription (`headers`, such as a User-Agent), as Xray.
 - **TrustTunnel** over HTTP/2, TCP and UDP; `tt://` links and endpoint JSON profiles.
 - **NaiveProxy** over HTTP/2 with padding and Chrome's fingerprint; TCP only (the protocol has no UDP); `naive+https://`
@@ -185,7 +199,9 @@ unbihex-cli connect [--mode proxy|tun|system] [--routing global|bypass-ru|only-l
 
 `connect` runs until Ctrl-C or SIGTERM. The `proxy` mode (the default) opens local SOCKS5 and HTTP ports, `tun`
 captures all traffic of the machine (needs root, `ip` and `resolvectl`), `system` is the proxy plus GNOME's settings.
-Data lives in `~/.config/unbihex-cli` (or `--dir`, `$UNBIHEX_DIR`).
+Data lives in `~/.config/unbihex-cli` (or `--dir`, `$UNBIHEX_DIR`). There are no auto-select flags: the console
+client takes it from `settings` in `state.json` (`auto_select`, `auto_template`, `auto_threshold_ms`, see "Where data
+is stored").
 
 The console client comes in two builds with the same commands:
 - `unbihex-cli-<version>-linux-<arch>` — no menu, smaller: routers, NAS, Docker, scripts;
@@ -364,6 +380,23 @@ The app passes a ready engine JSON config to the extension; the extension starts
 `state.json` (subscriptions, servers, settings) in the app data folder:
 Windows — `%APPDATA%\com.unbihex.client`, Android/iOS — the app's internal folder.
 Server links contain access keys: do not publish this file.
+
+What it holds (fields an older file lacks get their defaults):
+
+- `subscriptions`, `servers`: subscriptions and servers. Besides its link a server has `fingerprint` (its own TLS
+  fingerprint, `null`: from the settings or the link) and `auto_excluded` (left out of auto-select's "All servers");
+  a server keeps its id across subscription updates, so these fields and the templates survive them.
+- `auto_templates`: auto-select templates, `[{"id", "name", "servers": [server id, …]}]`. The old `auto_marked`
+  marks and the `auto_group: "marked"` mode become the template "Отмеченные" the first time the file is opened.
+- `settings`: the settings. New in 0.2.9–0.2.10:
+  - `auto_select`: `off` / `fallback` / `least_ping`; `auto_template`: the active template's id, `null` for "All
+    servers"; `auto_threshold_ms`: the latency threshold (500, `0` turns it off), passed to the engine's balancer as
+    `latency_threshold_ms` (SPEC §11.16);
+  - `tls_fingerprint`: one fingerprint for all servers, empty for the link's own;
+  - `dns_upstream`: the remote DNS, `dns_direct`: the home DNS (empty: none), in the forms listed under "The engine's DNS"
+    above;
+  - `mux`: UDP through one Mux.Cool connection;
+  - `android_apps_mode`: `all` / `only` / `except`, `android_apps`: package names.
 
 ## Author and license
 
