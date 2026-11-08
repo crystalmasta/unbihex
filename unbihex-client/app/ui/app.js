@@ -476,7 +476,8 @@ let settingsTab = (() => {
   }
 })();
 
-// Shows one tab's sections; a hidden tab (Android-only on a desktop) falls back to the first.
+// Shows one tab's sections; a hidden or gone tab (Android-only on a desktop, the old
+// "О программе") falls back to the first.
 function showSettingsTab(name) {
   const tabs = $$("#settings-tabs .tab");
   if (!tabs.some((t) => t.dataset.tab === name && !t.hidden)) name = "general";
@@ -493,7 +494,6 @@ function showSettingsTab(name) {
   for (const el of $$("#view-settings [data-tab]:not(.tab)")) {
     el.classList.toggle("tab-off", el.dataset.tab !== name);
   }
-  $("#settings-actions").classList.toggle("tab-off", name === "about");
 }
 
 function fillSettings() {
