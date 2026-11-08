@@ -149,6 +149,14 @@
               </select>
             </label>
           </fieldset>
+          <fieldset data-tab="general">
+            <legend>Сброс</legend>
+            <div class="form-actions">
+              <button type="button" class="btn danger" id="settings-reset">Сбросить все настройки</button>
+              <button type="button" class="info-btn" data-info="i-reset" aria-label="Подробнее">ⓘ</button>
+            </div>
+            <p class="info" id="i-reset" hidden>Все настройки, в том числе режим, маршрутизация, DNS, списки сайтов и приложения в VPN, вернутся к значениям по умолчанию и сразу сохранятся. Серверы, подписки, выбранный сервер, отметки автовыбора и отпечатки отдельных серверов останутся; пароль для устройств в сети и идентификатор устройства не меняются.</p>
+          </fieldset>
 
           <fieldset data-tab="network">
             <legend>Туннель</legend>
@@ -183,7 +191,7 @@
             <p class="info" id="i-dns-upstream" hidden>Для сайтов через VPN.</p>
             <label><span class="lbl">Готовый набор</span>
               <select id="dns-preset">
-                <option value="">— выбрать —</option>
+                <option value="">Свой</option>
                 <option value="1.1.1.1, 8.8.8.8">Обычный DNS: Cloudflare и Google</option>
                 <option value="https://1.1.1.1/dns-query, https://1.0.0.1/dns-query">Cloudflare, DNS через HTTPS</option>
                 <option value="https://8.8.8.8/dns-query, https://8.8.4.4/dns-query">Google, DNS через HTTPS</option>
@@ -196,7 +204,7 @@
             <p class="info" id="i-dns-direct" hidden>Для сайтов напрямую. Пусто — удалённый DNS, напрямую.</p>
             <label><span class="lbl">Готовый набор</span>
               <select id="dns-direct-preset">
-                <option value="">— выбрать —</option>
+                <option value="">Свой</option>
                 <option value="-">Нет: спрашивать удалённый DNS напрямую</option>
                 <option value="77.88.8.8, 77.88.8.1">Яндекс DNS</option>
                 <option value="https://77.88.8.8/dns-query, https://77.88.8.1/dns-query">Яндекс, DNS через HTTPS</option>

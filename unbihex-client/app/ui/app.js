@@ -543,6 +543,21 @@ function fillSettings() {
   f.fragment_interval.value = s.fragment_interval;
   renderGeo();
   fillAdblock(s);
+  syncDnsPresets();
+}
+
+// DNS sets the lists offer; a list shows the one the field holds, else "Свой".
+const DNS_PRESETS = [["#dns-preset", "dns_upstream"], ["#dns-direct-preset", "dns_direct"]];
+const dnsKey = (v) => v.split(/[\s,;]+/).filter(Boolean).join(",").toLowerCase();
+
+function syncDnsPresets() {
+  const f = $("#settings-form");
+  for (const [sel, field] of DNS_PRESETS) {
+    const key = dnsKey(f[field].value);
+    // "-" stands for an empty field (no home DNS).
+    const opt = [...$(sel).options].find((o) => o.value && dnsKey(o.value === "-" ? "" : o.value) === key);
+    $(sel).value = opt ? opt.value : "";
+  }
 }
 
 // Ad-blocking lists offered by the client: [{ name, url, license }].
@@ -699,6 +714,25 @@ async function saveApps() {
 }
 
 /** The VPN service takes the app list when it starts: offer a reconnect after a change. */
+// Saves `settings` as the Save button does: a connected VPN restarts with them.
+async function applySettings(settings, done) {
+  const before = S.data.settings;
+  busy = S.status.connected;
+  let saved = false;
+  try {
+    await invoke("save_settings", { settings });
+    toast(done, "ok");
+    saved = true;
+  } catch (err) {
+    toast(String(err), "error");
+  } finally {
+    busy = false;
+    await refresh();
+    fillSettings();
+  }
+  if (saved) await offerAppsReconnect(before, settings);
+}
+
 async function offerAppsReconnect(before, after) {
   const apps = (s) => JSON.stringify([...(s.android_apps || [])].sort());
   const mode = (s) => s.android_apps_mode || "all";
@@ -940,24 +974,18 @@ function bind() {
     if (section && section.classList.contains("tab-off")) showSettingsTab(section.dataset.tab);
   }, true);
 
-  $("#settings-form").addEventListener("submit", async (e) => {
+  $("#settings-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const before = S.data.settings;
-    const settings = readSettings();
-    busy = S.status.connected;
-    let saved = false;
+    applySettings(readSettings(), "Настройки сохранены");
+  });
+  $("#settings-reset").addEventListener("click", async () => {
+    const restart = S.status.connected ? " Подключение перезапустится." : "";
+    if (!confirm(`Сбросить все настройки к значениям по умолчанию? Серверы, подписки и отметки автовыбора останутся.${restart}`)) return;
     try {
-      await invoke("save_settings", { settings });
-      toast("Настройки сохранены", "ok");
-      saved = true;
+      applySettings(await invoke("default_settings"), "Настройки сброшены");
     } catch (err) {
       toast(String(err), "error");
-    } finally {
-      busy = false;
-      await refresh();
-      fillSettings();
     }
-    if (saved) await offerAppsReconnect(before, settings);
   });
 
   $("#apps-pick").addEventListener("click", openAppsDialog);
@@ -973,11 +1001,12 @@ function bind() {
   $("#apps-save").addEventListener("click", saveApps);
   $("#fp-save").addEventListener("click", saveFp);
 
-  for (const [preset, field] of [["#dns-preset", "dns_upstream"], ["#dns-direct-preset", "dns_direct"]]) {
+  for (const [preset, field] of DNS_PRESETS) {
+    // The list keeps the picked set; "Свой" leaves the field as it is.
     $(preset).addEventListener("change", (e) => {
       if (e.target.value) $("#settings-form")[field].value = e.target.value === "-" ? "" : e.target.value;
-      e.target.value = "";
     });
+    $("#settings-form")[field].addEventListener("input", syncDnsPresets);
   }
   $("#settings-form").auto_start.addEventListener("change", (e) => {
     $("#settings-form").auto_start_admin.disabled = !e.target.checked;

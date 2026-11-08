@@ -645,6 +645,13 @@ async fn update_adblock(
 }
 
 /// The ad-blocking lists offered in the settings.
+/// The settings of a fresh install ("Сбросить все настройки"). The device id and the
+/// LAN password stay empty, so saving keeps the current ones.
+#[tauri::command]
+fn default_settings() -> Settings {
+    Settings { hwid: String::new(), lan_password: String::new(), ..Settings::default() }
+}
+
 #[tauri::command]
 fn adblock_presets() -> &'static [unbihex_client_core::adblock::Preset] {
     unbihex_client_core::adblock::PRESETS
@@ -1037,6 +1044,7 @@ pub fn run() {
             set_server_fingerprint,
             select_server,
             save_settings,
+            default_settings,
             set_ping_method,
             ping,
             connect,
