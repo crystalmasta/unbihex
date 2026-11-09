@@ -42,7 +42,11 @@ jobs:
           xcodebuild -version
       - name: Generate the Xcode project
         working-directory: unbihex-client/app/src-tauri
-        run: cargo tauri ios init --ci
+        run: |
+          cargo tauri ios init --ci
+          # Run through the npm CLI, init writes `node tauri ios xcode-script`; use the cargo-tauri shim instead.
+          sed -i '' 's|script: node tauri ios xcode-script|script: cargo tauri ios xcode-script|' gen/apple/project.yml
+          grep -q 'script: cargo tauri ios xcode-script' gen/apple/project.yml
       - name: Build libunbihex.a and add the PacketTunnel target
         working-directory: unbihex-client
         run: |

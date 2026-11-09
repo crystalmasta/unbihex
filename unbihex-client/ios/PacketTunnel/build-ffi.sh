@@ -5,6 +5,8 @@
 #   sh ios/PacketTunnel/build-ffi.sh ios      # device only (CI)
 set -e
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+# C code (ring) must target the same iOS as the extension (bundle.iOS.minimumSystemVersion).
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-15.0}"
 KINDS="${*:-ios sim}"
 mkdir -p ios/PacketTunnel/lib
 for kind in $KINDS; do
