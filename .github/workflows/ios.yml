@@ -5,7 +5,6 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
-    branches: ['ci/ios']
 permissions:
   contents: read
 concurrency:

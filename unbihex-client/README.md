@@ -344,28 +344,49 @@ cargo tauri android build --apk  # готовый APK
 
 ## Сборка для iOS
 
-Нужны Mac, Xcode и платный Apple Developer аккаунт (entitlement Network Extension
-недоступен для бесплатных аккаунтов).
+Подпись и установка на устройство требуют Mac, Xcode и платного Apple Developer аккаунта (entitlement
+Network Extension недоступен бесплатным аккаунтам). Без аккаунта сборку проверяет CI.
 
-1. Подготовка:
-   ```
-   rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-   cargo install tauri-cli --version "^2" --locked
-   cd app/src-tauri && cargo tauri ios init && cd ../..
-   sh ios/PacketTunnel/build-ffi.sh          # libunbihex.a + unbihex.h
-   ```
-2. Откройте `app/src-tauri/gen/apple/*.xcodeproj` в Xcode и добавьте таргет
-   **File → New → Target → Network Extension** с именем `PacketTunnel`,
-   Bundle ID = `<bundle id приложения>.tunnel` (по умолчанию `com.unbihex.client.tunnel`).
-3. В таргет `PacketTunnel`:
-   - замените сгенерированный `PacketTunnelProvider.swift` файлом из `ios/PacketTunnel/`;
-   - `Info.plist` и `PacketTunnel.entitlements` — из `ios/PacketTunnel/`;
-   - Build Settings → *Objective-C Bridging Header* = `…/ios/PacketTunnel/PacketTunnel-Bridging-Header.h`,
-     *Header Search Paths* — папка с `unbihex.h`;
-   - *Link Binary With Libraries*: `lib/libunbihex-ios.a` (для симулятора — `libunbihex-sim.a`).
-4. В основной таргет приложения добавьте capability **Network Extensions → Packet Tunnel**
-   (или `App.entitlements`).
-5. Запуск: `cargo tauri ios dev` или сборка из Xcode.
+**Сборка в CI.** Workflow `iOS build` (`.github/workflows/ios.yml`) запускается вручную (Actions → iOS build →
+Run workflow) и на тегах `v*`. Он генерирует Xcode-проект, добавляет расширение `PacketTunnel`, собирает архив
+**без подписи** и выкладывает артефакт `Unbihex-ios-unsigned`: `Unbihex-<версия>-ios-unsigned.ipa`
+(`Payload/Unbihex.app` с `PlugIns/PacketTunnel.appex`) и `SHA256SUMS.txt`. Такой .ipa доказывает, что
+приложение и расширение компилируются и линкуются; установить его на iPhone нельзя. Секреты не нужны.
+
+**Те же шаги на Mac** (из `unbihex-client/`):
+```
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+cargo install tauri-cli --version 2.11.4 --locked   # та же версия, что в CI
+brew install xcodegen
+cd app/src-tauri && cargo tauri ios init && cd ../..
+sh ios/PacketTunnel/build-ffi.sh          # libunbihex-{ios,sim}.a + unbihex.h (`ios` — только устройство)
+ruby ios/add-packet-tunnel.rb             # таргет PacketTunnel, пересборка проекта через xcodegen
+```
+`ios/add-packet-tunnel.rb` заменяет ручную настройку в Xcode: добавляет в `gen/apple/project.yml` таргет
+app extension `PacketTunnel` (Bundle ID `<id приложения>.tunnel`, по умолчанию `com.unbihex.client.tunnel`;
+`PacketTunnelProvider.swift`, `Info.plist`, `PacketTunnel.entitlements` и bridging header из
+`ios/PacketTunnel/`, `libunbihex-ios.a` / `libunbihex-sim.a`), встраивает его в приложение, добавляет приложению
+capability Packet Tunnel и `SystemConfiguration.framework` и перегенерирует `.xcodeproj`. Запускать после каждого
+`cargo tauri ios init`; повторный запуск безопасен. Дальше — `cargo tauri ios dev` / `cargo tauri ios build`
+или сборка из Xcode. CI вызывает скрипт с `--prebuilt-rust`: фаза «Build Rust Code» (`tauri ios xcode-script`)
+работает только под `cargo tauri ios build/dev`, поэтому CI собирает `libapp.a` сам
+(`cargo build --release -p unbihex-client --lib --target aarch64-apple-ios`) и кладёт её в
+`gen/apple/Externals/arm64/release/`. `gen/apple` в репозиторий не коммитится.
+
+`libc` в `Cargo.lock` закреплён на 0.2.189: с libc ≥ 0.2.190 `netdev` не собирается под iOS (нет
+`in6_ifreq`, shellrow/netdev#192). Не обновляйте libc, пока это не исправлено в netdev.
+
+**Как добавить подпись**, когда появится аккаунт:
+1. Зарегистрируйте App ID `com.unbihex.client` и `com.unbihex.client.tunnel` с capability Network Extensions,
+   создайте сертификат Apple Distribution и два профиля (App Store) для этих ID.
+2. Добавьте секреты репозитория: `IOS_CERT_P12_BASE64`, `IOS_CERT_PASSWORD`, `IOS_PROFILE_APP_BASE64`,
+   `IOS_PROFILE_TUNNEL_BASE64`, `APPLE_TEAM_ID` и ключ App Store Connect API: `ASC_KEY_ID`, `ASC_ISSUER_ID`,
+   `ASC_KEY_P8_BASE64`.
+3. В `ios.yml` раскомментируйте блок «Signing and TestFlight»: импорт сертификата и профилей во временную
+   связку ключей и экспорт архива с выгрузкой в TestFlight. В шаге архивации замените
+   `CODE_SIGNING_ALLOWED=NO …` на `DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual` и укажите
+   профили (`PROVISIONING_PROFILE_SPECIFIER` для каждого таргета). Команду можно задать и в
+   `bundle.iOS.developmentTeam` в `tauri.conf.json`: скрипт копирует её в таргет `PacketTunnel`.
 
 Приложение передаёт расширению готовый JSON-конфиг ядра; расширение запускает ядро через
 `unbihex_start(config, utun_fd, NULL, NULL)`. Лимит памяти Network Extension — около 50 МБ.
