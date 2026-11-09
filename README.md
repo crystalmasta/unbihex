@@ -48,7 +48,9 @@ Windows SmartScreen может предупредить о неизвестно�
   VMess (#37), TrustTunnel (#38);
 - [emiliya-central-uni](https://github.com/emiliya-central-uni) — разбор hosts-списков (#31);
 - [Finorion](https://github.com/Finorion) — значки трея (#43), плашка сохранения настроек (#58);
-- [akurach](https://github.com/akurach) — сборка для macOS (#50), плитка быстрых настроек Android (#51).
+- [akurach](https://github.com/akurach) — сборка для macOS (#50), плитка быстрых настроек Android (#51);
+- [fenIXCoRp30](https://github.com/fenIXCoRp30) — идеи и сообщения об ошибках (#14, #15, #16, #27, #28, #30, #48, #57),
+  проверка тестовых сборок.
 
 ## Автор и лицензия
 

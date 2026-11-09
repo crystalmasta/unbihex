@@ -49,7 +49,9 @@ Thanks to everyone whose changes are in the project:
   Android (#36), VMess (#37), TrustTunnel (#38);
 - [emiliya-central-uni](https://github.com/emiliya-central-uni) — the hosts list parser (#31);
 - [Finorion](https://github.com/Finorion) — tray icons (#43), the settings save bar (#58);
-- [akurach](https://github.com/akurach) — the macOS build (#50), the Android quick settings tile (#51).
+- [akurach](https://github.com/akurach) — the macOS build (#50), the Android quick settings tile (#51);
+- [fenIXCoRp30](https://github.com/fenIXCoRp30) — ideas and bug reports (#14, #15, #16, #27, #28, #30, #48, #57),
+  testing of test builds.
 
 ## Author and license
 
