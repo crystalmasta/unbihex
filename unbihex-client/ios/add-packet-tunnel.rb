@@ -7,13 +7,17 @@
 #
 #   cd unbihex-client
 #   sh ios/PacketTunnel/build-ffi.sh          # ios/PacketTunnel/lib/libunbihex-{ios,sim}.a
-#   ruby ios/add-packet-tunnel.rb [gen/apple]
+#   ruby ios/add-packet-tunnel.rb [--prebuilt-rust] [gen/apple]
+#
+# --prebuilt-rust drops the "Build Rust Code" phase (`tauri ios xcode-script`, which only works under
+# `cargo tauri ios build/dev`); the caller then puts libapp.a into gen/apple/Externals/arm64/<configuration>/.
 
 require 'json'
 require 'open3'
 require 'pathname'
 require 'yaml'
 
+PREBUILT_RUST = !ARGV.delete('--prebuilt-rust').nil?
 CLIENT = File.expand_path('..', __dir__)
 APPLE = File.expand_path(ARGV[0] || File.join(CLIENT, 'app/src-tauri/gen/apple'))
 SPEC = File.join(APPLE, 'project.yml')
@@ -90,6 +94,11 @@ unless ent['properties']
     end
 end
 ent['properties'][NE_KEY] = ['packet-tunnel-provider']
+
+if PREBUILT_RUST
+  app['preBuildScripts']&.reject! { |s| s['script'].to_s.include?('ios xcode-script') }
+  app.delete('preBuildScripts') if app['preBuildScripts']&.empty?
+end
 
 File.write(SPEC, spec.to_yaml)
 Dir.chdir(APPLE) { system('xcodegen', 'generate', '--spec', SPEC) || abort('xcodegen завершился с ошибкой') }

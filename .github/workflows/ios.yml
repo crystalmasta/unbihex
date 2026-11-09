@@ -15,6 +15,9 @@ jobs:
   build:
     runs-on: macos-latest
     timeout-minutes: 60
+    env:
+      # bundle.iOS.minimumSystemVersion in tauri.conf.json.
+      IPHONEOS_DEPLOYMENT_TARGET: '15.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
         with:
@@ -28,30 +31,22 @@ jobs:
           rustup override set 1.99.1
           # Keep in step with the `tauri` crate in unbihex-client/Cargo.lock (as macos.yml and android.yml).
           npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-package-lock --no-audit --no-fund --ignore-scripts @tauri-apps/cli@2.11.4
-          # The generated Xcode build phase invokes `cargo tauri ios xcode-script`.
-          mkdir -p "$RUNNER_TEMP/tauri-bin"
-          cat > "$RUNNER_TEMP/tauri-bin/cargo-tauri" <<'SH'
-          #!/bin/sh
-          if [ "$1" = tauri ]; then shift; fi
-          exec "$RUNNER_TEMP/tauri-cli/node_modules/.bin/tauri" "$@"
-          SH
-          chmod +x "$RUNNER_TEMP/tauri-bin/cargo-tauri"
-          echo "$RUNNER_TEMP/tauri-bin" >> "$GITHUB_PATH"
           command -v xcodegen || brew install xcodegen
           echo "VERSION=$(node -p 'require("./unbihex-client/app/src-tauri/tauri.conf.json").version')" >> "$GITHUB_ENV"
           xcodebuild -version
       - name: Generate the Xcode project
         working-directory: unbihex-client/app/src-tauri
-        run: |
-          cargo tauri ios init --ci
-          # Run through the npm CLI, init writes `node tauri ios xcode-script`; use the cargo-tauri shim instead.
-          sed -i '' 's|script: node tauri ios xcode-script|script: cargo tauri ios xcode-script|' gen/apple/project.yml
-          grep -q 'script: cargo tauri ios xcode-script' gen/apple/project.yml
-      - name: Build libunbihex.a and add the PacketTunnel target
+        run: '"$RUNNER_TEMP/tauri-cli/node_modules/.bin/tauri" ios init --ci'
+      - name: Build Rust libraries and add the PacketTunnel target
         working-directory: unbihex-client
         run: |
+          # The app library: what `tauri ios xcode-script` builds, which needs a running `tauri ios build`.
+          cargo build --release --locked -p unbihex-client --lib --target aarch64-apple-ios
+          mkdir -p app/src-tauri/gen/apple/Externals/arm64/release
+          cp target/aarch64-apple-ios/release/libunbihex_client_lib.a app/src-tauri/gen/apple/Externals/arm64/release/libapp.a
+          # The extension library.
           sh ios/PacketTunnel/build-ffi.sh ios
-          ruby ios/add-packet-tunnel.rb
+          ruby ios/add-packet-tunnel.rb --prebuilt-rust
       - name: Archive without signing
         working-directory: unbihex-client/app/src-tauri/gen/apple
         run: |
