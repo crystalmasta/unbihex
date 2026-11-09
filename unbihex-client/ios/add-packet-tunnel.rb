@@ -80,6 +80,8 @@ targets[TUNNEL] = {
 deps = (app['dependencies'] ||= [])
 deps.reject! { |d| d['target'] == TUNNEL }
 deps << { 'target' => TUNNEL, 'embed' => true }
+# netdev (engine, client-core) calls SystemConfiguration.
+deps << { 'sdk' => 'SystemConfiguration.framework' } unless deps.any? { |d| d['sdk'] == 'SystemConfiguration.framework' }
 
 # The app needs the Packet Tunnel capability too; keep what the entitlements file already has.
 ent = (app['entitlements'] ||= { 'path' => "#{app_name}/#{app_name}.entitlements" })
