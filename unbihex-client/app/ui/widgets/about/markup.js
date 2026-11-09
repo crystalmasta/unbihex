@@ -7,7 +7,7 @@ export const aboutMarkup = `        <section class="about-card" aria-labelledby=
               <div class="about-title">Unbihex</div>
               <p class="about-desc">VPN-клиент на собственном ядре.</p>
               <p class="about-author">Автор: Crystalmasta · <a href="#" class="link" data-href="https://github.com/crystalmasta">github.com/crystalmasta</a></p>
-              <p class="about-author"><a href="#" class="link" data-href="https://pay.cloudtips.ru/p/30bf8669">Чаевые автору</a></p>
+              <p class="about-author"><a href="#" class="link" data-href="https://pay.cloudtips.ru/p/30bf8669">Поддержать автора</a></p>
               <p class="about" id="about"></p>
             </div>
           </div>

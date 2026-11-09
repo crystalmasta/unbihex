@@ -1,4 +1,4 @@
-// The settings screen: tabs, the form (one fieldset group per tab), the save bar, "О программе".
+// The settings screen: tabs, the form (one fieldset group per tab), the save bar; "О программе" on top of «Общие».
 import { aboutMarkup } from "../../widgets/about/index.js";
 import { saveBarMarkup } from "../../widgets/save-bar/index.js";
 import { settingsTabsMarkup } from "../../widgets/settings-tabs/index.js";
@@ -15,6 +15,7 @@ import { tlsMarkup } from "./tabs/tls.js";
 export const settingsMarkup = `\n${[
   `        <header class="view-head"><h1>Настройки</h1></header>`,
   settingsTabsMarkup,
+  aboutMarkup,
   `        <form id="settings-form" class="settings" autocomplete="off">`,
   generalMarkup,
   networkMarkup,
@@ -27,5 +28,4 @@ export const settingsMarkup = `\n${[
   subsTabMarkup,
   saveBarMarkup,
   `        </form>`,
-  aboutMarkup,
 ].join("\n")}\n      `;

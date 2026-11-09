@@ -102,7 +102,7 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   настройки" in General restores the defaults (servers, subscriptions, auto-select exclusions and templates stay). A
   server row gives the name the full width, with protocol, transport and ping underneath; its actions (select, TLS
   fingerprint, auto-select and templates, copy the name, delete) are in a "⋯" menu, which a long press or a right
-  click also opens. "О программе" closes the General tab, with a "Чаевые автору" (tip) link.
+  click also opens. "О программе" opens the General tab, with a "Поддержать автора" (support the author) link.
 - Speed and traffic statistics, a log, a tray icon, auto-connect.
 - Start at Windows login: a plain one through the user's `Run` entry; one with administrator rights (TUN needs them)
   through a Task Scheduler task at this user's logon, with no password and no UAC prompt. Only Unbihex running as

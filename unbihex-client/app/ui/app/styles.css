@@ -278,7 +278,7 @@ label.check input { width: 18px; height: 18px; margin: 1px 0 0; flex: none; acce
 .lan-auth { display: grid; gap: 10px; }
 .lan-auth .hint { margin: 0; }
 .lan-auth input[readonly] { background: var(--surface-2); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px; }
-.about-card { margin-top: 14px; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
+.about-card { margin: 0 0 14px; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
 .about-head { font-size: 14px; font-weight: 600; margin: 0; }
 .about-row { display: flex; align-items: flex-start; gap: 14px; }
 .about-logo { width: 48px; height: 48px; flex: none; }
