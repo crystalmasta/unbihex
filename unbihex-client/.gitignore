@@ -11,3 +11,6 @@
 *.aab
 *.jks
 *.keystore
+# Made by ios/PacketTunnel/build-ffi.sh.
+/ios/PacketTunnel/lib/
+/ios/PacketTunnel/unbihex.h
