@@ -171,7 +171,7 @@ unbihex-client/
 Скачать — в [релизах на GitHub](https://github.com/crystalmasta/unbihex/releases/latest).
 Локально сборки складываются в папку `dist/` (её нет в репозитории):
 
-- `dist/Unbihex-0.2.10-setup.exe` — установщик для Windows 10/11 x64 (NSIS, `installer/build.sh`).
+- `dist/Unbihex-0.2.11-setup.exe` — установщик для Windows 10/11 x64 (NSIS, `installer/build.sh`).
 - `dist/Unbihex-windows/Unbihex.exe` — портативная версия; рядом должен лежать `wintun.dll`.
   Сборка MSVC со статическим CRT: Visual C++ Redistributable не нужен, WebView2Loader вшит в exe.
 - `dist/macos-arm64/Unbihex-<версия>-macos-arm64.zip` — неофициальная сборка для macOS на Apple Silicon
@@ -295,7 +295,7 @@ build → Run workflow) и на тегах `v*`; результат — арте
    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p unbihex-client --target x86_64-pc-windows-msvc
    MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe" sh installer/build.sh
    ```
-   Готовый файл: `installer\Unbihex-0.2.10-setup.exe`.
+   Готовый файл: `installer\Unbihex-0.2.11-setup.exe`.
 
 Режим TUN требует запуска от администратора — в приложении есть кнопка
 «Перезапустить от администратора». Известное ограничение Windows: система может параллельно

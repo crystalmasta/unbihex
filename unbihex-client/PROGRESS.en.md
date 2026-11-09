@@ -179,6 +179,11 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   any subscriptions; the marks survive subscription updates.
 - Links and JSON subscriptions: `fm` (Xray's finalmask) fragments the TLS ClientHello, as in Xray 26.10.31.
 
+## 09.11 — client 0.2.11, engine 0.1.9 (unchanged)
+- The UI is laid out by Feature-Sliced Design on native ES modules, no bundler: 92 modules in the app / pages / widgets / features / entities / shared layers, backend calls only in `shared/api`. Rules in `app/ui/ARCHITECTURE.md`, import check `node app/ui/tools/check-imports.mjs`. Behaviour and look are unchanged.
+- "О программе" opens the General tab, with a "Поддержать автора" (support the author) link.
+- Android: a separate build for 32-bit phones (armeabi-v7a).
+
 ## 08.11 — client 0.2.10, engine 0.1.9
 - Subscriptions: when the panel cannot be reached directly (a mobile carrier's whitelist) and the VPN is up, the
   request is repeated through the current server with the same headers.

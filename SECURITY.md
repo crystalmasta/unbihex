@@ -10,7 +10,7 @@
 
 | Компонент | Версия |
 |---|---|
-| Клиент Unbihex (Windows, Android, `unbihex-cli`) | 0.2.x (последняя 0.2.10) |
+| Клиент Unbihex (Windows, Android, `unbihex-cli`) | 0.2.x (последняя 0.2.11) |
 | Неофициальная сборка для macOS | не поддерживается |
 | Ядро `unbihex-engine` | 0.1.x (последняя 0.1.9) |
 | `test_server` | не поддерживается: только для тестов |
@@ -37,7 +37,7 @@ Security fixes are released for the latest versions:
 
 | Component | Version |
 |---|---|
-| Unbihex client (Windows, Android, `unbihex-cli`) | 0.2.x (latest 0.2.10) |
+| Unbihex client (Windows, Android, `unbihex-cli`) | 0.2.x (latest 0.2.11) |
 | Unofficial macOS build | not supported |
 | `unbihex-engine` | 0.1.x (latest 0.1.9) |
 | `test_server` | not supported: for tests only |
