@@ -21,6 +21,10 @@ export function renderHome() {
   const st = S.status;
   const card = $("#connect-card");
   card.dataset.state = busy ? "busy" : st.connected ? "on" : "off";
+  // Operator whitelists (#57): the button turns amber, a label under the status.
+  const whitelist = Boolean(S.data.whitelist && S.data.whitelist.active);
+  card.classList.toggle("whitelist", whitelist);
+  $("#wl-badge").hidden = !whitelist;
   const sel = selectedServer();
   // Connected: the server in use (with auto-select, the balancer's pick now) —
   // the same name as in the tray, the Android notification and the tile.

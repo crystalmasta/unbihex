@@ -14,4 +14,5 @@ export function listenBackend() {
   onBackendEvent("toast", (e) => toast(String(e.payload), "error"));
   onBackendEvent("autostart-admin", () => askAutostartAdmin());
   onBackendEvent("update-available", (e) => announceUpdate(e.payload));
+  onBackendEvent("whitelist", (e) => toast(String(e.payload), "ok"));
 }

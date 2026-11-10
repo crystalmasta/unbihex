@@ -21,6 +21,7 @@ export { readSettings } from "./read.js";
 export { renderAdblock, setAdblockPresets } from "./adblock.js";
 export { renderGeo } from "./geo.js";
 export { renderTemplates } from "./templates.js";
+export { renderNetwork } from "./whitelist.js";
 
 export function mountSettings() {
   $("#view-settings").innerHTML = settingsMarkup;

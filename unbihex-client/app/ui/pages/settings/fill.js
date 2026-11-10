@@ -32,7 +32,11 @@ export function fillSettings() {
   f.udp_mux.checked = s.mux !== false;
   f.user_agent.value = s.user_agent;
   f.auto_select.value = s.auto_select || "off";
-  renderTemplates(s.auto_template || "");
+  renderTemplates(s.auto_template || "", s.whitelist_template || "");
+  f.whitelist_mode.value = s.whitelist_mode || "auto";
+  f.whitelist_routing.value = s.whitelist_routing || "";
+  f.whitelist_allowed.value = (s.whitelist_allowed || []).join("\n");
+  f.whitelist_blocked.value = (s.whitelist_blocked || []).join("\n");
   f.auto_threshold_ms.value = s.auto_threshold_ms ? s.auto_threshold_ms : "";
   f.send_hwid.checked = s.send_hwid;
   f.device_name.value = s.device_name || "";

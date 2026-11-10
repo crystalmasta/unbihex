@@ -6,8 +6,9 @@ import { templates } from "../../entities/template/index.js";
 import { openTemplateDialog } from "../../features/template-edit/index.js";
 import { checkSettingsDirty } from "./dirty.js";
 
-// `value` is the template to show as chosen ("" — all servers); without it the picker keeps its choice.
-export function renderTemplates(value) {
+// `value` is the template to show as chosen ("" — all servers), `wlValue` the one
+// for whitelists ("" — none); without them the pickers keep their choice.
+export function renderTemplates(value, wlValue) {
   const S = store.S;
   const sel = $("#auto-template");
   const want = value ?? sel.value;
@@ -15,6 +16,13 @@ export function renderTemplates(value) {
     sel,
     [["", "Все серверы (подписка, кроме исключённых)"], ...templates().map((t) => [t.id, `Шаблон «${t.name}»`])],
     templates().some((t) => t.id === want) ? want : "",
+  );
+  const wl = $("#wl-template");
+  const wlWant = wlValue ?? wl.value;
+  fillSelect(
+    wl,
+    [["", "Не переключать"], ...templates().map((t) => [t.id, `Шаблон «${t.name}»`])],
+    templates().some((t) => t.id === wlWant) ? wlWant : "",
   );
   $("#templates-list").innerHTML = templates()
     .map((t) => {

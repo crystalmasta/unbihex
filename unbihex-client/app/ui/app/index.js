@@ -51,6 +51,7 @@ onRender("about", renderAbout);
 onRender("update", () => showUpdate(store.S.update));
 onRender("settings-template", settings.syncSavedTemplate);
 onRender("adblock", settings.renderAdblock);
+onRender("network", settings.renderNetwork);
 
 // Signals from lower layers.
 on("navigate", switchView);

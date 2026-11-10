@@ -150,6 +150,16 @@ select option { background: var(--surface); color: var(--text); }
 .status-text { font-size: 20px; font-weight: 700; margin-top: 18px; }
 .connect-card[data-state=on] .status-text { color: var(--ok); }
 .status-sub { color: var(--muted); margin-top: 2px; min-height: 20px; }
+/* Operator whitelists (#57): amber button and a label under the status. */
+.wl-badge {
+  margin-top: 8px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: var(--warn-soft); color: var(--warn);
+}
+.connect-card.whitelist .power { box-shadow: inset 0 0 0 6px var(--warn); color: var(--warn); }
+.connect-card.whitelist[data-state=on] .power {
+  background: linear-gradient(160deg, var(--warn), #ea580c); color: #fff;
+  box-shadow: 0 0 0 8px var(--warn-soft), 0 10px 30px rgba(234, 88, 12, .35);
+}
 .server-chip {
   margin-top: 18px; display: flex; align-items: center; gap: 10px; width: 100%; max-width: 420px;
   border: 1px solid var(--border); background: var(--surface-2); border-radius: 12px; padding: 10px 14px; cursor: pointer; text-align: left;

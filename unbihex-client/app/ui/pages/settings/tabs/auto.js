@@ -22,4 +22,32 @@ export const autoMarkup = `          <fieldset data-tab="auto">
             <div id="templates-list" class="tpl-list"></div>
             <div class="form-actions"><button type="button" class="btn" id="tpl-new">Новый шаблон…</button></div>
           </fieldset>
+
+          <fieldset data-tab="auto">
+            <legend>При белых списках<button type="button" class="info-btn" data-info="i-whitelist" aria-label="Подробнее">ⓘ</button></legend>
+            <p class="info" id="i-whitelist" hidden>Белые списки — когда мобильный оператор пропускает только разрешённые сайты и адреса. Unbihex проверяет это напрямую, в обход VPN: соединение и начало TLS с сайтами из белого списка и с остальными, по 3 секунды, все сразу. Белые открываются, а большинство остальных нет — белые списки; открывается всё — обычная сеть; не открываются и белые — сети нет, ничего не меняется. Состояние меняется после двух одинаковых проверок подряд. Проверки — раз в минуту, пока открыто окно или включён экран, раз в 5 минут в фоне, сразу при смене сети и после нескольких обрывов соединений подряд. Пока режим включён, кнопка подключения жёлтая, под ней — «Белые списки» (на Android и в уведомлении). Шаблон и маршрутизация ниже включаются на это время; потом возвращаются прежние, если вы их не меняли сами. Без шаблона и маршрутизации — только индикатор.</p>
+            <label><span class="lbl">Режим</span>
+              <select name="whitelist_mode">
+                <option value="auto">Определять автоматически</option>
+                <option value="on">Всегда включён</option>
+                <option value="off">Выключен</option>
+              </select>
+            </label>
+            <p class="hint" id="wl-status"></p>
+            <label><span class="lbl">Шаблон автовыбора</span>
+              <select name="whitelist_template" id="wl-template"></select>
+            </label>
+            <label><span class="lbl">Маршрутизация</span>
+              <select name="whitelist_routing">
+                <option value="">Не менять</option>
+                <option value="global">Всё через VPN</option>
+                <option value="bypass_ru">Россия напрямую</option>
+                <option value="only_listed">Только выбранные сайты</option>
+                <option value="blocked_only">Только заблокированные</option>
+              </select>
+            </label>
+            <label><span class="lbl">Сайты из белого списка<button type="button" class="info-btn" data-info="i-wl-hosts" aria-label="Подробнее">ⓘ</button></span><textarea name="whitelist_allowed" rows="3" placeholder="ya.ru&#10;vk.com&#10;gosuslugi.ru"></textarea></label>
+            <p class="info" id="i-wl-hosts" hidden>По одному на строку: <code>сайт</code>, <code>сайт:порт</code> или <code>IP:порт</code> (порт 443, если не указан). Пусто — значения по умолчанию, как в подсказке.</p>
+            <label><span class="lbl">Сайты не из списка</span><textarea name="whitelist_blocked" rows="3" placeholder="google.com&#10;cloudflare.com&#10;1.1.1.1&#10;8.8.8.8&#10;9.9.9.9"></textarea></label>
+          </fieldset>
 `;
