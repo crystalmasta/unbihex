@@ -411,7 +411,11 @@ Windows — `%APPDATA%\com.unbihex.client`, Android/iOS — внутренняя
   - `tls_fingerprint` — отпечаток для всех серверов, пусто — как в ссылке;
   - `dns_upstream` — удалённый DNS, `dns_direct` — домашний (пусто — нет), в форматах из «DNS ядра» выше;
   - `mux` — UDP через одно соединение Mux.Cool;
-  - `android_apps_mode` — `all` / `only` / `except`, `android_apps` — имена пакетов.
+  - `android_apps_mode` — `all` / `only` / `except`, `android_apps` — имена пакетов;
+  - (0.2.11) `fragment_preset` — фрагментация ClientHello для всех серверов с TLS/REALITY: `off` (по умолчанию) /
+    `light` / `medium` / `aggressive` / `custom`; для `custom` — `fragment_length`, `fragment_interval` (диапазоны
+    «от-до») и `fragment_sni` (разрез посреди имени сервера); своя фрагментация подписки (`fm`) главнее. Старый
+    `fragment: true` при чтении становится `custom` (SPEC ядра §11.6).
 
 ## Автор и лицензия
 

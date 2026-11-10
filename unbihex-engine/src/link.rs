@@ -689,6 +689,7 @@ mod tests {
         let want = crate::outbound::fragment::FragmentConfig {
             length: "10-20".into(),
             interval: "0".into(),
+            sni_split: false,
         };
         for link in [
             format!("vless://{UUID}@h.com:443?{q}"),

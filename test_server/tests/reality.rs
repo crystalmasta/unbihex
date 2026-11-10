@@ -340,6 +340,7 @@ async fn reality_reassembles_a_fragmented_hello() {
     let fragment = FragmentConfig {
         length: "50-90".into(),
         interval: "1-3".into(),
+        sni_split: false,
     };
     let ob = client(&s, PLAIN_USER, SHORT_ID, Some("chrome")).with_fragment(Some(fragment));
     echo_through(&ob, echo, 1000).await;

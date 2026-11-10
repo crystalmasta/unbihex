@@ -417,7 +417,11 @@ What it holds (fields an older file lacks get their defaults):
   - `dns_upstream`: the remote DNS, `dns_direct`: the home DNS (empty: none), in the forms listed under "The engine's DNS"
     above;
   - `mux`: UDP through one Mux.Cool connection;
-  - `android_apps_mode`: `all` / `only` / `except`, `android_apps`: package names.
+  - `android_apps_mode`: `all` / `only` / `except`, `android_apps`: package names;
+  - (0.2.11) `fragment_preset`: ClientHello fragmentation for every TLS/REALITY server: `off` (the default) /
+    `light` / `medium` / `aggressive` / `custom`; `custom` takes `fragment_length`, `fragment_interval` ("from-to"
+    ranges) and `fragment_sni` (the cut inside the server name); a subscription's own fragmentation (`fm`) wins. The
+    old `fragment: true` becomes `custom` when the file is read (engine SPEC §11.6).
 
 ## Author and license
 

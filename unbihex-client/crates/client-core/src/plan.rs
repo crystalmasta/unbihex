@@ -317,11 +317,13 @@ fn proxy_outbounds(servers: &[Server], settings: &Settings) -> Result<Vec<Value>
 fn proxy_outbound(server: &Server, settings: &Settings) -> Result<Value> {
     let mut ob = outbound_json_with(server, settings.mux, &settings.tls_fingerprint)?;
     let tls_like = server.transport.contains("tls") || server.transport.contains("reality");
-    if settings.fragment && server.protocol == "vless" && tls_like {
-        ob["fragment"] = json!({
-            "length": settings.fragment_length.trim(),
-            "interval": settings.fragment_interval.trim(),
-        });
+    // The engine keeps a link's own fragmentation (`fm`) over this one.
+    let fragmentable = matches!(server.protocol.as_str(), "vless" | "vmess" | "trojan" | "trusttunnel");
+    if tls_like
+        && fragmentable
+        && let Some(f) = settings.fragment_config()
+    {
+        ob["fragment"] = f;
     }
     Ok(ob)
 }
@@ -441,6 +443,7 @@ pub fn build_config(servers: &[Server], settings: &Settings, geo: &Geo, target: 
 mod tests {
     use super::*;
     use crate::links::parse_server;
+    use crate::model::FragmentPreset;
     use unbihex_engine::config::InboundConfig;
 
     fn server() -> Server {
@@ -716,17 +719,49 @@ mod tests {
 
     #[test]
     fn fragmentation_setting() {
+        let json = |s: &Settings, servers: &[Server]| -> serde_json::Value {
+            serde_json::from_str(&build_config_json(servers, s, &Geo::default(), Target::DesktopProxy).unwrap()).unwrap()
+        };
+        assert!(json(&Settings::default(), &[server()])["outbounds"][0].get("fragment").is_none(), "off by default");
         let s = Settings {
-            fragment: true,
+            fragment_preset: FragmentPreset::Custom,
+            fragment_sni: true,
             ..Default::default()
         };
-        let json: serde_json::Value = serde_json::from_str(
-            &build_config_json(&[server()], &s, &Geo::default(), Target::DesktopProxy).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(json["outbounds"][0]["fragment"]["length"], "100-200");
+        let f = &json(&s, &[server()])["outbounds"][0]["fragment"];
+        assert_eq!(
+            (f["length"].as_str(), f["interval"].as_str(), f["sni_split"].as_bool()),
+            (Some("100-200"), Some("10-20"), Some(true))
+        );
+        // Every TLS/REALITY server of an auto-select group, not plain ones or QUIC.
+        let s = Settings {
+            fragment_preset: FragmentPreset::Medium,
+            auto_select: AutoSelect::Fallback,
+            ..Default::default()
+        };
+        let servers: Vec<Server> = [
+            "vmess://11111111-1111-1111-1111-111111111111@v.example:443?type=ws&security=tls#V",
+            "trojan://pw@t.example:443?type=grpc&serviceName=s#T",
+            "vless://11111111-1111-1111-1111-111111111111@r.example:443?security=reality&pbk=wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE#R",
+            "ss://YWVzLTEyOC1nY206cHc@s.example:8388#S",
+            "hy2://pw@h.example:443#H",
+        ]
+        .iter()
+        .map(|l| parse_server(l).unwrap())
+        .collect();
+        let j = json(&s, &servers);
+        let frag: Vec<bool> = (0..5).map(|i| j["outbounds"][i]["fragment"].is_object()).collect();
+        assert_eq!(frag, [true, true, true, false, false]);
+        assert_eq!(j["outbounds"][0]["fragment"]["length"], "10-100");
+        assert_eq!(j["outbounds"][0]["fragment"]["sni_split"], true);
+        // A state from 0.2.10 with the switch on: the custom ranges.
+        let mut old: Settings = serde_json::from_value(serde_json::json!({"fragment": true, "fragment_length": "20-40"})).unwrap();
+        assert!(old.migrate_fragment());
+        assert_eq!(old.fragment_preset, FragmentPreset::Custom);
+        assert!(serde_json::to_value(&old).unwrap().get("fragment").is_none());
+        assert!(!old.migrate_fragment());
         let bad = Settings {
-            fragment: true,
+            fragment_preset: FragmentPreset::Custom,
             fragment_length: "0-1".into(),
             ..Default::default()
         };

@@ -20,11 +20,23 @@ export const tlsMarkup = `          <fieldset data-tab="tls">
           </fieldset>
           <fieldset data-tab="tls">
             <legend>Обход DPI</legend>
-            <label class="check"><input name="fragment" type="checkbox" /> <span>Дробить TLS ClientHello<button type="button" class="info-btn" data-info="i-fragment" aria-label="Подробнее">ⓘ</button></span></label>
-            <p class="info" id="i-fragment" hidden>ClientHello уходит мелкими частями (VLESS с TLS или REALITY).</p>
-            <div class="row">
-              <label><span class="lbl">Размер частей, байт</span><input name="fragment_length" placeholder="100-200" /></label>
-              <label><span class="lbl">Пауза между частями, мс</span><input name="fragment_interval" placeholder="10-20" /></label>
+            <label><span class="lbl">Фрагментация ClientHello<button type="button" class="info-btn" data-info="i-fragment" aria-label="Подробнее">ⓘ</button></span>
+              <select name="fragment_preset">
+                <option value="off">Выкл</option>
+                <option value="light">Лёгкая</option>
+                <option value="medium">Средняя</option>
+                <option value="aggressive">Агрессивная</option>
+                <option value="custom">Своя</option>
+              </select>
+            </label>
+            <p class="info" id="i-fragment" hidden>Первое сообщение TLS (ClientHello, в нём имя сайта) уходит частями: каждая часть — отдельная запись TLS и отдельный пакет TCP с паузой, как <code>fragment</code> в Xray. DPI, который ищет имя сервера в первом пакете, видит только кусок. Работает для всех серверов с TLS или REALITY (VLESS, VMess, Trojan, TrustTunnel); если подписка задала свою фрагментацию (<code>fm</code>), у сервера остаётся она. Лёгкая — части 100–200 байт, паузы 1–5 мс, почти без задержки. Средняя — 10–100 байт, 10–20 мс, первая часть обрывается посреди имени сервера; рукопожатие дольше на десятки–сотни миллисекунд. Агрессивная — 5–30 байт, 5–10 мс, тоже с разрезом имени; самое долгое рукопожатие. Если сервер перестал отвечать — выключите.</p>
+            <div id="fragment-custom" hidden>
+              <div class="row">
+                <label><span class="lbl">Размер частей, байт</span><input name="fragment_length" placeholder="10-100" /></label>
+                <label><span class="lbl">Пауза между частями, мс</span><input name="fragment_interval" placeholder="10-20" /></label>
+              </div>
+              <label class="check"><input name="fragment_sni" type="checkbox" /> <span>Разрезать имя сервера<button type="button" class="info-btn" data-info="i-fragment-sni" aria-label="Подробнее">ⓘ</button></span></label>
+              <p class="info" id="i-fragment-sni" hidden>Первая часть заканчивается посреди имени сервера (SNI), так что целиком его нет ни в одной части. У сервера, заданного IP-адресом без имени, режется как обычно. Пауза 0 — все части одним пакетом.</p>
             </div>
           </fieldset>
 `;

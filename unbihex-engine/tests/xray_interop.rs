@@ -490,22 +490,27 @@ async fn vision_and_reality_against_xray() {
         t.await.unwrap();
     }
 
-    // ClientHello fragmentation on top of TLS and REALITY.
-    let frag = Some(unbihex_engine::outbound::fragment::FragmentConfig {
-        length: "30-60".into(),
-        interval: "1-3".into(),
-    });
-    let tls = TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![outer.cert_der.clone()])
-        .unwrap();
-    let ob = VlessOutbound::from_parts("tls-frag", uuid, endpoint(tls_port), Some(tls), sockets.clone())
-        .with_vision(true)
-        .with_fragment(frag.clone());
-    plain_roundtrip(&ob, echo).await;
-    let ob = VlessOutbound::from_parts("reality-frag", uuid, endpoint(reality_port), None, sockets.clone())
-        .with_reality(Some(reality("0123abcd")))
-        .with_vision(true)
-        .with_fragment(frag);
-    plain_roundtrip(&ob, echo).await;
+    // ClientHello fragmentation on top of TLS and REALITY: random pieces, and the
+    // client's "medium" preset (the first piece ends inside the server name).
+    for (length, interval, sni_split) in [("30-60", "1-3", false), ("10-100", "10-20", true)] {
+        let frag = Some(unbihex_engine::outbound::fragment::FragmentConfig {
+            length: length.into(),
+            interval: interval.into(),
+            sni_split,
+        });
+        eprintln!("fragment {length} {interval} sni_split={sni_split}");
+        let tls = TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![outer.cert_der.clone()])
+            .unwrap();
+        let ob = VlessOutbound::from_parts("tls-frag", uuid, endpoint(tls_port), Some(tls), sockets.clone())
+            .with_vision(true)
+            .with_fragment(frag.clone());
+        plain_roundtrip(&ob, echo).await;
+        let ob = VlessOutbound::from_parts("reality-frag", uuid, endpoint(reality_port), None, sockets.clone())
+            .with_reality(Some(reality("0123abcd")))
+            .with_vision(true)
+            .with_fragment(frag);
+        plain_roundtrip(&ob, echo).await;
+    }
 
     // REALITY without Vision, empty short ID.
     let ob = VlessOutbound::from_parts("reality-plain", uuid, endpoint(plain_port), None, sockets.clone())
@@ -1251,6 +1256,7 @@ async fn trojan_against_xray() {
             frag.fragment = Some(unbihex_engine::outbound::fragment::FragmentConfig {
                 length: "30-60".into(),
                 interval: "1-3".into(),
+                sni_split: false,
             });
             plain_roundtrip(&build(&frag), echo).await;
         }
@@ -1492,11 +1498,19 @@ async fn link_sni_from_host_against_xray() {
             }),
         )
         .await;
-        let build = |query: &str, trust: bool| -> Arc<dyn Outbound> {
+        let build_with = |query: &str, trust: bool, sni_split: bool| -> Arc<dyn Outbound> {
             let link = format!("vless://{UUID}@127.0.0.1:{port}?security=tls&fp=chrome&{query}#ip");
-            let OutboundConfig::Vless(c) = unbihex_engine::link::parse_link(&link, "ip").unwrap() else {
+            let OutboundConfig::Vless(mut c) = unbihex_engine::link::parse_link(&link, "ip").unwrap() else {
                 panic!("not vless");
             };
+            // The client's global fragmentation ("medium" preset).
+            if sni_split {
+                c.fragment = Some(unbihex_engine::outbound::fragment::FragmentConfig {
+                    length: "10-100".into(),
+                    interval: "1-5".into(),
+                    sni_split: true,
+                });
+            }
             let tls = c.tls.clone().unwrap();
             let sockets = Arc::new(SocketFactory::default());
             let roots = if trust { vec![pem.cert_der.clone()] } else { Vec::new() };
@@ -1512,7 +1526,7 @@ async fn link_sni_from_host_against_xray() {
                     &t.alpn,
                     tls.sni.as_deref(),
                     None,
-                    None,
+                    c.fragment.clone(),
                 )
                 .unwrap();
                 let uuid = *uuid::Uuid::parse_str(UUID).unwrap().as_bytes();
@@ -1528,9 +1542,12 @@ async fn link_sni_from_host_against_xray() {
                     .unwrap(),
             )
         };
+        let build = |query: &str, trust: bool| build_with(query, trust, false);
         let insecure = query.contains("allowInsecure=1");
         eprintln!("vless {network} by IP: {query}");
         plain_roundtrip(build(query, !insecure).as_ref(), echo).await;
+        eprintln!("  with the ClientHello cut inside the server name");
+        plain_roundtrip(build_with(query, !insecure, true).as_ref(), echo).await;
         // The address as the name (an explicit sni=127.0.0.1, what we sent before)
         // or an untrusted certificate without allowInsecure fails.
         let bad = if insecure {

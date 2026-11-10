@@ -60,7 +60,7 @@ fn load(path: &Path) -> (AppData, bool) {
         serde_json::from_slice::<serde_json::Value>(&bytes).and_then(|v| {
             let fresh = v.pointer("/settings/lan_password").is_none();
             serde_json::from_value::<AppData>(v.clone()).map(|mut d| {
-                let migrated = d.migrate_marks(&v);
+                let migrated = d.migrate_marks(&v) | d.settings.migrate_fragment();
                 (d, fresh || migrated)
             })
         })

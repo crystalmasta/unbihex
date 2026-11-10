@@ -146,6 +146,7 @@ pub(super) fn from_finalmask(v: &Value, tag: &str) -> Result<Option<FragmentConf
         let f = FragmentConfig {
             length: first_range(s, "length", "lengths", tag).unwrap_or_else(|| "0".into()),
             interval: first_range(s, "delay", "delays", tag).unwrap_or_else(|| "0".into()),
+            sni_split: false,
         };
         f.validate()
             .map_err(|e| Error::config(format!("finalmask {e}")))?;
@@ -180,6 +181,7 @@ fn from_param(s: &str) -> Result<Option<FragmentConfig>> {
     let f = FragmentConfig {
         length: length.to_string(),
         interval: ranges.next().map_or_else(|| "0".into(), |r| r.to_string()),
+        sni_split: false,
     };
     f.validate()?;
     Ok(Some(f))
@@ -226,6 +228,7 @@ mod tests {
         Some(FragmentConfig {
             length: length.into(),
             interval: interval.into(),
+            sni_split: false,
         })
     }
 

@@ -54,9 +54,11 @@ export function fillSettings() {
   f.geosite_url.value = s.geosite_url;
   f.geoip_url.value = s.geoip_url;
   f.geo_auto_update.checked = s.geo_auto_update;
-  f.fragment.checked = s.fragment;
+  f.fragment_preset.value = s.fragment_preset || "off";
+  $("#fragment-custom").hidden = f.fragment_preset.value !== "custom";
   f.fragment_length.value = s.fragment_length;
   f.fragment_interval.value = s.fragment_interval;
+  f.fragment_sni.checked = !!s.fragment_sni;
   renderGeo();
   fillAdblock(s);
   syncDnsPresets();

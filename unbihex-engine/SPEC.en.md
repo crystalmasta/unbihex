@@ -770,17 +770,27 @@ accepted and unused.
 
 ### 11.6 ClientHello fragmentation
 
-`fragment: {"length": "100-200", "interval": "10-20"}` on VLESS with TLS or REALITY (and on `link`). The first record
-(the ClientHello) is cut into several TLS records of random sizes from `length`, each sent in its own TCP write after
-a pause from `interval` (ms); with `interval` 0 all records go out in one TCP write, as Xray's `tlshello` does. DPI that looks for the server name in the first segment or the first record sees only a
-part of it. TLS allows a handshake message to span records, so servers accept it.
+`fragment: {"length": "100-200", "interval": "10-20", "sni_split": false}` on VLESS, VMess, Trojan, TrustTunnel with
+TLS or REALITY (and on `link`). The first record (the ClientHello) is cut into several TLS records of random sizes
+from `length`, each sent in its own TCP write (`write` + `flush` on a TCP_NODELAY socket, so its own segment) after a
+pause from `interval` (ms), as `fragment` of Xray's freedom does; with `interval` 0 all records go out in one TCP
+write, as Xray's `tlshello` does. DPI that looks for the server name in the first segment or the first record sees
+only a part of it. `sni_split`: the first record ends in the middle of the server name (the `server_name`
+extension), so no record holds the whole name; the rest is cut by `length`; without an SNI (a server by IP) the cut
+is the usual one. TLS allows a handshake message to span records, so servers accept it.
+
+**The client's setting** (the "TLS" tab, "Фрагментация ClientHello") turns this on for every server over TLS or
+REALITY (VLESS, VMess, Trojan, TrustTunnel; Hysteria 2 and NaiveProxy have no fragmentation) through the `fragment` of
+`link`, balancer members included: their checks use the same fragmentation. Presets: "light" `100-200` bytes,
+`1-5` ms; "medium" `10-100`, `10-20`, `sni_split`; "aggressive" `5-30`, `5-10`, `sni_split`; "custom" the user's
+ranges and the name-cut box. Off by default (`fragment_preset: off` in `state.json`).
 
 A link (VLESS, VMess, Trojan) gives it through `fm`, Xray 26's `finalmask` (checked against v26.10.31):
 `{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"10-20","delay":"10-20"}}]}` → `length`,
 `interval` = `delay` (without `delay` it is 0, the records in one TCP write; the mask has no `interval` field and Xray
 does not read it, so panels that copy it from the old `fragment` get what Xray does; of the `lengths`/`delays` lists
 the first range is used). Without an `fm` that has a `fragment` mask, the older `fragment=` (`tlshello` and ranges:
-length first, then the pause). A link's fragmentation wins over the `fragment` of `link` (the client's setting). A
+length first, then the pause). A link's fragmentation wins over the `fragment` of `link` (the client's setting and its presets). A
 `fragment` mask with `packets` other than `tlshello` (Xray's `""` and `1-3` cut TCP writes, not TLS records) is
 `Unsupported` and refuses the server; a bad `length`/`delay` is a config error, as in Xray. Skipped with a warning in
 the log, without refusing the server: `maxSplit`, a second `fragment` mask, the `noise`, `header-custom` and other

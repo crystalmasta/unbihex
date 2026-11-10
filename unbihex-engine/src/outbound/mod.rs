@@ -291,36 +291,72 @@ pub async fn build_outbound(
                 fingerprint::Fingerprint::from_name(Some(fp))?;
                 force_fingerprint(&mut parsed, fp);
             }
-            // The link's own fragmentation (`fm`, `fragment`) wins over the config's.
-            match &mut parsed {
-                OutboundConfig::Vless(v) => {
-                    v.allow_plaintext = c.allow_plaintext;
-                    if v.fragment.is_none() {
-                        v.fragment = c.fragment.clone();
-                    }
-                    if let Some(mux) = c.mux {
-                        v.mux = mux;
-                    }
-                }
-                OutboundConfig::Vmess(v) if v.tls.is_some() && v.fragment.is_none() => {
-                    v.fragment = c.fragment.clone()
-                }
-                OutboundConfig::Trojan(t) if t.fragment.is_none() => {
-                    t.fragment = c.fragment.clone()
-                }
-                OutboundConfig::Trusttunnel(t) if t.fragment.is_none() => {
-                    t.fragment = c.fragment.clone()
-                }
-                _ => {}
-            }
+            apply_link_settings(&mut parsed, c);
             return Box::pin(build_outbound(&parsed, ctx)).await;
         }
     })
 }
 
+/// The settings of a `link` outbound over what its link says: `allow_plaintext` and
+/// `mux` for VLESS, and `fragment` (the client's global fragmentation) where the link
+/// has none of its own (`fm`, `fragment`): the link's wins.
+fn apply_link_settings(parsed: &mut OutboundConfig, c: &crate::config::LinkConfig) {
+    match parsed {
+        OutboundConfig::Vless(v) => {
+            v.allow_plaintext = c.allow_plaintext;
+            if v.fragment.is_none() {
+                v.fragment = c.fragment.clone();
+            }
+            if let Some(mux) = c.mux {
+                v.mux = mux;
+            }
+        }
+        OutboundConfig::Vmess(v) if v.tls.is_some() && v.fragment.is_none() => {
+            v.fragment = c.fragment.clone()
+        }
+        OutboundConfig::Trojan(t) if t.fragment.is_none() => t.fragment = c.fragment.clone(),
+        OutboundConfig::Trusttunnel(t) if t.fragment.is_none() => {
+            t.fragment = c.fragment.clone()
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The client's global fragmentation reaches every TLS/REALITY link without its
+    /// own; a subscription's `fm` wins; plain VMess gets none.
+    #[test]
+    fn the_links_own_fragmentation_wins_over_the_global_one() {
+        let fragment = |link: &str| {
+            let c: crate::config::LinkConfig = serde_json::from_value(serde_json::json!({
+                "tag": "p", "url": link,
+                "fragment": {"length": "10-100", "interval": "10-20", "sni_split": true}
+            }))
+            .unwrap();
+            let mut parsed = crate::link::parse_link(link, "p").unwrap();
+            apply_link_settings(&mut parsed, &c);
+            match parsed {
+                OutboundConfig::Vless(v) => v.fragment,
+                OutboundConfig::Vmess(v) => v.fragment,
+                OutboundConfig::Trojan(t) => t.fragment,
+                other => panic!("{other:?}"),
+            }
+        };
+        const UUID: &str = "11111111-1111-1111-1111-111111111111";
+        let global = fragment(&format!("vless://{UUID}@h.example:443?security=tls&type=ws#v")).unwrap();
+        assert_eq!((global.length.as_str(), global.interval.as_str(), global.sni_split), ("10-100", "10-20", true));
+        assert!(fragment("trojan://pw@h.example:443?type=grpc&serviceName=s#t").unwrap().sni_split);
+        assert!(fragment(&format!("vmess://{UUID}@h.example:443?type=ws&security=tls#m")).is_some());
+        assert!(fragment(&format!("vmess://{UUID}@h.example:80?type=ws#m")).is_none(), "VMess without TLS");
+        let own = fragment(&format!(
+            "vless://{UUID}@h.example:443?security=tls&fragment=tlshello%2C1-5%2C0#v"
+        ))
+        .unwrap();
+        assert_eq!((own.length.as_str(), own.interval.as_str(), own.sni_split), ("1-5", "0", false));
+    }
 
     #[test]
     fn a_forced_fingerprint_replaces_the_links_own() {

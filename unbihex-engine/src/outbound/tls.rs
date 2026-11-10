@@ -168,6 +168,12 @@ impl TlsClient {
         })
     }
 
+    /// The rustls configuration (tests build a ClientHello from it).
+    #[cfg(test)]
+    pub(crate) fn client_config(&self) -> Arc<ClientConfig> {
+        self.config.clone()
+    }
+
     /// The browser profile whose ClientHello this client sends, if any.
     pub fn fingerprint(&self) -> Option<Fingerprint> {
         self.fingerprint

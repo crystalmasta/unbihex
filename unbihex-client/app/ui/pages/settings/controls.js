@@ -1,4 +1,4 @@
-// Small controls of the "Общие", "Подключение" and "Приложения" tabs.
+// Small controls of the "Общие", "Подключение", "TLS" and "Приложения" tabs.
 import { $ } from "../../shared/lib/index.js";
 import { store } from "../../shared/model/index.js";
 import { copyText, toast } from "../../shared/ui/index.js";
@@ -20,6 +20,10 @@ export function initControls() {
   });
   f.allow_lan.addEventListener("change", (e) => {
     $("#lan-auth").hidden = !e.target.checked;
+  });
+  // The ranges are the user's own only with "Своя".
+  f.fragment_preset.addEventListener("change", (e) => {
+    $("#fragment-custom").hidden = e.target.value !== "custom";
   });
   $("#lan-copy").addEventListener("click", () => {
     copyText(`Логин: ${f.lan_username.value}\nПароль: ${f.lan_password.value}`);

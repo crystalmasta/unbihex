@@ -49,8 +49,9 @@ export function formSettings() {
       ...$$("#adblock-presets input:checked").map((i) => i.dataset.url),
       ...lines(f.adblock_custom.value),
     ],
-    fragment: f.fragment.checked,
+    fragment_preset: f.fragment_preset.value,
     fragment_length: f.fragment_length.value.trim() || "100-200",
     fragment_interval: f.fragment_interval.value.trim() || "10-20",
+    fragment_sni: f.fragment_sni.checked,
   };
 }

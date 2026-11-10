@@ -212,6 +212,37 @@ impl AppsMode {
     }
 }
 
+/// The ClientHello fragmentation of the TLS tab (SPEC §11.6): a preset or the
+/// user's own ranges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FragmentPreset {
+    /// No fragmentation (servers keep their link's own).
+    #[default]
+    Off,
+    /// Large pieces, short pauses: almost no delay.
+    Light,
+    /// Small pieces, the first one ends inside the server name.
+    Medium,
+    /// Tiny pieces, the first one ends inside the server name; the slowest handshake.
+    Aggressive,
+    /// `fragment_length`, `fragment_interval` and `fragment_sni` of the settings.
+    Custom,
+}
+
+impl FragmentPreset {
+    /// Piece sizes (bytes), pauses (ms) and the cut in the server name of a preset;
+    /// `None` for `off` and `custom`.
+    pub fn ranges(self) -> Option<(&'static str, &'static str, bool)> {
+        match self {
+            FragmentPreset::Light => Some(("100-200", "1-5", false)),
+            FragmentPreset::Medium => Some(("10-100", "10-20", true)),
+            FragmentPreset::Aggressive => Some(("5-30", "5-10", true)),
+            FragmentPreset::Off | FragmentPreset::Custom => None,
+        }
+    }
+}
+
 /// How the server delay is measured.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -324,12 +355,20 @@ pub struct Settings {
     pub adblock: bool,
     /// Hosts-format lists to download, by URL.
     pub adblock_lists: Vec<String>,
-    /// Split the TLS ClientHello into small records (VLESS over TLS/REALITY).
+    /// Before 0.2.11: the switch of the ClientHello fragmentation (VLESS only). On
+    /// becomes `fragment_preset: custom` when the state is read
+    /// ([`Settings::migrate_fragment`]); never written.
+    #[serde(skip_serializing)]
     pub fragment: bool,
-    /// Record sizes, `"from-to"` bytes.
+    /// ClientHello fragmentation for every server over TLS or REALITY (VLESS, VMess,
+    /// Trojan, TrustTunnel); a server whose link has its own (`fm`) keeps that.
+    pub fragment_preset: FragmentPreset,
+    /// Record sizes, `"from-to"` bytes (`custom`).
     pub fragment_length: String,
-    /// Pauses between pieces, `"from-to"` ms.
+    /// Pauses between pieces, `"from-to"` ms (`custom`).
     pub fragment_interval: String,
+    /// The first piece ends in the middle of the server name (`custom`).
+    pub fragment_sni: bool,
     /// How "Проверить пинг" measures the delay.
     pub ping_method: PingMethod,
     /// Auto-select among the servers of the group (see `auto_template`).
@@ -350,6 +389,32 @@ pub const DEFAULT_LAN_USERNAME: &str = "unbihex";
 
 /// Default User-Agent for subscription requests.
 pub const DEFAULT_USER_AGENT: &str = concat!("unbihex-client/", env!("CARGO_PKG_VERSION"));
+
+impl Settings {
+    /// The engine's `fragment` of a `link` outbound (SPEC §11.6), `None` when off.
+    pub fn fragment_config(&self) -> Option<serde_json::Value> {
+        let (length, interval, sni_split) = match self.fragment_preset {
+            FragmentPreset::Off => return None,
+            FragmentPreset::Custom => {
+                (self.fragment_length.trim(), self.fragment_interval.trim(), self.fragment_sni)
+            }
+            p => p.ranges()?,
+        };
+        Some(serde_json::json!({"length": length, "interval": interval, "sni_split": sni_split}))
+    }
+
+    /// A state from before 0.2.11 with the fragmentation switch on gets the `custom`
+    /// preset with its ranges. Returns whether anything changed.
+    pub fn migrate_fragment(&mut self) -> bool {
+        if !std::mem::take(&mut self.fragment) {
+            return false;
+        }
+        if self.fragment_preset == FragmentPreset::Off {
+            self.fragment_preset = FragmentPreset::Custom;
+        }
+        true
+    }
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -391,8 +456,10 @@ impl Default for Settings {
             adblock: false,
             adblock_lists: crate::adblock::DEFAULT_LISTS.iter().map(|u| u.to_string()).collect(),
             fragment: false,
+            fragment_preset: FragmentPreset::Off,
             fragment_length: "100-200".into(),
             fragment_interval: "10-20".into(),
+            fragment_sni: false,
             ping_method: PingMethod::default(),
             auto_select: AutoSelect::default(),
             auto_template: None,
