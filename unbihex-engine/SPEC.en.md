@@ -1114,6 +1114,32 @@ Unbihex is not on the list and stays outside); `except`, every app but the chose
 `all`. The picker lists every installed package, system ones too (the `QUERY_ALL_PACKAGES` permission). It applies the
 next time the `VpnService` starts.
 
+### 13.4 Operator whitelists (client)
+
+Under "whitelists" mobile operators let through only allowed sites and addresses (issues #48, #57). The client
+(`unbihex-client/crates/client-core/src/whitelist.rs`, shared by the desktop app, Android and `unbihex-cli`) checks
+for it directly, around the tunnel: through the running engine's `direct` outbound (the physical interface on the
+desktop, a `protect`ed socket on Android, names resolved as for direct traffic), or with plain sockets when no engine
+runs. A host check is TCP to port 443 (or the given one) and a TLS ClientHello (TLS 1.3/1.2, SNI for names, none for
+IPs); success is the first record of an answer (a ServerHello or an alert) within 3 s, a timeout, a reset or silence
+is a failure. All hosts are checked at once.
+
+Two groups: whitelisted (`whitelist_allowed`, by default `ya.ru`, `vk.com`, `gosuslugi.ru`) and others
+(`whitelist_blocked`, by default `google.com`, `cloudflare.com`, `1.1.1.1`, `8.8.8.8`, `9.9.9.9`). The result: no
+whitelisted host answers, OFFLINE (nothing changes); whitelisted ones answer and most others do not, WHITELIST;
+otherwise NORMAL. The state changes after two equal results in a row (OFFLINE breaks a run). Checks run every 60 s
+while the window is open (its status polls) or the screen is on (Android), every 5 minutes in the background, at once
+on another network (Android: `ConnectivityManager`; desktop: another default interface) and after three engine
+connections time out within 30 s (the dispatcher's debug line "connect timed out", caught by a log filter of its own);
+a confirming check follows 10 s later.
+
+`whitelist_mode`: `auto` (the default) follows the checks, `on` always, `off` never. While it is on,
+`whitelist_template` (an auto-select template; auto-select turns on if it was off) and `whitelist_routing` replace the
+chosen ones; the previous `auto_select`, `auto_template`, `routing` and the values set are kept in `state.json`
+(`whitelist`) and given back on leaving, except fields the user changed meanwhile. With neither template nor routing
+only the indicator shows: an amber button and "Белые списки" on the home screen, "Белые списки · <server>" in the
+Android notification. A running connection takes the new settings by a hot reload (§4).
+
 ---
 
 ## 14. Security and robustness

@@ -422,7 +422,12 @@ What it holds (fields an older file lacks get their defaults):
     `light` / `medium` / `aggressive` / `custom`; `custom` takes `fragment_length`, `fragment_interval` ("from-to"
     ranges) and `fragment_sni` (the cut inside the server name); a subscription's own fragmentation (`fm`) wins. The
     old `fragment: true` becomes `custom` when the file is read (engine SPEC §11.6);
-  - `check_updates`: check for updates automatically (on by default, at most once a day).
+  - `check_updates`: check for updates automatically (on by default, at most once a day);
+  - `whitelist_mode`: operator whitelists, `auto` (the default, by direct checks around the VPN) / `on` / `off`;
+    `whitelist_template` and `whitelist_routing`: the auto-select template and routing for that time (`null` keeps
+    them; both `null`: only the indicator on the power button); `whitelist_allowed` / `whitelist_blocked`: the hosts to
+    check (empty: the defaults). Next to it, `whitelist` holds whether the mode is on and what it replaced (given back
+    on leaving unless you changed it yourself). Details: SPEC §13.4.
 
 Next to it, `update.json` keeps the time and result of the last update check (the latest release of
 `crystalmasta/unbihex` on GitHub). The installer is downloaded only with the "Обновить" button (Windows, Android)
