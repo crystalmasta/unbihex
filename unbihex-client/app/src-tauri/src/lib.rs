@@ -347,8 +347,23 @@ async fn status(app: AppHandle, state: State<'_, AppState>) -> Result<Status, St
     sync_mobile_state(&app, &state).await;
     #[cfg(target_os = "android")]
     android_vpn::follow_tile_label(&app, &state.client).await;
+    let status = state.client.status().await;
+    #[cfg(desktop)]
+    follow_tray_server(&app, &status);
     let _ = &app;
-    Ok(state.client.status().await)
+    Ok(status)
+}
+
+/// The tray names the server in use: redrawn when auto-select moves on.
+#[cfg(desktop)]
+fn follow_tray_server(app: &AppHandle, status: &Status) {
+    static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let name = status.current_server().map(str::to_owned);
+    let Ok(mut last) = LAST.lock() else { return };
+    if *last != name {
+        *last = name;
+        update_tray(app);
+    }
 }
 
 /// Follows OS-side changes: VPN switched off in Settings, revoked by another VPN,
@@ -873,9 +888,7 @@ fn update_tray(app: &AppHandle) {
         if let Some(tray) = app.tray_by_id("main") {
             let (status_text, toggle_text, tooltip, icon) = if status.connected {
                 let name = status
-                    .info
-                    .as_ref()
-                    .map(|i| i.server_name.as_str())
+                    .current_server()
                     .or(selected_name.as_deref())
                     .unwrap_or("сервер");
                 (

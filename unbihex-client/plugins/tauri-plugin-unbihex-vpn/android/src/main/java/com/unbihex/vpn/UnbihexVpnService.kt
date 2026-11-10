@@ -31,6 +31,8 @@ object NativeVpn {
     external fun stop(generation: Long)
     /** The tile's label: the server in use or selected, without leading flags. */
     external fun label(dataDir: String): String?
+    /** The server in use (with auto-select, the balancer's pick now); empty when off. */
+    external fun server(dataDir: String): String?
 }
 
 /**
@@ -70,8 +72,13 @@ class UnbihexVpnService : VpnService() {
         private const val TAG = "UnbihexVpn"
         private const val CHANNEL_ID = "vpn"
         private const val NOTIFICATION_ID = 1
+        /** How often the notification and the tile check the server in use. */
+        private const val FOLLOW_MS = 3000L
         private val lock = Any()
         private val worker = Executors.newSingleThreadExecutor()
+        /** Reads the server in use off the main thread (the native side takes a lock). */
+        private val names = Executors.newSingleThreadExecutor()
+        private val main = Handler(Looper.getMainLooper())
         private val lifecycle = VpnLifecycle()
         private var current: UnbihexVpnService? = null
         @Volatile var isActive = false
@@ -120,9 +127,50 @@ class UnbihexVpnService : VpnService() {
         }
 
         fun markConnected(context: android.content.Context, value: Long): Boolean {
-            val success = synchronized(lock) { lifecycle.connected(value) }
-            if (success) refresh(context)
+            var service: UnbihexVpnService? = null
+            val success = synchronized(lock) { lifecycle.connected(value).also { if (it) service = current } }
+            if (success) {
+                refresh(context)
+                service?.followServer()
+            }
             return success
+        }
+    }
+    /** The server named in the "VPN включён" notification; null while it is not shown. */
+    private var shownServer: String? = null
+    /** The last server in use seen by [followServer], to refresh the tile on a change. */
+    private var followed: String? = null
+    private val follow = Runnable { checkServer() }
+
+    /**
+     * While connected, the notification and the tile follow the server in use:
+     * with auto-select the balancer may move to another one at any time, also
+     * while the app has no window (no status polls from the interface then).
+     */
+    private fun followServer() {
+        main.removeCallbacks(follow)
+        main.postDelayed(follow, FOLLOW_MS)
+    }
+
+    private fun checkServer() {
+        val dir = applicationInfo.dataDir
+        names.execute {
+            val name = try { NativeVpn.server(dir) } catch (e: Throwable) { null }
+            main.post {
+                val running = synchronized(lock) {
+                    val live = current === this && lifecycle.state == "connected"
+                    if (live && !name.isNullOrBlank() && shownServer != null && name != shownServer) {
+                        try { updateNotification(name) } catch (e: Exception) { Log.w(TAG, "notification update failed", e) }
+                    }
+                    live
+                }
+                if (!running) return@post
+                if (name != followed) {
+                    followed = name
+                    VpnTileService.refresh(this)
+                }
+                main.postDelayed(follow, FOLLOW_MS)
+            }
         }
     }
     private var ownedGeneration: Long? = null
@@ -343,6 +391,28 @@ class UnbihexVpnService : VpnService() {
      * Throws when Android refuses the foreground service; the caller decides.
      */
     private fun goForeground(server: String, connecting: Boolean = false) {
+        val notification = buildNotification(server, connecting)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                // The type Android documents for VPN apps.
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
+            } catch (e: Exception) {
+                Log.w(TAG, "systemExempted refused, using specialUse: ${e.message}")
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            }
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+        shownServer = if (connecting) null else server
+    }
+
+    /** The shown notification names another server: replaced in place, no new foreground start. */
+    private fun updateNotification(server: String) {
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(server, false))
+        shownServer = server
+    }
+
+    private fun buildNotification(server: String, connecting: Boolean): Notification {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(CHANNEL_ID, "VPN", NotificationManager.IMPORTANCE_LOW)
@@ -378,21 +448,11 @@ class UnbihexVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
         }
-        val notification = builder.build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            try {
-                // The type Android documents for VPN apps.
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
-            } catch (e: Exception) {
-                Log.w(TAG, "systemExempted refused, using specialUse: ${e.message}")
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-            }
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        return builder.build()
     }
 
     private fun stopForegroundCompat() {
+        shownServer = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(Service.STOP_FOREGROUND_REMOVE)
         } else {
@@ -422,6 +482,7 @@ class UnbihexVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        main.removeCallbacks(follow)
         val value = synchronized(lock) {
             // Resources belong to this instance even if another service is current.
             closeTunLocked()

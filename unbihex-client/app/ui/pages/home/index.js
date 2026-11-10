@@ -22,7 +22,10 @@ export function renderHome() {
   const card = $("#connect-card");
   card.dataset.state = busy ? "busy" : st.connected ? "on" : "off";
   const sel = selectedServer();
-  $("#chip-name").textContent = sel ? sel.name : "не выбран";
+  // Connected: the server in use (with auto-select, the balancer's pick now) —
+  // the same name as in the tray, the Android notification and the tile.
+  const current = st.connected ? st.auto_server || (st.info && st.info.server_name) : null;
+  $("#chip-name").textContent = current || (sel ? sel.name : "не выбран");
 
   if (busy) {
     $("#status-text").textContent = st.connected ? "Отключение…" : "Подключение…";
@@ -37,7 +40,7 @@ export function renderHome() {
       proxy_only: info.http_port == null ? "прокси" : `прокси 127.0.0.1:${info.http_port}`,
       vpn: "VPN",
     }[info.mode] || info.mode;
-    const auto = st.auto_server ? ` · автовыбор: ${st.auto_server}` : "";
+    const auto = st.auto_server ? " · автовыбор" : "";
     $("#status-sub").textContent = `${modeName} · ${fmtDuration(Math.max(0, Math.floor(Date.now() / 1000 - info.since)))}${auto}`;
   } else {
     $("#status-text").textContent = "Не подключено";

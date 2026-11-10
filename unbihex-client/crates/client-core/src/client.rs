@@ -699,13 +699,17 @@ impl Client {
         self.controller.status().await
     }
 
+    /// The server in use while connected ([`Status::current_server`]).
+    pub async fn current_server(&self) -> Option<String> {
+        self.status().await.current_server().map(str::to_owned)
+    }
+
     /// The quick settings tile's label: the server in use (with auto-select, the
     /// one working now), else the selected one, else "Unbihex"; see [`short_label`].
     pub async fn tile_label(&self) -> String {
-        let status = self.status().await;
-        let name = status
-            .auto_server
-            .or(status.info.map(|i| i.server_name))
+        let name = self
+            .current_server()
+            .await
             .or_else(|| self.data.read().selected_server().map(|s| s.name.clone()))
             .unwrap_or_default();
         let label = short_label(&name);
