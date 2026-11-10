@@ -5,6 +5,8 @@ use std::io::Write;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -88,15 +90,50 @@ fn filter(level: &str) -> EnvFilter {
     ))
 }
 
+/// Called for each engine connection that timed out, whatever level the log shows.
+static ON_TIMEOUT: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Sets what a timed-out engine connection calls (the whitelist checks: a run of
+/// them makes a check out of turn).
+pub fn on_connect_timeout(f: impl Fn() + Send + Sync + 'static) {
+    let _ = ON_TIMEOUT.set(Box::new(f));
+}
+
+/// Watches the dispatcher's debug lines for "connect timed out" on its own
+/// filter, so the log level the user picked does not hide them.
+struct TimeoutWatch;
+
+impl<S: tracing::Subscriber> Layer<S> for TimeoutWatch {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(bool);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}").ends_with("connect timed out");
+                }
+            }
+        }
+        let mut m = Message(false);
+        event.record(&mut m);
+        if m.0
+            && let Some(f) = ON_TIMEOUT.get()
+        {
+            f();
+        }
+    }
+}
+
 /// Installs the global subscriber.
 pub fn init(level: &str) -> (LogBuffer, Option<LevelHandle>) {
     let buffer = LogBuffer::default();
-    let (layer, handle) = reload::Layer::new(filter(level));
+    let (filter, handle) = reload::Layer::new(filter(level));
     let fmt = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_target(false)
-        .with_writer(buffer.clone());
-    let ok = tracing_subscriber::registry().with(layer).with(fmt).try_init().is_ok();
+        .with_writer(buffer.clone())
+        .with_filter(filter);
+    let timeouts = TimeoutWatch.with_filter(Targets::new().with_target("unbihex_engine::dispatcher", tracing::Level::DEBUG));
+    let ok = tracing_subscriber::registry().with(fmt).with(timeouts).try_init().is_ok();
     (buffer, ok.then_some(handle))
 }
 

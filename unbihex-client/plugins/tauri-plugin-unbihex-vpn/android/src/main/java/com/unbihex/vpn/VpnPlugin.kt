@@ -58,6 +58,7 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     init {
         UiSignal.watch(activity.application)
+        NetWatch.start(activity)
         // A process killed with the VPN on leaves the tile showing "on": the app's
         // start brings it back to the real state.
         VpnTileService.refresh(activity)

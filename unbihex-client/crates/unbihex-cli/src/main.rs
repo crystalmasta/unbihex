@@ -373,7 +373,30 @@ async fn run(client: &Client, cmd: &str, args: &[String]) -> Result<(), String> 
                 );
             }
             println!("Ctrl-C to disconnect");
-            stop_signal().await;
+            // Operator whitelists (whitelist_mode in state.json): checks once a
+            // minute; a switch prints a line and reloads the engine.
+            client.whitelist.set_foreground(true);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let watch = client.run_whitelist(move |ev| {
+                let _ = tx.send(ev);
+            });
+            let stop = stop_signal();
+            tokio::pin!(watch, stop);
+            let mut watching = true;
+            loop {
+                tokio::select! {
+                    _ = &mut stop => break,
+                    _ = &mut watch, if watching => watching = false,
+                    Some(ev) = rx.recv() => {
+                        println!("{}", ev.message);
+                        if ev.reconnect
+                            && let Err(e) = client.reload().await
+                        {
+                            tracing::warn!("whitelist mode: {e}");
+                        }
+                    }
+                }
+            }
             client.disconnect().await;
             println!("disconnected");
         }

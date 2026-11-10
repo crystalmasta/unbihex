@@ -31,8 +31,11 @@ object NativeVpn {
     external fun stop(generation: Long)
     /** The tile's label: the server in use or selected, without leading flags. */
     external fun label(dataDir: String): String?
-    /** The server in use (with auto-select, the balancer's pick now); empty when off. */
+    /** The notification's line: the server in use (with auto-select, the balancer's
+     *  pick now), "Белые списки · " in front while that mode is on; empty when off. */
     external fun server(dataDir: String): String?
+    /** [NetWatch]: 0 another network, 1 screen on, 2 screen off. */
+    external fun netEvent(kind: Int)
 }
 
 /**
@@ -148,6 +151,7 @@ class UnbihexVpnService : VpnService() {
      * while the app has no window (no status polls from the interface then).
      */
     private fun followServer() {
+        NetWatch.start(this)
         main.removeCallbacks(follow)
         main.postDelayed(follow, FOLLOW_MS)
     }

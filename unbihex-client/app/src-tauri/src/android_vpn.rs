@@ -57,7 +57,56 @@ pub fn owner(dir: &Path) -> &'static Owner {
             owner.dir.display()
         );
     }
+    // The whitelist checks run with the owner: from the app or a tile start.
+    static WATCH: std::sync::Once = std::sync::Once::new();
+    WATCH.call_once(|| {
+        let client = owner.client.clone();
+        tauri::async_runtime::spawn(async move { client.run_whitelist(whitelist_event).await });
+    });
     owner
+}
+
+/// The whitelist mode went on or off: through the app when it is there,
+/// otherwise (a tile start) the running engine takes the new settings itself.
+/// The notification follows by itself ([`Java_com_unbihex_vpn_NativeVpn_server`]).
+fn whitelist_event(ev: unbihex_client_core::whitelist::WhitelistEvent) {
+    let Some(owner) = OWNER.get() else {
+        return;
+    };
+    if let Some(app) = owner.app.lock().clone() {
+        super::whitelist_event(&app, ev);
+        return;
+    }
+    if ev.reconnect {
+        tauri::async_runtime::spawn(async move {
+            let _op = owner.op.lock().await;
+            if owner.client.controller.is_connected().await
+                && let Err(e) = owner.client.reload().await
+            {
+                tracing::warn!("whitelist mode: {e}");
+            }
+        });
+    }
+}
+
+/// `NativeVpn.netEvent`: 0 — another network (check now), 1 — the screen went
+/// on (checks once a minute), 2 — it went off (every 5 minutes).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_netEvent(
+    _env: JNIEnv,
+    _object: JObject,
+    kind: jni::sys::jint,
+) {
+    let _ = std::panic::catch_unwind(|| {
+        // Before the app or a tile start made the owner there is nothing to check.
+        let Some(owner) = OWNER.get() else { return };
+        let watch = &owner.client.whitelist;
+        match kind {
+            0 => watch.wake(),
+            1 => watch.set_foreground(true),
+            _ => watch.set_foreground(false),
+        }
+    });
 }
 
 /// Lets tile starts and external stops refresh the app's window.
@@ -292,8 +341,9 @@ pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_label(
     env.new_string(label).map_or(std::ptr::null_mut(), |s| s.into_raw())
 }
 
-/// `NativeVpn.server`: the server in use (with auto-select, the one the
-/// balancer picked now) for the notification; empty when nothing runs.
+/// `NativeVpn.server`: the notification's line, the server in use (with
+/// auto-select, the one the balancer picked now) and "Белые списки" in front
+/// while that mode is on; empty when nothing runs.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_server(
     mut env: JNIEnv,
@@ -303,7 +353,7 @@ pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_server(
     let name = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let dir: String = env.get_string(&dir).ok()?.into();
         let owner = owner(Path::new(&dir));
-        tauri::async_runtime::block_on(owner.client.current_server())
+        tauri::async_runtime::block_on(owner.client.notification_text())
     }))
     .ok()
     .flatten()

@@ -13,6 +13,7 @@ use unbihex_client_core::{
     AddReport, AppData, AutoTemplate, Client, ClientError, ConnectionInfo, PingMethod, PingResult, Settings, Status,
 };
 use unbihex_client_core::update::{self, UpdateInfo};
+use unbihex_client_core::whitelist::{WatchView, WhitelistEvent};
 use uuid::Uuid;
 
 /// How often subscriptions are checked for an update.
@@ -92,6 +93,8 @@ struct StateView {
     device_name: String,
     /// The last update check, if any.
     update: Option<UpdateInfo>,
+    /// The operator whitelist checks.
+    network: WatchView,
 }
 
 fn platform_name() -> &'static str {
@@ -352,6 +355,8 @@ async fn status(app: AppHandle, state: State<'_, AppState>) -> Result<Status, St
     sync_mobile_state(&app, &state).await;
     #[cfg(target_os = "android")]
     android_vpn::follow_tile_label(&app, &state.client).await;
+    // The window polls while it is open: whitelist checks once a minute.
+    state.client.whitelist.touch_foreground();
     let status = state.client.status().await;
     #[cfg(desktop)]
     follow_tray_server(&app, &status);
@@ -434,6 +439,7 @@ async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
         notice: state.notice.lock().take(),
         device_name: unbihex_client_core::subscription::default_device_name(),
         update: state.updates.lock().info.clone(),
+        network: state.client.whitelist.view(),
     })
 }
 
@@ -620,6 +626,15 @@ async fn save_settings(
     };
     logs::set_level(&state.level, &settings.log_level);
     state.client.set_settings(settings).map_err(err)?;
+    // The whitelist mode switched on or off by hand applies at once; the
+    // reconnect below takes its template and routing.
+    match state.client.sync_whitelist() {
+        Ok(Some(ev)) => {
+            let _ = app.emit("whitelist", ev.message);
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("whitelist mode: {e}"),
+    }
     #[cfg(windows)]
     if let Some((now, want)) = autostart {
         use unbihex_client_core::platform;
@@ -1148,6 +1163,33 @@ async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<()
     }
 }
 
+/// The whitelist mode went on or off: a toast in the window, the window, tray
+/// and notification redrawn, the connection given the new template and routing.
+pub(crate) fn whitelist_event(app: &AppHandle, ev: WhitelistEvent) {
+    let _ = app.emit("whitelist", ev.message.clone());
+    notify(app);
+    if ev.reconnect {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            if let Err(e) = reconnect_if_connected(&app, &state).await {
+                tracing::warn!("whitelist mode: {e}");
+            }
+        });
+    }
+}
+
+/// Desktop: the whitelist checks for as long as the app runs (on Android the
+/// shared owner starts them, also for a tile start without the app).
+#[cfg(not(target_os = "android"))]
+fn start_whitelist_watch(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let client = app.state::<AppState>().client.clone();
+        let handle = app.clone();
+        client.run_whitelist(move |ev| whitelist_event(&handle, ev)).await;
+    });
+}
+
 fn start_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1237,6 +1279,10 @@ pub fn run() {
             #[cfg(target_os = "android")]
             android_vpn::attach(owner, app.handle().clone());
             logs::set_level(&level, &client.settings().log_level);
+            {
+                let client = client.clone();
+                logs::on_connect_timeout(move || client.whitelist.note_timeout());
+            }
             tracing::info!(
                 "Unbihex {} (engine {}) on {}",
                 env!("CARGO_PKG_VERSION"),
@@ -1272,6 +1318,8 @@ pub fn run() {
             }
             start_background(app.handle().clone());
             start_update_checks(app.handle().clone());
+            #[cfg(not(target_os = "android"))]
+            start_whitelist_watch(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

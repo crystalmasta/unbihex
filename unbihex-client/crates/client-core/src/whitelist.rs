@@ -8,8 +8,7 @@
 //! (the user's choice comes back when it ends, unless the user changed it in
 //! the meantime), and the window, tray and notification show it.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -134,6 +133,8 @@ pub struct Watch {
     wake: tokio::sync::Notify,
     /// Unix seconds until which the app counts as in the foreground.
     foreground_until: AtomicU64,
+    /// [`Client::run_whitelist`] runs.
+    running: AtomicBool,
 }
 
 fn unix_now() -> u64 {
@@ -473,7 +474,11 @@ impl Client {
     /// the foreground, every 5 minutes in the background, at once on another
     /// network or a run of direct timeouts, 10 s later to confirm a change.
     /// `on_event` gets every switch (toast, reconnect).
-    pub async fn run_whitelist(self: Arc<Self>, on_event: impl Fn(WhitelistEvent) + Send + Sync + 'static) {
+    /// Returns at once when it already runs (the app and a tile start both ask).
+    pub async fn run_whitelist(&self, on_event: impl Fn(WhitelistEvent)) {
+        if self.whitelist.running.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let mut net = network_fingerprint();
         let mut last_check: Option<Instant> = None;
         loop {
