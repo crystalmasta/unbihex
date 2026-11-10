@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files Unbihex hands to other apps: the log to share. -->
+<paths>
+    <cache-path name="share" path="share/" />
+</paths>

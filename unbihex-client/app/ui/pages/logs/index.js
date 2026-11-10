@@ -1,7 +1,8 @@
 // "Журнал": the engine log, refreshed every second while open.
 import { clearLogs, getLogs } from "../../shared/api/index.js";
 import { $ } from "../../shared/lib/index.js";
-import { copyText } from "../../shared/ui/index.js";
+import { store } from "../../shared/model/index.js";
+import { copyLogs, logSaveLabel, saveLogsFile } from "../../features/log-export/index.js";
 import { logsMarkup } from "./markup.js";
 
 export function mountLogs() {
@@ -9,6 +10,9 @@ export function mountLogs() {
 }
 
 export async function loadLogs() {
+  const save = $("#logs-save");
+  if (save.textContent !== logSaveLabel()) save.textContent = logSaveLabel();
+  save.hidden = Boolean(store.S && store.S.platform === "ios");
   const lines = await getLogs();
   const el = $("#logs");
   const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
@@ -20,7 +24,8 @@ export async function loadLogs() {
 }
 
 export function initLogs() {
-  $("#logs-copy").addEventListener("click", () => copyText($("#logs").textContent));
+  $("#logs-copy").addEventListener("click", copyLogs);
+  $("#logs-save").addEventListener("click", (e) => saveLogsFile(e.currentTarget));
   $("#logs-clear").addEventListener("click", async () => {
     await clearLogs();
     loadLogs();

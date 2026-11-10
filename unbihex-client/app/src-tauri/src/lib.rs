@@ -750,6 +750,62 @@ fn clear_logs(state: State<'_, AppState>) {
     state.logs.clear();
 }
 
+/// The log as it leaves the app: UUIDs, passwords, subscription tokens and the
+/// other secrets of the saved data masked.
+fn masked_logs(state: &AppState) -> String {
+    use unbihex_client_core::redact;
+    let secrets = redact::secrets(&state.client.snapshot());
+    redact::redact(&state.logs.lines().join("\n"), &secrets)
+}
+
+#[tauri::command]
+fn export_logs(state: State<'_, AppState>) -> String {
+    masked_logs(&state)
+}
+
+/// Desktop: the "Save as" dialog, then the masked log in the chosen .txt file
+/// (its path; `None` when cancelled). Android: the file into the share sheet.
+#[tauri::command]
+async fn save_logs(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let text = masked_logs(&state);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let name = unbihex_client_core::redact::log_file_name(now);
+    #[cfg(desktop)]
+    {
+        #[cfg(windows)]
+        let owner = app
+            .get_webview_window("main")
+            .and_then(|w| w.hwnd().ok())
+            .map_or(0, |h| h.0 as isize);
+        #[cfg(not(windows))]
+        let owner = 0;
+        let path = tauri::async_runtime::spawn_blocking(move || {
+            unbihex_client_core::platform::save_text_dialog(owner, &name)
+        })
+        .await
+        .map_err(err)?;
+        let Some(path) = path else { return Ok(None) };
+        std::fs::write(&path, text).map_err(|e| format!("журнал не сохранён: {e}"))?;
+        Ok(Some(path.display().to_string()))
+    }
+    #[cfg(target_os = "android")]
+    {
+        use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+        tauri::async_runtime::spawn_blocking(move || app.unbihex_vpn().share_text(&name, &text))
+            .await
+            .map_err(err)?
+            .map_err(err)?;
+        Ok(None)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, text, name);
+        Err("на iOS журнал можно только скопировать".into())
+    }
+}
+
 /// `autostart`: the new copy applies the saved autostart choice (Windows).
 #[tauri::command]
 async fn relaunch_admin(app: AppHandle, state: State<'_, AppState>, autostart: Option<bool>) -> Result<(), String> {
@@ -1137,6 +1193,8 @@ pub fn run() {
             status,
             get_logs,
             clear_logs,
+            export_logs,
+            save_logs,
             update_geodata,
             update_adblock,
             adblock_presets,

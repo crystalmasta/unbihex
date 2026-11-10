@@ -66,6 +66,18 @@ impl<R: Runtime> UnbihexVpn<R> {
             .map_err(Into::into)
     }
 
+    /// Android: `text` as the file `name` into the share sheet.
+    #[cfg(target_os = "android")]
+    pub fn share_text(&self, name: &str, text: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>(
+                "shareText",
+                serde_json::json!({"name": name, "text": text}),
+            )
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     /// Brings the tunnel down.
     pub fn stop(&self) -> crate::Result<()> {
         #[cfg(target_os = "android")]

@@ -2,6 +2,7 @@ package com.unbihex.vpn
 
 import android.Manifest
 import android.app.Activity
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -11,6 +12,7 @@ import android.util.Base64
 import android.net.VpnService
 import android.os.Build
 import androidx.activity.result.ActivityResult
+import androidx.core.content.FileProvider
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -20,6 +22,7 @@ import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
+import java.io.File
 
 @InvokeArg
 class StartArgs {
@@ -238,6 +241,41 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun refreshTile(invoke: Invoke) {
         VpnTileService.refresh(activity.applicationContext)
         invoke.resolve()
+    }
+
+    @InvokeArg
+    class ShareArgs {
+        var name: String = "unbihex-log.txt"
+        var text: String = ""
+    }
+
+    /**
+     * The text as a .txt file into the share sheet, so it goes to Telegram and the
+     * like as a file. It lives in the cache (`share/`, the previous one replaced)
+     * and is lent to the chosen app through [UnbihexFileProvider].
+     */
+    @Command
+    fun shareText(invoke: Invoke) {
+        val args = invoke.parseArgs(ShareArgs::class.java)
+        try {
+            val dir = File(activity.cacheDir, "share")
+            dir.mkdirs()
+            dir.listFiles()?.forEach { it.delete() }
+            val name = File(args.name).name.ifBlank { "unbihex-log.txt" }
+            val file = File(dir, name)
+            file.writeText(args.text)
+            val uri = FileProvider.getUriForFile(activity, UnbihexFileProvider.authority(activity), file)
+            val send = Intent(Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .putExtra(Intent.EXTRA_SUBJECT, name)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            send.clipData = ClipData.newRawUri(name, uri)
+            activity.startActivity(Intent.createChooser(send, "Отправить журнал"))
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Не удалось поделиться журналом: ${e.message}")
+        }
     }
 
     /** The read end of [UiSignal]'s pipe, once; the Rust side owns it after this. */
