@@ -1,6 +1,7 @@
 // "Автовыбор" tab: the template picker and the list of templates.
 import { $, esc, plural } from "../../shared/lib/index.js";
 import { store } from "../../shared/model/index.js";
+import { fillSelect } from "../../shared/ui/index.js";
 import { templates } from "../../entities/template/index.js";
 import { openTemplateDialog } from "../../features/template-edit/index.js";
 import { checkSettingsDirty } from "./dirty.js";
@@ -10,11 +11,11 @@ export function renderTemplates(value) {
   const S = store.S;
   const sel = $("#auto-template");
   const want = value ?? sel.value;
-  sel.innerHTML = [
-    '<option value="">Все серверы (подписка, кроме исключённых)</option>',
-    ...templates().map((t) => `<option value="${t.id}">Шаблон «${esc(t.name)}»</option>`),
-  ].join("");
-  sel.value = templates().some((t) => t.id === want) ? want : "";
+  fillSelect(
+    sel,
+    [["", "Все серверы (подписка, кроме исключённых)"], ...templates().map((t) => [t.id, `Шаблон «${t.name}»`])],
+    templates().some((t) => t.id === want) ? want : "",
+  );
   $("#templates-list").innerHTML = templates()
     .map((t) => {
       const n = t.servers.filter((id) => S.data.servers.some((s) => s.id === id)).length;

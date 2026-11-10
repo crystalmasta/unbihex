@@ -2,6 +2,7 @@
 // Its markup stays in index.html: it is on screen before the modules load.
 import { $, $$, esc, fmtBytes, fmtDuration } from "../../shared/lib/index.js";
 import { store } from "../../shared/model/index.js";
+import { fillSelect, setHtml } from "../../shared/ui/index.js";
 import { selectedServer } from "../../entities/server/index.js";
 import { MODE_HINTS, ROUTING_HINTS } from "../../entities/settings/index.js";
 import { quotaHtml } from "../../entities/subscription/index.js";
@@ -79,7 +80,7 @@ export function renderHome() {
   const qp = $("#quota-panel");
   if (sub && (sub.info || sub.updated_at)) {
     qp.hidden = false;
-    qp.innerHTML = `<div class="panel-title">${esc(sub.name)}</div>${quotaHtml(sub)}`;
+    setHtml(qp, `<div class="panel-title">${esc(sub.name)}</div>${quotaHtml(sub)}`);
   } else {
     qp.hidden = true;
   }
@@ -91,12 +92,8 @@ function renderHomeTemplate(set) {
   $("#template-panel").hidden = !on;
   if (!on) return;
   const active = activeTemplate();
-  const sel = $("#home-template");
-  sel.innerHTML = [
-    '<option value="">Все серверы</option>',
-    ...templates().map((t) => `<option value="${t.id}">${esc(t.name)}</option>`),
-  ].join("");
-  sel.value = active ? active.id : "";
+  // Redrawn every second by the poll: rebuilt only when the templates change.
+  fillSelect($("#home-template"), [["", "Все серверы"], ...templates().map((t) => [t.id, t.name])], active ? active.id : "");
   $("#template-hint").textContent = active
     ? "Автовыбор переключается только по серверам этого шаблона."
     : "Подписка выбранного сервера, кроме исключённых серверов.";

@@ -12,7 +12,10 @@ export async function loadLogs() {
   const lines = await getLogs();
   const el = $("#logs");
   const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
-  el.textContent = lines.join("\n") || "Пока пусто.";
+  const text = lines.join("\n") || "Пока пусто.";
+  // Refreshed every second: an unchanged log keeps the reader's selection.
+  if (el.textContent === text) return;
+  el.textContent = text;
   if (atBottom) el.scrollTop = el.scrollHeight;
 }
 
