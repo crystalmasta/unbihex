@@ -5,8 +5,10 @@
 //! each is its own segment) after a short pause, as `fragment` of Xray's freedom
 //! does; with no pause (`interval` 0) they go out in one write, as Xray's `tlshello`
 //! does. DPI that looks for the server name in the first segment or the first record
-//! then sees only part of it. With `sni_split` the first record ends in the middle
-//! of the server name, so no record holds the whole name. TLS allows a handshake
+//! then sees only part of it. With `sni_split` one record boundary falls in the
+//! middle of the server name (the records before it are still small, whatever the
+//! browser's extension order puts in front of the name), so no record holds the
+//! whole name. TLS allows a handshake
 //! message to span records, so servers accept it.
 
 use std::time::Duration;
@@ -28,8 +30,9 @@ pub struct FragmentConfig {
     /// Pause between writes in milliseconds, e.g. `"10-20"`.
     #[serde(default = "default_interval")]
     pub interval: String,
-    /// End the first record in the middle of the server name (SNI); the rest is cut
-    /// by `length`. Without an SNI (a server by IP) the cut is as usual.
+    /// One record boundary falls exactly in the middle of the server name (SNI); the
+    /// pieces around it are still cut by `length`. Without an SNI (a server by IP)
+    /// the cut is as usual.
     #[serde(default)]
     pub sni_split: bool,
 }
@@ -127,14 +130,18 @@ impl FragmentConfig {
             if rest[0] != 0x16 {
                 out.push(rest[..5 + len].to_vec());
             } else {
-                let mut cut = if first && self.sni_split { sni_middle(body) } else { None };
+                // With `sni_split` the piece that would cross the middle of the
+                // server name ends there.
+                let cut = if first && self.sni_split { sni_middle(body) } else { None };
                 first = false;
                 let mut b = body;
+                let mut at = 0;
                 while !b.is_empty() {
-                    let n = cut
-                        .take()
-                        .unwrap_or_else(|| rng.gen_range(min..=max) as usize)
-                        .clamp(1, b.len());
+                    let mut n = (rng.gen_range(min..=max) as usize).clamp(1, b.len());
+                    if let Some(c) = cut.filter(|&c| at < c && c < at + n) {
+                        n = c - at;
+                    }
+                    at += n;
                     let mut rec = Vec::with_capacity(5 + n);
                     rec.extend_from_slice(header);
                     rec.extend_from_slice(&(n as u16).to_be_bytes());
@@ -237,19 +244,31 @@ mod tests {
         assert!(FragmentConfig::default().validate().is_ok());
     }
 
-    /// `sni_split`: the first record ends in the middle of the name, the rest by `length`.
+    /// `sni_split`: every piece is cut by `length`, and one boundary falls exactly in
+    /// the middle of the name, wherever the browser put the extension.
     #[test]
-    fn the_first_record_cuts_the_server_name() {
+    fn a_record_boundary_cuts_the_server_name() {
         let name = "very-long-server-name.example.com";
         for fp in [None, Some("chrome"), Some("firefox")] {
-            let hello = client_hello(name, fp);
-            let at = hello.windows(name.len()).position(|w| w == name.as_bytes()).unwrap();
-            let parts = frag("200-300", "0", true).split_records(&hello).unwrap();
-            let b = bodies(&parts);
-            assert_eq!(b.concat(), &hello[5..], "{fp:?}");
-            assert_eq!(5 + b[0].len(), at + name.len() / 2, "{fp:?}");
-            assert!(b[1].starts_with(&name.as_bytes()[name.len() / 2..]), "{fp:?}");
-            assert!(b[1..].iter().all(|b| b.len() <= 300));
+            for _ in 0..20 {
+                let hello = client_hello(name, fp);
+                let mid = hello.windows(name.len()).position(|w| w == name.as_bytes()).unwrap()
+                    + name.len() / 2;
+                let parts = frag("10-100", "0", true).split_records(&hello).unwrap();
+                let b = bodies(&parts);
+                assert_eq!(b.concat(), &hello[5..], "{fp:?}");
+                assert!(b.iter().all(|b| (1..=100).contains(&b.len())), "{fp:?}");
+                // The ends of the records, as offsets in the flight.
+                let ends: Vec<usize> = b
+                    .iter()
+                    .scan(5, |end, b| {
+                        *end += b.len();
+                        Some(*end)
+                    })
+                    .collect();
+                assert!(ends.contains(&mid), "{fp:?}: no boundary at {mid}");
+                assert!(!b.iter().any(|b| b.windows(name.len()).any(|w| w == name.as_bytes())));
+            }
         }
         // Without an SNI (a server by IP) the cut is the usual one.
         let hello = client_hello("192.0.2.1", None);
@@ -298,9 +317,7 @@ mod tests {
         let hello = client_hello("pause.example", Some("chrome"));
         let mut w = Recorder::default();
         let start = tokio::time::Instant::now();
-        // Without `sni_split`: Chrome's shuffled extensions may put the name near the
-        // end, and then the cut leaves only a few pieces.
-        frag("10-100", "10-20", false).write_pieces(&mut w, &hello).await.unwrap();
+        frag("10-100", "10-20", true).write_pieces(&mut w, &hello).await.unwrap();
         assert!(w.writes.len() > 10, "{} writes", w.writes.len());
         assert_eq!(w.flushes, w.writes.len());
         assert_eq!(w.writes[0].0, start, "the first piece goes at once");
