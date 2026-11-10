@@ -775,9 +775,10 @@ TLS or REALITY (and on `link`). The first record (the ClientHello) is cut into s
 from `length`, each sent in its own TCP write (`write` + `flush` on a TCP_NODELAY socket, so its own segment) after a
 pause from `interval` (ms), as `fragment` of Xray's freedom does; with `interval` 0 all records go out in one TCP
 write, as Xray's `tlshello` does. DPI that looks for the server name in the first segment or the first record sees
-only a part of it. `sni_split`: the first record ends in the middle of the server name (the `server_name`
-extension), so no record holds the whole name; the rest is cut by `length`; without an SNI (a server by IP) the cut
-is the usual one. TLS allows a handshake message to span records, so servers accept it.
+only a part of it. `sni_split`: one record boundary falls exactly in the middle of the server name (the
+`server_name` extension), so no record holds the whole name; the records before and after it are still cut by
+`length` (Chrome shuffles its extensions and the name may come late in the ClientHello: the first record stays
+small); without an SNI (a server by IP) the cut is the usual one. TLS allows a handshake message to span records, so servers accept it.
 
 **The client's setting** (the "TLS" tab, "Фрагментация ClientHello") turns this on for every server over TLS or
 REALITY (VLESS, VMess, Trojan, TrustTunnel; Hysteria 2 and NaiveProxy have no fragmentation) through the `fragment` of
