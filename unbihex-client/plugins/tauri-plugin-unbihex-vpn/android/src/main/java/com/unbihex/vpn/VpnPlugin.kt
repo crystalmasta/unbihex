@@ -2,15 +2,19 @@ package com.unbihex.vpn
 
 import android.Manifest
 import android.app.Activity
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.util.Base64
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.result.ActivityResult
+import androidx.core.content.FileProvider
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -20,6 +24,7 @@ import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
+import java.io.File
 
 @InvokeArg
 class StartArgs {
@@ -238,6 +243,93 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun refreshTile(invoke: Invoke) {
         VpnTileService.refresh(activity.applicationContext)
         invoke.resolve()
+    }
+
+    @InvokeArg
+    class ShareArgs {
+        var name: String = "unbihex-log.txt"
+        var text: String = ""
+    }
+
+    /**
+     * The text as a .txt file into the share sheet, so it goes to Telegram and the
+     * like as a file. It lives in the cache (`share/`, the previous one replaced)
+     * and is lent to the chosen app through [UnbihexFileProvider].
+     */
+    @Command
+    fun shareText(invoke: Invoke) {
+        val args = invoke.parseArgs(ShareArgs::class.java)
+        try {
+            val dir = File(activity.cacheDir, "share")
+            dir.mkdirs()
+            dir.listFiles()?.forEach { it.delete() }
+            val name = File(args.name).name.ifBlank { "unbihex-log.txt" }
+            val file = File(dir, name)
+            file.writeText(args.text)
+            val uri = FileProvider.getUriForFile(activity, UnbihexFileProvider.authority(activity), file)
+            val send = Intent(Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .putExtra(Intent.EXTRA_SUBJECT, name)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            send.clipData = ClipData.newRawUri(name, uri)
+            activity.startActivity(Intent.createChooser(send, "Отправить журнал"))
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Не удалось поделиться журналом: ${e.message}")
+        }
+    }
+
+    private fun updatesDir() = File(activity.cacheDir, "updates")
+
+    /** Where the Rust side puts a downloaded update; older files there are removed. */
+    @Command
+    fun updateDir(invoke: Invoke) {
+        val dir = updatesDir()
+        dir.mkdirs()
+        dir.listFiles()?.forEach { it.delete() }
+        val res = JSObject()
+        res.put("path", dir.absolutePath)
+        invoke.resolve(res)
+    }
+
+    @InvokeArg
+    class InstallArgs { var path: String = "" }
+
+    /**
+     * Opens the system installer for an APK of Unbihex that the Rust side downloaded
+     * into [updatesDir] and checked against SHA256SUMS.txt; Android itself refuses an
+     * APK signed with another key. Without "Install unknown apps" allowed for
+     * Unbihex, its settings page opens and the command says what to do.
+     */
+    @Command
+    fun installApk(invoke: Invoke) {
+        val args = invoke.parseArgs(InstallArgs::class.java)
+        try {
+            val file = File(args.path).canonicalFile
+            if (file.parentFile != updatesDir().canonicalFile || !file.isFile || !file.name.endsWith(".apk")) {
+                invoke.reject("Файл обновления не найден")
+                return
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) {
+                try {
+                    activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${activity.packageName}")))
+                } catch (_: Exception) {
+                }
+                invoke.reject("Android не разрешает Unbihex устанавливать обновления. В открывшихся настройках " +
+                    "включите «Разрешить установку из этого источника», вернитесь и нажмите «Обновить» ещё раз.")
+                return
+            }
+            val uri = FileProvider.getUriForFile(activity, UnbihexFileProvider.authority(activity), file)
+            val view = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(view)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Не удалось открыть установку: ${e.message}")
+        }
     }
 
     /** The read end of [UiSignal]'s pipe, once; the Rust side owns it after this. */

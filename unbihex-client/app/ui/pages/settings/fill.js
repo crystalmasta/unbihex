@@ -42,6 +42,7 @@ export function fillSettings() {
   f.auto_start_admin.disabled = !s.auto_start;
   $("#desktop-autostart").hidden = S.platform !== "windows";
   f.auto_connect.checked = s.auto_connect;
+  f.check_updates.checked = s.check_updates !== false;
   f.android_notification.checked = s.android_notification;
   $("#android-notification").hidden = S.platform !== "android";
   f.android_apps_mode.value = s.android_apps_mode || "all";

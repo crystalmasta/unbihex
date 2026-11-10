@@ -66,6 +66,43 @@ impl<R: Runtime> UnbihexVpn<R> {
             .map_err(Into::into)
     }
 
+    /// Android: `text` as the file `name` into the share sheet.
+    #[cfg(target_os = "android")]
+    pub fn share_text(&self, name: &str, text: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>(
+                "shareText",
+                serde_json::json!({"name": name, "text": text}),
+            )
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    /// Android: the folder for a downloaded update (the cache's `updates/`, the
+    /// only one the installer is given access to).
+    #[cfg(target_os = "android")]
+    pub fn update_dir(&self) -> crate::Result<String> {
+        #[derive(serde::Deserialize)]
+        struct Dir {
+            path: String,
+        }
+        self.0
+            .run_mobile_plugin::<Dir>("updateDir", ())
+            .map(|d| d.path)
+            .map_err(Into::into)
+    }
+
+    /// Android: opens the system installer for a verified APK in [`Self::update_dir`];
+    /// without the "install unknown apps" permission, its settings page and an
+    /// error that says what to do.
+    #[cfg(target_os = "android")]
+    pub fn install_apk(&self, path: &str) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>("installApk", serde_json::json!({"path": path}))
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     /// Brings the tunnel down.
     pub fn stop(&self) -> crate::Result<()> {
         #[cfg(target_os = "android")]

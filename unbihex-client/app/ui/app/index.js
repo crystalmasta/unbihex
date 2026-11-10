@@ -2,7 +2,7 @@
 // connects the slices and loads the state. See ../ARCHITECTURE.md.
 import { adblockPresets } from "../shared/api/index.js";
 import { on, startDataClicks } from "../shared/lib/index.js";
-import { onRender, refresh } from "../shared/model/index.js";
+import { onRender, refresh, store } from "../shared/model/index.js";
 import { toast } from "../shared/ui/index.js";
 import { mountAddInput } from "../features/add-input/index.js";
 import { mountFingerprint } from "../features/fingerprint/index.js";
@@ -11,6 +11,7 @@ import { mountSubscriptionEdit } from "../features/subscription-edit/index.js";
 import { mountTemplateEdit } from "../features/template-edit/index.js";
 import { mountAppsList } from "../widgets/apps-list/index.js";
 import { renderAbout } from "../widgets/about/index.js";
+import { showUpdate } from "../features/app-update/index.js";
 import { mountServerMenu } from "../widgets/server-menu/index.js";
 import { initHome, renderHome } from "../pages/home/index.js";
 import { initLogs, mountLogs } from "../pages/logs/index.js";
@@ -47,6 +48,7 @@ onRender("home", renderHome);
 onRender("servers", renderServers);
 onRender("subs", renderSubs);
 onRender("about", renderAbout);
+onRender("update", () => showUpdate(store.S.update));
 onRender("settings-template", settings.syncSavedTemplate);
 onRender("adblock", settings.renderAdblock);
 

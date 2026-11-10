@@ -292,6 +292,26 @@ pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_label(
     env.new_string(label).map_or(std::ptr::null_mut(), |s| s.into_raw())
 }
 
+/// `NativeVpn.server`: the server in use (with auto-select, the one the
+/// balancer picked now) for the notification; empty when nothing runs.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_server(
+    mut env: JNIEnv,
+    _object: JObject,
+    dir: JString,
+) -> jstring {
+    let name = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let dir: String = env.get_string(&dir).ok()?.into();
+        let owner = owner(Path::new(&dir));
+        tauri::async_runtime::block_on(owner.client.current_server())
+    }))
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    let _ = env.exception_clear();
+    env.new_string(name).map_or(std::ptr::null_mut(), |s| s.into_raw())
+}
+
 /// `NativeVpn.stop`: stops `generation` if it is still the running session.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_stop(

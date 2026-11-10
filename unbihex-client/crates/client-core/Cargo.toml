@@ -19,6 +19,8 @@ uuid.workspace = true
 base64 = "0.22"
 percent-encoding = "2"
 url = "2"
+# SHA-256 of downloaded updates (already in the tree through the engine).
+sha2 = "0.10"
 ipnet = "2"
 parking_lot = "0.12"
 # HTTPS for subscriptions: rustls with ring (no cmake/nasm needed on Windows).
@@ -32,7 +34,7 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-windows-sys = { version = "0.61", features = ["Win32_Networking_WinInet", "Win32_UI_Shell", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_NetworkManagement_IpHelper", "Win32_System_IO", "Win32_NetworkManagement_WindowsFirewall", "Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinInet", "Win32_UI_Shell", "Win32_UI_Controls_Dialogs", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_NetworkManagement_IpHelper", "Win32_System_IO", "Win32_NetworkManagement_WindowsFirewall", "Win32_Security"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }

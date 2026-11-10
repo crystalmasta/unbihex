@@ -421,7 +421,13 @@ What it holds (fields an older file lacks get their defaults):
   - (0.2.11) `fragment_preset`: ClientHello fragmentation for every TLS/REALITY server: `off` (the default) /
     `light` / `medium` / `aggressive` / `custom`; `custom` takes `fragment_length`, `fragment_interval` ("from-to"
     ranges) and `fragment_sni` (the cut inside the server name); a subscription's own fragmentation (`fm`) wins. The
-    old `fragment: true` becomes `custom` when the file is read (engine SPEC §11.6).
+    old `fragment: true` becomes `custom` when the file is read (engine SPEC §11.6);
+  - `check_updates`: check for updates automatically (on by default, at most once a day).
+
+Next to it, `update.json` keeps the time and result of the last update check (the latest release of
+`crystalmasta/unbihex` on GitHub). The installer is downloaded only with the "Обновить" button (Windows, Android)
+and checked against `SHA256SUMS.txt` of the same release; macOS and Linux get the release link, `unbihex-cli` has
+the `check-update` command.
 
 ## Author and license
 

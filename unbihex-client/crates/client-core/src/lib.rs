@@ -13,9 +13,11 @@ pub mod links;
 pub mod model;
 pub mod ping;
 pub mod plan;
+pub mod redact;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod platform;
 pub mod subscription;
+pub mod update;
 
 pub use client::{AddReport, Client, PingResult};
 pub use controller::{ConnectionInfo, Controller, Status};

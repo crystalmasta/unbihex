@@ -2,6 +2,7 @@
 import { $ } from "../../shared/lib/index.js";
 import { bindInfoButtons, toast } from "../../shared/ui/index.js";
 import { applySettings } from "../../entities/settings/index.js";
+import { checkNow, installNow } from "../../features/app-update/index.js";
 import { initSaveBar } from "../../widgets/save-bar/index.js";
 import { initSettingsTabs, showSettingsTab } from "../../widgets/settings-tabs/index.js";
 import { initAdblock } from "./adblock.js";
@@ -51,4 +52,6 @@ export function initSettings() {
   initDns();
   initGeo();
   initAdblock();
+  $("#update-check").addEventListener("click", (e) => checkNow(e.currentTarget));
+  $("#update-install").addEventListener("click", (e) => installNow(e.currentTarget));
 }

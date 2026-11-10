@@ -38,6 +38,41 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// The system "Save as" dialog for a `.txt` file over the window `owner`
+/// (an `HWND`, 0 for none); `None` when the user cancels.
+#[allow(unsafe_code)]
+pub(super) fn save_text_dialog(owner: isize, name: &str) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        GetSaveFileNameW, OFN_EXPLORER, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+    let mut file = vec![0u16; 1024];
+    let initial: Vec<u16> = name.encode_utf16().take(file.len() - 1).collect();
+    file[..initial.len()].copy_from_slice(&initial);
+    let filter: Vec<u16> = "Текст (*.txt)\0*.txt\0Все файлы\0*.*\0\0".encode_utf16().collect();
+    let ext = wide("txt");
+    let title = wide("Сохранить журнал");
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner as _,
+        lpstrFilter: filter.as_ptr(),
+        nFilterIndex: 1,
+        lpstrFile: file.as_mut_ptr(),
+        nMaxFile: file.len() as u32,
+        lpstrDefExt: ext.as_ptr(),
+        lpstrTitle: title.as_ptr(),
+        Flags: OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    // SAFETY: every pointer in `ofn` points to a live, NUL-terminated buffer of
+    // the stated size for the duration of the (modal, synchronous) call.
+    if unsafe { GetSaveFileNameW(&mut ofn) } == 0 {
+        return None;
+    }
+    let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+    Some(std::ffi::OsString::from_wide(&file[..len]).into())
+}
+
 pub(super) fn relaunch_elevated() -> Result<()> {
     relaunch_elevated_args("--elevated")
 }

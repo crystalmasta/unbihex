@@ -415,7 +415,13 @@ Windows — `%APPDATA%\com.unbihex.client`, Android/iOS — внутренняя
   - (0.2.11) `fragment_preset` — фрагментация ClientHello для всех серверов с TLS/REALITY: `off` (по умолчанию) /
     `light` / `medium` / `aggressive` / `custom`; для `custom` — `fragment_length`, `fragment_interval` (диапазоны
     «от-до») и `fragment_sni` (разрез посреди имени сервера); своя фрагментация подписки (`fm`) главнее. Старый
-    `fragment: true` при чтении становится `custom` (SPEC ядра §11.6).
+    `fragment: true` при чтении становится `custom` (SPEC ядра §11.6);
+  - `check_updates` — проверять обновления автоматически (по умолчанию да, не чаще раза в сутки).
+
+Рядом лежит `update.json` — время и результат последней проверки обновлений (последний релиз
+`crystalmasta/unbihex` на GitHub). Установщик скачивается только по кнопке «Обновить» (Windows, Android) и
+сверяется с `SHA256SUMS.txt` того же релиза; на macOS и Linux — только ссылка на релиз, в `unbihex-cli` —
+команда `check-update`.
 
 ## Автор и лицензия
 

@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use unbihex_client_core::{
     AddReport, AppData, AutoTemplate, Client, ClientError, ConnectionInfo, PingMethod, PingResult, Settings, Status,
 };
+use unbihex_client_core::update::{self, UpdateInfo};
 use uuid::Uuid;
 
 /// How often subscriptions are checked for an update.
@@ -26,6 +27,8 @@ struct AppState {
     /// A message for the UI to show once, such as a failed auto-connect at
     /// login: the window may not have existed when it happened.
     notice: parking_lot::Mutex<Option<String>>,
+    /// The last update check (`update.json`, issue #54).
+    updates: parking_lot::Mutex<update::Cache>,
 }
 
 // By akurach (github.com/akurach), PR #51.
@@ -87,6 +90,8 @@ struct StateView {
     notice: Option<String>,
     /// What panels see as the device name unless the user sets one.
     device_name: String,
+    /// The last update check, if any.
+    update: Option<UpdateInfo>,
 }
 
 fn platform_name() -> &'static str {
@@ -347,8 +352,23 @@ async fn status(app: AppHandle, state: State<'_, AppState>) -> Result<Status, St
     sync_mobile_state(&app, &state).await;
     #[cfg(target_os = "android")]
     android_vpn::follow_tile_label(&app, &state.client).await;
+    let status = state.client.status().await;
+    #[cfg(desktop)]
+    follow_tray_server(&app, &status);
     let _ = &app;
-    Ok(state.client.status().await)
+    Ok(status)
+}
+
+/// The tray names the server in use: redrawn when auto-select moves on.
+#[cfg(desktop)]
+fn follow_tray_server(app: &AppHandle, status: &Status) {
+    static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let name = status.current_server().map(str::to_owned);
+    let Ok(mut last) = LAST.lock() else { return };
+    if *last != name {
+        *last = name;
+        update_tray(app);
+    }
 }
 
 /// Follows OS-side changes: VPN switched off in Settings, revoked by another VPN,
@@ -413,6 +433,7 @@ async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
         data_dir: state.client.dir().display().to_string(),
         notice: state.notice.lock().take(),
         device_name: unbihex_client_core::subscription::default_device_name(),
+        update: state.updates.lock().info.clone(),
     })
 }
 
@@ -735,6 +756,62 @@ fn clear_logs(state: State<'_, AppState>) {
     state.logs.clear();
 }
 
+/// The log as it leaves the app: UUIDs, passwords, subscription tokens and the
+/// other secrets of the saved data masked.
+fn masked_logs(state: &AppState) -> String {
+    use unbihex_client_core::redact;
+    let secrets = redact::secrets(&state.client.snapshot());
+    redact::redact(&state.logs.lines().join("\n"), &secrets)
+}
+
+#[tauri::command]
+fn export_logs(state: State<'_, AppState>) -> String {
+    masked_logs(&state)
+}
+
+/// Desktop: the "Save as" dialog, then the masked log in the chosen .txt file
+/// (its path; `None` when cancelled). Android: the file into the share sheet.
+#[tauri::command]
+async fn save_logs(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let text = masked_logs(&state);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let name = unbihex_client_core::redact::log_file_name(now);
+    #[cfg(desktop)]
+    {
+        #[cfg(windows)]
+        let owner = app
+            .get_webview_window("main")
+            .and_then(|w| w.hwnd().ok())
+            .map_or(0, |h| h.0 as isize);
+        #[cfg(not(windows))]
+        let owner = 0;
+        let path = tauri::async_runtime::spawn_blocking(move || {
+            unbihex_client_core::platform::save_text_dialog(owner, &name)
+        })
+        .await
+        .map_err(err)?;
+        let Some(path) = path else { return Ok(None) };
+        std::fs::write(&path, text).map_err(|e| format!("журнал не сохранён: {e}"))?;
+        Ok(Some(path.display().to_string()))
+    }
+    #[cfg(target_os = "android")]
+    {
+        use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+        tauri::async_runtime::spawn_blocking(move || app.unbihex_vpn().share_text(&name, &text))
+            .await
+            .map_err(err)?
+            .map_err(err)?;
+        Ok(None)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, text, name);
+        Err("на iOS журнал можно только скопировать".into())
+    }
+}
+
 /// `autostart`: the new copy applies the saved autostart choice (Windows).
 #[tauri::command]
 async fn relaunch_admin(app: AppHandle, state: State<'_, AppState>, autostart: Option<bool>) -> Result<(), String> {
@@ -873,9 +950,7 @@ fn update_tray(app: &AppHandle) {
         if let Some(tray) = app.tray_by_id("main") {
             let (status_text, toggle_text, tooltip, icon) = if status.connected {
                 let name = status
-                    .info
-                    .as_ref()
-                    .map(|i| i.server_name.as_str())
+                    .current_server()
                     .or(selected_name.as_deref())
                     .unwrap_or("сервер");
                 (
@@ -976,6 +1051,103 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 // ---------------------------------------------------------------- startup
 
+// ---------------------------------------------------------------- updates (#54)
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Asks GitHub and keeps the answer (memory and `update.json`).
+async fn run_update_check(state: &AppState) -> Result<UpdateInfo, String> {
+    let info = update::check().await.map_err(err)?;
+    let mut cache = state.updates.lock();
+    *cache = update::Cache { checked_at: unix_now(), info: Some(info.clone()) };
+    cache.save(state.client.dir());
+    Ok(info)
+}
+
+/// "Проверить сейчас".
+#[tauri::command]
+async fn check_update(state: State<'_, AppState>) -> Result<UpdateInfo, String> {
+    run_update_check(&state).await
+}
+
+/// Automatic checks: once a day at most (`update.json` keeps the time across
+/// restarts), only with the setting on. A failed check is silent and tried
+/// again in an hour; it never touches the connection. A newer release is
+/// announced with the `update-available` event; nothing is downloaded.
+fn start_update_checks(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let state = app.state::<AppState>();
+        loop {
+            let due = state.updates.lock().due(unix_now());
+            if state.client.settings().check_updates && due {
+                match run_update_check(&state).await {
+                    Ok(info) if info.newer => {
+                        tracing::info!("update: Unbihex {} is available", info.latest.version);
+                        let _ = app.emit("update-available", info);
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::debug!("update check: {e}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
+}
+
+/// "Обновить": the installer of the latest release for this device, checked
+/// against the release's SHA-256 sums. Windows: the setup is started and the
+/// app quits (the window asked first). Android: the system installer opens;
+/// Android checks the signature. Elsewhere: an error with the release page.
+#[tauri::command]
+async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let info = run_update_check(&state).await?;
+    if !info.newer {
+        return Err(format!("установлена последняя версия — {}", info.current));
+    }
+    let Some(package) = update::Package::this_device() else {
+        return Err(format!("на этой системе обновление ставится вручную: {}", info.latest.url));
+    };
+    #[cfg(target_os = "android")]
+    {
+        use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+        let handle = app.clone();
+        let dir = tauri::async_runtime::spawn_blocking(move || handle.unbihex_vpn().update_dir())
+            .await
+            .map_err(err)?
+            .map_err(err)?;
+        let path = update::download(&info.latest, package, std::path::Path::new(&dir)).await.map_err(err)?;
+        let path = path.display().to_string();
+        tauri::async_runtime::spawn_blocking(move || app.unbihex_vpn().install_apk(&path))
+            .await
+            .map_err(err)?
+            .map_err(err)?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let dir = std::env::temp_dir().join("unbihex-update");
+        let path = update::download(&info.latest, package, &dir).await.map_err(err)?;
+        let _op = state.op.lock().await;
+        do_disconnect(&app, &state.client).await;
+        std::process::Command::new(&path)
+            .spawn()
+            .map_err(|e| format!("установщик не запустился: {e}"))?;
+        tracing::info!("update: {} started, quitting", path.display());
+        app.exit(0);
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "android", windows)))]
+    {
+        let _ = (app, package);
+        Err(format!("на этой системе обновление ставится вручную: {}", info.latest.url))
+    }
+}
+
 fn start_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1061,7 +1233,7 @@ pub fn run() {
             #[cfg(target_os = "android")]
             let client = owner.client.clone();
             #[cfg(not(target_os = "android"))]
-            let client = Arc::new(Client::open(dir));
+            let client = Arc::new(Client::open(&dir));
             #[cfg(target_os = "android")]
             android_vpn::attach(owner, app.handle().clone());
             logs::set_level(&level, &client.settings().log_level);
@@ -1084,6 +1256,7 @@ pub fn run() {
                 #[cfg(not(target_os = "android"))]
                 op: Arc::new(tokio::sync::Mutex::new(())),
                 notice: parking_lot::Mutex::new(notice),
+                updates: parking_lot::Mutex::new(update::Cache::load(&dir)),
             });
             #[cfg(desktop)]
             if let Err(e) = setup_tray(app) {
@@ -1098,6 +1271,7 @@ pub fn run() {
                 show_window(app.handle());
             }
             start_background(app.handle().clone());
+            start_update_checks(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1124,6 +1298,10 @@ pub fn run() {
             status,
             get_logs,
             clear_logs,
+            export_logs,
+            save_logs,
+            check_update,
+            install_update,
             update_geodata,
             update_adblock,
             adblock_presets,

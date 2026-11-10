@@ -177,6 +177,41 @@ pub fn is_elevated() -> bool {
     os::is_elevated()
 }
 
+/// Asks where to save the text file `name` (the system "Save as" dialog;
+/// `owner` — the parent window's `HWND` on Windows, else ignored). `None` when
+/// the user cancels. Linux without `zenity`: the Downloads folder, no question.
+pub fn save_text_dialog(owner: isize, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    return os::save_text_dialog(owner, name);
+    #[cfg(not(windows))]
+    {
+        let _ = owner;
+        let out = if cfg!(target_os = "macos") {
+            let script = format!(
+                "POSIX path of (choose file name with prompt \"Сохранить журнал\" default name \"{}\")",
+                name.replace(['"', '\\'], "_")
+            );
+            Command::new("osascript").args(["-e", &script]).output()
+        } else {
+            Command::new("zenity")
+                .args(["--file-selection", "--save", "--confirm-overwrite", &format!("--filename={name}")])
+                .output()
+        };
+        match out {
+            Ok(o) if o.status.success() => {
+                let path = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+                (!path.is_empty()).then(|| PathBuf::from(path))
+            }
+            Ok(_) => None,
+            Err(_) => {
+                let home = PathBuf::from(std::env::var_os("HOME")?);
+                let downloads = home.join("Downloads");
+                Some(if downloads.is_dir() { downloads } else { home }.join(name))
+            }
+        }
+    }
+}
+
 /// Starts this program again with administrator rights (Windows UAC prompt).
 /// The caller should exit afterwards.
 pub fn relaunch_elevated() -> Result<()> {

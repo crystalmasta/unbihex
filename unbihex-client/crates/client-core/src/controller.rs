@@ -57,6 +57,14 @@ pub struct Status {
     pub auto_server: Option<String>,
 }
 
+impl Status {
+    /// The server in use: with auto-select the one the balancer picked now,
+    /// else the connected one. One name for the window, tray, notification and tile.
+    pub fn current_server(&self) -> Option<&str> {
+        self.auto_server.as_deref().or(self.info.as_ref().map(|i| i.server_name.as_str()))
+    }
+}
+
 /// The server names of the auto-select group, by member number.
 fn group_names(servers: &[Server], settings: &Settings) -> Vec<String> {
     let group = crate::plan::auto_group(servers, settings);
@@ -174,7 +182,7 @@ impl Controller {
             guard.as_ref()?.instance.as_ref()?.outbound("proxy")?
         };
         let status = self.status().await;
-        let name = status.auto_server.or(status.info.map(|i| i.server_name)).unwrap_or_default();
+        let name = status.current_server().unwrap_or_default().to_owned();
         Some(crate::subscription::Tunnel::through(outbound, name))
     }
 
@@ -495,6 +503,25 @@ impl Controller {
 mod tests {
     use super::*;
     use crate::links::parse_server;
+
+    #[test]
+    fn current_server_prefers_the_balancer_pick() {
+        assert_eq!(Status::default().current_server(), None);
+        let info = ConnectionInfo {
+            server_id: Uuid::nil(),
+            server_name: "Выбранный".into(),
+            mode: "vpn".into(),
+            since: 0,
+            socks_port: None,
+            http_port: None,
+            external: false,
+            group: Vec::new(),
+        };
+        let mut status = Status { connected: true, info: Some(info), ..Status::default() };
+        assert_eq!(status.current_server(), Some("Выбранный"));
+        status.auto_server = Some("Работающий".into());
+        assert_eq!(status.current_server(), Some("Работающий"));
+    }
 
     #[test]
     fn busy_proxy_ports_are_dropped() {

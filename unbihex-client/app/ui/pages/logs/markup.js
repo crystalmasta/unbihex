@@ -4,6 +4,7 @@ export const logsMarkup = `
           <h1>Журнал</h1>
           <div class="toolbar">
             <button class="btn" id="logs-copy">Копировать</button>
+            <button class="btn" id="logs-save">Сохранить в файл</button>
             <button class="btn" id="logs-clear">Очистить</button>
           </div>
         </header>
