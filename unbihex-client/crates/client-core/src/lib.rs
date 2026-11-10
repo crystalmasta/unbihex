@@ -18,6 +18,7 @@ pub mod redact;
 pub mod platform;
 pub mod subscription;
 pub mod update;
+pub mod whitelist;
 
 pub use client::{AddReport, Client, PingResult};
 pub use controller::{ConnectionInfo, Controller, Status};

@@ -47,9 +47,11 @@ pub struct PingResult {
 /// Client state shared by the UI commands.
 pub struct Client {
     dir: PathBuf,
-    data: parking_lot::RwLock<AppData>,
+    pub(crate) data: parking_lot::RwLock<AppData>,
     /// The engine controller.
     pub controller: Arc<Controller>,
+    /// Operator whitelist detection (checks, their history, wake-ups).
+    pub whitelist: crate::whitelist::Watch,
 }
 
 /// The saved state, and whether it must be saved right away: it lacked the LAN
@@ -92,6 +94,7 @@ impl Client {
             controller: Arc::new(Controller::new(dir.clone())),
             data: parking_lot::RwLock::new(data),
             dir,
+            whitelist: crate::whitelist::Watch::default(),
         };
         if fresh && let Err(e) = client.save() {
             tracing::warn!("cannot save state: {e}");
@@ -123,7 +126,7 @@ impl Client {
         Ok(())
     }
 
-    fn mutate<T>(&self, f: impl FnOnce(&mut AppData) -> T) -> Result<T> {
+    pub(crate) fn mutate<T>(&self, f: impl FnOnce(&mut AppData) -> T) -> Result<T> {
         let r = f(&mut self.data.write());
         self.save()?;
         Ok(r)
@@ -396,6 +399,15 @@ impl Client {
             {
                 s.auto_template = None;
             }
+            if let Some(t) = s.whitelist_template
+                && !d.auto_templates.iter().any(|x| x.id == t)
+            {
+                s.whitelist_template = None;
+            }
+            for list in [&mut s.whitelist_allowed, &mut s.whitelist_blocked] {
+                list.retain(|h| !h.trim().is_empty());
+                list.iter_mut().for_each(|h| *h = h.trim().to_string());
+            }
             d.settings = s;
         })
     }
@@ -585,6 +597,9 @@ impl Client {
             }
             if d.settings.auto_template == Some(id) {
                 d.settings.auto_template = None;
+            }
+            if d.settings.whitelist_template == Some(id) {
+                d.settings.whitelist_template = None;
             }
             Ok(())
         })?

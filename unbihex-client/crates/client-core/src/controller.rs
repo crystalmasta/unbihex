@@ -186,6 +186,18 @@ impl Controller {
         Some(crate::subscription::Tunnel::through(outbound, name))
     }
 
+    /// The running engine's `direct` outbound, for checks around the tunnel:
+    /// it leaves through the physical interface (desktop) or a protected socket
+    /// (Android) and resolves names the way direct traffic does. `None` when
+    /// nothing runs here.
+    pub async fn direct(&self) -> Option<crate::subscription::Tunnel> {
+        let outbound = {
+            let guard = self.running.lock().await;
+            guard.as_ref()?.instance.as_ref()?.outbound("direct")?
+        };
+        Some(crate::subscription::Tunnel::through(outbound, "direct".into()))
+    }
+
     /// Current state and traffic counters.
     pub async fn status(&self) -> Status {
         let guard = self.running.lock().await;

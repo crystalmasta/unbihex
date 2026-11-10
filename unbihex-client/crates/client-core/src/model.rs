@@ -381,6 +381,63 @@ pub struct Settings {
     /// Auto-select leaves a server whose checks show more than this many ms
     /// twice in a row for a clearly faster one below it; 0 turns this off.
     pub auto_threshold_ms: u32,
+    /// Operator whitelists: detected (`auto`), assumed (`on`) or ignored (`off`).
+    pub whitelist_mode: WhitelistMode,
+    /// While whitelists are on: this [`AutoTemplate`] (auto-select turns on);
+    /// `None` keeps the template. With neither this nor `whitelist_routing`
+    /// only the indicator shows.
+    pub whitelist_template: Option<Uuid>,
+    /// While whitelists are on: this routing; `None` keeps it.
+    pub whitelist_routing: Option<RoutingMode>,
+    /// Hosts a whitelist lets through (`host`, `host:port`, `ip:port`); empty:
+    /// [`crate::whitelist::DEFAULT_ALLOWED`].
+    pub whitelist_allowed: Vec<String>,
+    /// Hosts a whitelist blocks; empty: [`crate::whitelist::DEFAULT_BLOCKED`].
+    pub whitelist_blocked: Vec<String>,
+}
+
+/// Operator whitelists (only allowed sites and IPs reachable): how the client
+/// treats them, see [`crate::whitelist`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhitelistMode {
+    /// Detected by direct checks around the tunnel.
+    #[default]
+    Auto,
+    /// Always on.
+    On,
+    /// Never on.
+    Off,
+}
+
+/// Whether the whitelist mode is applied now and what it replaced.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WhitelistState {
+    /// The whitelist mode is applied (the indicator is on).
+    pub active: bool,
+    /// The choices it replaced and the ones it set, to give back on leaving;
+    /// `None` when it switched nothing.
+    pub saved: Option<WhitelistSaved>,
+}
+
+/// The user's auto-select and routing before the whitelist mode, and what the
+/// mode set instead (a field the user changed since is not given back).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WhitelistSaved {
+    /// Before.
+    pub auto_select: AutoSelect,
+    /// Before.
+    pub auto_template: Option<Uuid>,
+    /// Before.
+    pub routing: RoutingMode,
+    /// Set by the mode.
+    pub set_auto_select: AutoSelect,
+    /// Set by the mode.
+    pub set_auto_template: Option<Uuid>,
+    /// Set by the mode.
+    pub set_routing: RoutingMode,
 }
 
 /// Default of [`Settings::auto_threshold_ms`].
@@ -467,6 +524,11 @@ impl Default for Settings {
             auto_select: AutoSelect::default(),
             auto_template: None,
             auto_threshold_ms: DEFAULT_AUTO_THRESHOLD_MS,
+            whitelist_mode: WhitelistMode::Auto,
+            whitelist_template: None,
+            whitelist_routing: None,
+            whitelist_allowed: Vec::new(),
+            whitelist_blocked: Vec::new(),
         }
     }
 }
@@ -489,6 +551,8 @@ pub struct AppData {
     pub adblock: AdblockStatus,
     /// Auto-select templates, in display order.
     pub auto_templates: Vec<AutoTemplate>,
+    /// The operator whitelist mode as applied now.
+    pub whitelist: WhitelistState,
 }
 
 /// State of the downloaded ad-blocking lists.
