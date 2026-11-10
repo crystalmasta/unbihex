@@ -224,6 +224,37 @@ fn host_port(s: &str) -> Result<(String, u16)> {
     Ok((host, t.port))
 }
 
+/// The first name of a comma list (v2rayN's `host` may hold several).
+pub(crate) fn first_host(list: &str) -> Option<String> {
+    list.split(',').map(str::trim).find(|h| !h.is_empty()).map(String::from)
+}
+
+/// A link's `allowInsecure` / `insecure` value.
+pub(crate) fn insecure_flag(v: &str) -> bool {
+    v == "1" || v.eq_ignore_ascii_case("true")
+}
+
+/// The link field that holds the transport's HTTP host: gRPC's `authority`, else `host`.
+fn transport_host_key(net: &str) -> &'static str {
+    if matches!(net, "grpc" | "gun") { "authority" } else { "host" }
+}
+
+/// The TLS server name of a link, as v2rayN / v2rayNG build it: `sni`, else the
+/// transport's host (WebSocket/HTTPUpgrade `host` or `headers.Host`, XHTTP `host`,
+/// gRPC `authority`; the first of a comma list), else the server address. Xray
+/// itself falls back to the address only, so a link from a server whose certificate
+/// names the CDN host but not the IP fails the name check without this.
+pub(crate) fn tls_sni(
+    sni: Option<String>,
+    ws: Option<&crate::outbound::ws::WsConfig>,
+    transport_host: &str,
+    server: &str,
+) -> Option<String> {
+    sni.or_else(|| ws.and_then(|w| w.host_header().map(String::from)))
+        .or_else(|| first_host(transport_host))
+        .or_else(|| Some(server.to_string()))
+}
+
 /// gRPC settings from a share link: `serviceName` (some links put it in `path`),
 /// `authority`, `mode=multi` (Xray's share-link format, v2rayN).
 pub(crate) fn grpc_link_config(
@@ -257,6 +288,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut sid = String::new();
     let mut fingerprint = None;
     let mut net = String::new();
+    let mut insecure = false;
     let mut xhttp_fields = serde_json::Map::new();
     let mut headers = WsHeaders::default();
     let mut frag = finalmask::LinkFragment::default();
@@ -269,6 +301,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
             "ua" => headers.ua = v,
             "security" => security = v.to_ascii_lowercase(),
             "sni" | "serverName" if !v.is_empty() => sni = Some(v),
+            "allowInsecure" | "insecure" => insecure = insecure_flag(&v),
             "alpn" => {
                 alpn = v
                     .split(',')
@@ -318,11 +351,9 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
             None,
         ),
         "ws" | "websocket" | "httpupgrade" => {
-            // Like v2rayN: the first host of a comma list.
-            let host = field("host").split(',').map(str::trim).find(|h| !h.is_empty());
             let ws = crate::outbound::ws::WsConfig {
                 path: field("path").to_string(),
-                host: host.map(String::from),
+                host: first_host(field("host")),
                 httpupgrade: net == "httpupgrade",
                 headers: headers.build()?,
             };
@@ -330,15 +361,14 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
         }
         other => return Err(Error::Unsupported(format!("vless transport type={other}"))),
     };
-    // Over WebSocket, as in v2rayN, the HTTP host names the site when there is no SNI.
-    let sni = sni.or_else(|| ws.as_ref().and_then(|w| w.host_header().map(String::from)));
     let (tls, reality) = match security.as_str() {
         "tls" => (
             Some(TlsConfig {
                 enabled: true,
-                sni: sni.or_else(|| Some(server.clone())),
+                sni: tls_sni(sni, ws.as_ref(), field(transport_host_key(&net)), &server),
                 alpn,
                 pinned_sha256: Vec::new(),
+                allow_insecure: insecure,
                 fingerprint,
             }),
             None,
@@ -562,6 +592,52 @@ mod tests {
         assert!(parse_link("vless://bad@h:443", "p").is_err());
         assert!(parse_link(&format!("vless://{UUID}@h"), "p").is_err());
         assert!(parse_link("trojan-go://x@h:1", "p").is_err());
+    }
+
+    /// The user's case: a server given by IP whose certificate names only its host.
+    /// v2rayN / v2rayNG take the server name from the transport's host when `sni` is
+    /// empty (XHTTP and WebSocket `host`, gRPC `authority`); `allowInsecure` is kept.
+    #[test]
+    fn vless_sni_from_transport_host() {
+        let tls = |q: &str| {
+            let OutboundConfig::Vless(v) =
+                parse_link(&format!("vless://{UUID}@13.143.178.155:443?security=tls&{q}"), "p").unwrap()
+            else {
+                panic!()
+            };
+            v.tls.unwrap()
+        };
+        let cases = [
+            ("type=xhttp&path=%2Fx&host=x.example", "x.example"),
+            ("type=xhttp&path=%2Fx&host=x.example%2Cy.example", "x.example"),
+            ("type=ws&host=w.example", "w.example"),
+            ("type=ws&headers=%7B%22Host%22%3A%22h.example%22%7D", "h.example"),
+            ("type=httpupgrade&host=u.example", "u.example"),
+            ("type=grpc&serviceName=s&authority=g.example", "g.example"),
+            ("type=grpc&serviceName=s&host=ignored.example", "13.143.178.155"),
+            ("type=xhttp&host=x.example&sni=s.example", "s.example"),
+            ("type=tcp", "13.143.178.155"),
+        ];
+        for (q, want) in cases {
+            let t = tls(q);
+            assert_eq!(t.sni.as_deref(), Some(want), "{q}");
+            assert!(!t.allow_insecure, "{q}");
+        }
+        for q in ["allowInsecure=1", "insecure=1", "allowInsecure=true"] {
+            assert!(tls(q).allow_insecure, "{q}");
+        }
+        assert!(!tls("allowInsecure=0").allow_insecure);
+        // REALITY's name is only `sni`, as in v2rayN.
+        let OutboundConfig::Vless(v) = parse_link(
+            &format!(
+                "vless://{UUID}@1.2.3.4:443?security=reality&pbk=wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE                 &type=grpc&serviceName=s&authority=g.example"
+            ),
+            "p",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(v.reality.unwrap().server_name, "1.2.3.4");
     }
 
     #[test]

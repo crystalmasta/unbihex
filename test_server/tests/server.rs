@@ -61,6 +61,7 @@ fn client(s: &Server, user: &str, vision: bool) -> VlessOutbound {
         sni: Some("vless.test".into()),
         alpn: vec![],
         pinned_sha256: vec![],
+        allow_insecure: false,
         fingerprint: None,
     };
     let tls = TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![s.cert.clone()]).unwrap();
@@ -206,6 +207,7 @@ async fn mux_stream(s: &Server, user: &str) -> impl AsyncReadExt + AsyncWriteExt
         sni: Some("vless.test".into()),
         alpn: vec![],
         pinned_sha256: vec![],
+        allow_insecure: false,
         fingerprint: Some("none".into()),
     };
     let tls = TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![s.cert.clone()]).unwrap();

@@ -289,26 +289,19 @@ pub fn explain_engine_error(msg: &str) -> String {
     if m.contains("trusttunnel") || m.starts_with("tt link") {
         return explain_trusttunnel(&m, msg);
     }
-    if m.contains("vmess") {
-        if let Some(at) = m.find("vmess security=")
-            && !m.contains("reality")
-            && !m.contains("tls")
-        {
-            // The mode as the link names it, so the user sees what is refused.
-            let rest = &msg[at + "vmess security=".len()..];
-            let mode = rest.split_whitespace().next().unwrap_or(rest);
-            return format!(
-                "шифрование VMess «{mode}» не поддерживается (есть auto, aes-128-gcm, chacha20-poly1305, none, zero)"
-            );
-        }
-        if m.contains("insecure") {
-            return "VMess без проверки сертификата не поддерживается".into();
-        }
+    if m.contains("vmess")
+        && let Some(at) = m.find("vmess security=")
+        && !m.contains("reality")
+        && !m.contains("tls")
+    {
+        // The mode as the link names it, so the user sees what is refused.
+        let rest = &msg[at + "vmess security=".len()..];
+        let mode = rest.split_whitespace().next().unwrap_or(rest);
+        return format!(
+            "шифрование VMess «{mode}» не поддерживается (есть auto, aes-128-gcm, chacha20-poly1305, none, zero)"
+        );
     }
     if m.contains("trojan") {
-        if m.contains("insecure") {
-            return "Trojan без проверки сертификата не поддерживается".into();
-        }
         if m.contains("needs tls") {
             return "Trojan без TLS или REALITY не поддерживается".into();
         }
@@ -590,12 +583,14 @@ mod tests {
         let s = parse_server("trojan://pw@t.example:443?type=grpc&serviceName=svc&mode=multi&fp=chrome&alpn=h2#G").unwrap();
         assert_eq!(s.transport, "grpc+tls");
         assert!(s.is_supported(), "{:?}", s.unsupported);
+        // allowInsecure is kept, as in v2rayNG / Happ.
+        let s = parse_server("trojan://pw@203.0.113.9:443?allowInsecure=1#I").unwrap();
+        assert!(s.is_supported(), "{:?}", s.unsupported);
         let s = parse_server("trojan://pw@[2001:db8::1]:8443?type=ws&path=%2Fws&host=cdn.example#W").unwrap();
         assert_eq!((s.host.as_str(), s.port, s.transport.as_str()), ("2001:db8::1", 8443, "ws+tls"));
         assert!(s.is_supported(), "{:?}", s.unsupported);
         for (query, why) in [
             ("security=none", "без TLS"),
-            ("allowInsecure=1", "без проверки сертификата"),
             ("type=xhttp", "xhttp"),
             ("security=reality&sni=a.example", "REALITY"),
         ] {

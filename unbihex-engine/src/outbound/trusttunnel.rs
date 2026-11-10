@@ -120,6 +120,7 @@ impl TrustTunnelOutbound {
             sni: Some(sni.clone().unwrap_or_else(|| cfg.hostname.clone())),
             alpn: vec!["h2".into()],
             pinned_sha256: Vec::new(),
+            allow_insecure: false,
             // A browser's ClientHello (Chrome unless set), not rustls's own.
             fingerprint: cfg.fingerprint.clone(),
         };
@@ -1025,6 +1026,7 @@ mod tests {
             sni: Some("front.example".into()),
             alpn: vec!["h2".into()],
             pinned_sha256: Vec::new(),
+            allow_insecure: false,
             fingerprint: None,
         };
         let der = base64::engine::general_purpose::STANDARD

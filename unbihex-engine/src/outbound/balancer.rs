@@ -141,6 +141,7 @@ impl BalancerOutbound {
                     sni: Some(host.clone()),
                     alpn: vec!["http/1.1".into()],
                     pinned_sha256: Vec::new(),
+                    allow_insecure: false,
                     fingerprint: Some("none".into()),
                 };
                 Some(TlsClient::new(&tls, &host)?)

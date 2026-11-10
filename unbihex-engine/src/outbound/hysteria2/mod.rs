@@ -129,6 +129,7 @@ impl Hysteria2Outbound {
             alpn: vec!["h3".into()],
             fingerprint: Some("none".into()),
             pinned_sha256: cfg.pinned_sha256.clone(),
+            allow_insecure: false,
         };
         let tls = TlsClient::quic_config(&tls, &cfg.server, roots)?;
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from((*tls).clone())

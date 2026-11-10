@@ -434,6 +434,9 @@ fn xray_outbound(ob: &Value, name: &str) -> Option<String> {
                     params.push(("extra", extra.to_string()));
                 }
             }
+            if stream.pointer("/tlsSettings/allowInsecure") == Some(&Value::Bool(true)) {
+                params.push(("allowInsecure", "1".into()));
+            }
             Some(vless_link(
                 str_of(&user, "id"),
                 host,
@@ -666,6 +669,9 @@ fn sing_box_outbound(ob: &Value) -> Option<String> {
             ];
             params.extend(sing_box_ws_params(ob, &network));
             params.extend(sing_box_grpc_params(ob, &network));
+            if tls.get("insecure") == Some(&Value::Bool(true)) {
+                params.push(("allowInsecure", "1".into()));
+            }
             Some(vless_link(
                 str_of(ob, "uuid"),
                 host,
@@ -1223,6 +1229,68 @@ mod tests {
                 assert!(g.multi_mode, "{link}");
                 assert_eq!(g.authority.as_deref(), Some("cdn.example"), "{link}");
             }
+        }
+    }
+
+    /// A server by IP whose JSON has no `serverName` but a transport host: the engine
+    /// sends the host as SNI (as v2rayN does), and `allowInsecure` / `insecure` is kept.
+    #[test]
+    fn sni_from_host_and_insecure_reach_the_engine() {
+        let tls = |insecure: bool| json!({"allowInsecure": insecure, "fingerprint": "chrome"});
+        let mut body = Vec::new();
+        for (proto, settings) in [
+            ("vless", json!({"address": "13.143.178.155", "port": 443, "id": UUID})),
+            ("vmess", json!({"vnext": [{"address": "13.143.178.155", "port": 443, "users": [{"id": UUID}]}]})),
+            ("trojan", json!({"servers": [{"address": "13.143.178.155", "port": 443, "password": "pw"}]})),
+        ] {
+            for (i, stream) in [
+                json!({"network": "ws", "wsSettings": {"path": "/w", "host": "cdn.example"}}),
+                json!({"network": "httpupgrade", "httpupgradeSettings": {"path": "/u", "host": "cdn.example"}}),
+                json!({"network": "grpc", "grpcSettings": {"serviceName": "s", "authority": "cdn.example"}}),
+                json!({"network": "xhttp", "xhttpSettings": {"path": "/x", "host": "cdn.example"}}),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if proto != "vless" && i == 3 {
+                    continue;
+                }
+                let mut stream = stream;
+                stream["security"] = json!("tls");
+                stream["tlsSettings"] = tls(i % 2 == 0);
+                body.push(json!({"protocol": proto, "settings": settings, "streamSettings": stream}));
+            }
+        }
+        let mut links = links_from_json(&json!({"outbounds": body}).to_string()).unwrap();
+        assert_eq!(links.len(), 10);
+        let sing_box = json!({"outbounds": [
+            {"type": "vless", "server": "13.143.178.155", "server_port": 443, "uuid": UUID,
+                "tls": {"enabled": true, "insecure": true}, "transport": {"type": "ws", "path": "/w", "host": "cdn.example"}},
+            {"type": "vmess", "server": "13.143.178.155", "server_port": 443, "uuid": UUID,
+                "tls": {"enabled": true}, "transport": {"type": "httpupgrade", "path": "/u", "host": "cdn.example"}},
+            {"type": "trojan", "server": "13.143.178.155", "server_port": 443, "password": "pw",
+                "tls": {"enabled": true, "insecure": true}, "transport": {"type": "ws", "path": "/w", "headers": {"Host": "cdn.example"}}}]});
+        let mut expect = Vec::new();
+        for proto in 0..3 {
+            for i in 0..if proto == 0 { 4 } else { 3 } {
+                expect.push(i % 2 == 0);
+            }
+        }
+        expect.extend([true, false, true]);
+        links.extend(links_from_json(&sing_box.to_string()).unwrap());
+        assert_eq!(links.len(), expect.len());
+        for (link, insecure) in links.iter().zip(expect) {
+            let s = parse_server(link).unwrap();
+            assert!(s.is_supported(), "{link}: {:?}", s.unsupported);
+            let tls = match unbihex_engine::link::parse_link(link, "proxy").unwrap() {
+                OutboundConfig::Vless(v) => v.tls,
+                OutboundConfig::Vmess(v) => v.tls,
+                OutboundConfig::Trojan(t) => t.tls,
+                other => panic!("{other:?}"),
+            }
+            .unwrap_or_else(|| panic!("no tls: {link}"));
+            assert_eq!(tls.sni.as_deref(), Some("cdn.example"), "{link}");
+            assert_eq!(tls.allow_insecure, insecure, "{link}");
         }
     }
 

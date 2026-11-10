@@ -1,5 +1,6 @@
 //! TLS client (SPEC §11.2): rustls + ring + webpki roots, optional leaf pinning, and a
-//! browser ClientHello (`fingerprint`). Certificate verification can never be disabled.
+//! browser ClientHello (`fingerprint`). Certificate verification is skipped only with
+//! `allow_insecure` (a link's `allowInsecure=1`); the handshake signature is still checked.
 
 use std::sync::Arc;
 
@@ -118,7 +119,7 @@ impl TlsClient {
                     name: name.clone(),
                 }))
                 .with_no_client_auth()
-        } else if cfg.pinned_sha256.is_empty() {
+        } else if cfg.pinned_sha256.is_empty() && !cfg.allow_insecure {
             builder.with_root_certificates(roots).with_no_client_auth()
         } else {
             let pins = cfg
@@ -137,7 +138,11 @@ impl TlsClient {
                 .map_err(|e| Error::Tls(e.to_string()))?;
             builder
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(PinningVerifier { inner, pins }))
+                .with_custom_certificate_verifier(Arc::new(PinningVerifier {
+                    inner,
+                    pins,
+                    insecure: cfg.allow_insecure,
+                }))
                 .with_no_client_auth()
         };
         config.alpn_protocols = cfg.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
@@ -309,11 +314,13 @@ impl ServerCertVerifier for NameVerifier {
     }
 }
 
-/// Standard WebPKI validation AND a match against one of the pinned leaf hashes.
+/// Standard WebPKI validation (skipped when `insecure`) AND a match against one of
+/// the pinned leaf hashes (when there are any).
 #[derive(Debug)]
 struct PinningVerifier {
     inner: Arc<WebPkiServerVerifier>,
     pins: Vec<[u8; 32]>,
+    insecure: bool,
 }
 
 impl ServerCertVerifier for PinningVerifier {
@@ -325,15 +332,17 @@ impl ServerCertVerifier for PinningVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        self.inner.verify_server_cert(
-            end_entity,
-            intermediates,
-            server_name,
-            ocsp_response,
-            now,
-        )?;
+        if !self.insecure {
+            self.inner.verify_server_cert(
+                end_entity,
+                intermediates,
+                server_name,
+                ocsp_response,
+                now,
+            )?;
+        }
         let digest: [u8; 32] = Sha256::digest(end_entity.as_ref()).into();
-        if self.pins.contains(&digest) {
+        if self.pins.is_empty() || self.pins.contains(&digest) {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General(
@@ -388,15 +397,44 @@ mod tests {
         let addr = l.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((s, _)) = l.accept().await {
-                let mut tls = acceptor.accept(s).await.unwrap();
-                tls.write_all(b"hello").await.unwrap();
-                tls.flush().await.unwrap();
+                let Ok(mut tls) = acceptor.accept(s).await else { continue };
+                // The client may have hung up already.
+                let _ = tls.write_all(b"hello").await;
+                let _ = tls.flush().await;
                 // Close the socket itself: no close_notify.
                 let (tcp, _) = tls.into_inner();
                 drop(tcp);
             }
         });
         (addr, cert)
+    }
+
+    /// `allow_insecure` takes an untrusted certificate for another name; a pin still holds.
+    #[tokio::test]
+    async fn allow_insecure_skips_verification_but_not_pins() {
+        let (addr, cert) = abrupt_server().await;
+        let mut cfg = TlsConfig {
+            enabled: true,
+            sni: Some("127.0.0.1".into()),
+            alpn: Vec::new(),
+            pinned_sha256: Vec::new(),
+            allow_insecure: false,
+            fingerprint: Some("chrome".into()),
+        };
+        let connect = |cfg: TlsConfig| async move {
+            let client = TlsClient::new(&cfg, "127.0.0.1").unwrap();
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            client.connect_tunnel(tcp).await.map(|_| ())
+        };
+        let e = connect(cfg.clone()).await.unwrap_err().to_string();
+        assert!(e.contains("certificate"), "{e}");
+        cfg.allow_insecure = true;
+        connect(cfg.clone()).await.unwrap();
+        cfg.pinned_sha256 = vec!["00".repeat(32)];
+        let e = connect(cfg.clone()).await.unwrap_err().to_string();
+        assert!(e.contains("pinned"), "{e}");
+        cfg.pinned_sha256 = vec![hex::encode(Sha256::digest(cert.as_ref()))];
+        connect(cfg).await.unwrap();
     }
 
     #[tokio::test]
@@ -407,6 +445,7 @@ mod tests {
             sni: Some("abrupt.test".into()),
             alpn: Vec::new(),
             pinned_sha256: Vec::new(),
+            allow_insecure: false,
             fingerprint: None,
         };
         let client = TlsClient::with_extra_roots(&cfg, "abrupt.test", vec![cert]).unwrap();

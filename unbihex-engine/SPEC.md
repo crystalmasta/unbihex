@@ -263,11 +263,15 @@ VLESS, VMess, Trojan (TLS и REALITY), TrustTunnel и NaiveProxy — так кл
 IPv6 в скобках:
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:
-  - `security=tls|reality|none`; `sni` / `serverName` (по умолчанию host), `alpn`, `fp` / `fingerprint` (§11.2);
-    для REALITY — `pbk` / `publicKey`, `sid` / `shortId`;
+  - `security=tls|reality|none`; `sni` / `serverName`, `alpn`, `fp` / `fingerprint` (§11.2), `allowInsecure=1` /
+    `insecure=1` (`true` тоже) — без проверки сертификата (`allow_insecure`, §11.2); для REALITY — `pbk` /
+    `publicKey`, `sid` / `shortId`;
+  - **имя для TLS без `sni`** — как в v2rayN / v2rayNG: host транспорта (`host` у `ws`/`httpupgrade`/`xhttp`, `Host`
+    из `headers`, у gRPC — `authority`; первый из списка через запятую), иначе адрес сервера. Сам Xray берёт только
+    адрес, поэтому сервер по IP с сертификатом на имя CDN проходит только так. У REALITY имя — только `sni`;
   - `type=tcp|raw` (или нет) либо `type=xhttp|splithttp` с `path`, `host`, `mode`, `extra` (JSON настроек Xray, §11.5),
-    либо `type=ws|httpupgrade` с `path` и `host` (§11.10; `host` — первый из списка через запятую, без `sni` имя для
-    TLS берётся из него — как в v2rayN); Vision и REALITY поверх WebSocket — ошибка, как в Xray;
+    либо `type=ws|httpupgrade` с `path` и `host` (§11.10; `host` — первый из списка через запятую); Vision и REALITY
+    поверх WebSocket — ошибка, как в Xray;
     либо `type=grpc` (или `gun`) с `serviceName` (если его нет — `path`), `authority`, `mode=multi|gun` (§11.18;
     TLS, REALITY или без шифрования; Vision поверх gRPC — ошибка, как в Xray);
   - `fm` / `finalmask` — `finalmask` Xray 26 (JSON) и старый `fragment=tlshello,<length>,<interval>` дают
@@ -292,15 +296,16 @@ IPv6 в скобках:
   `alpn`, `fp`) или URL-вид `vmess://<uuid>@<host>:<port>?type=…&security=…&encryption=…#<name>`. `net`/`type`:
   `tcp`/`raw` без маскировки заголовка, `ws`, `httpupgrade` (§11.10), `grpc` (§11.18; в JSON v2rayN `serviceName` в
   `path`, `authority` в `host`, режим `multi`/`gun` в `type`; в URL-виде — `serviceName`, `authority`, `mode`); `host` — первый из списка через запятую; без
-  `sni` имя для TLS берётся из `host`, затем сервера (как в v2rayN). `headers` и `ua` — как у VLESS (в JSON v2rayN
+  `sni` имя для TLS — как у VLESS (`host`, у gRPC — `authority`, затем сервер). `allowInsecure` / `insecure` — как у
+  VLESS. `headers` и `ua` — как у VLESS (в JSON v2rayN
   `headers` — объект или та же JSON-строка). Отклоняются: другие транспорты (`h2`,
-  `xhttp`, …), `headerType` кроме `none`, `security` кроме `tls`, `allowInsecure=1`, незнакомый шифр (ошибка
+  `xhttp`, …), `headerType` кроме `none`, `security` кроме `tls`, незнакомый шифр (ошибка
   называет его); `scy=none`/`zero` — это `auto` (§11.9).
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, по умолчанию `tls`; `sni` / `peer` /
   `serverName`, `alpn`, `fp`, для REALITY — `pbk`, `sid`; `type=tcp|raw|ws|httpupgrade` с `path`, `host`, `headers` и
-  `ua` (как у VLESS, без `sni` имя для TLS у WebSocket — из `host`) или `type=grpc` с `serviceName`, `authority`,
-  `mode` (как у VLESS, поверх TLS или REALITY). Отклоняются: `security=none` и другие, другие транспорты,
-  `headerType` кроме `none`, `flow`, `allowInsecure=1`, пустой пароль.
+  `ua` или `type=grpc` с `serviceName`, `authority`, `mode` (как у VLESS, поверх TLS или REALITY); имя для TLS без
+  `sni` и `allowInsecure` / `insecure` — как у VLESS. Отклоняются: `security=none` и другие, другие транспорты,
+  `headerType` кроме `none`, `flow`, пустой пароль.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, версии 0–2, §11.11): `hostname`, `addresses` (порт по умолчанию
   443), `custom_sni`, `has_ipv6`, логин и пароль, `certificate` (цепочка DER), `anti_dpi` → `fragment`, `name`.
   Отклоняются: версия новее 2, `skip_verification`, HTTP/3, `client_random_prefix` / `client_random_auth_key`,
@@ -624,8 +629,10 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = домен (1 B длина + байты), 0x0
 ### 11.2 TLS-клиент
 
 - `rustls` с провайдером `ring`, корни `webpki-roots`, TLS 1.2 и 1.3, `sni` (по умолчанию host), `alpn`. Проверка
-  сертификата всегда включена. `pinned_sha256` — SHA-256 DER leaf-сертификата **поверх** обычной проверки.
-  `ClientConfig` один на outbound.
+  сертификата включена, кроме `allow_insecure` (из `allowInsecure=1` ссылки или JSON подписки): тогда цепочка и имя
+  не проверяются, подпись рукопожатия — проверяется. `pinned_sha256` — SHA-256 DER leaf-сертификата **поверх**
+  обычной проверки (с `allow_insecure` — вместо неё). `ClientConfig` один на outbound; проверки балансировщика
+  (§11.16) идут через тот же outbound — с теми же `sni`, ALPN, отпечатком, `allow_insecure` и фрагментацией.
 - **Отпечаток браузера** (`fingerprint`, `fp` ссылки). ClientHello rustls легко отличить от браузерного (JA3/JA4), и
   DPI блокирует по нему. Патч `vendor/rustls` отдаёт закодированный ClientHello до хеширования и отправки; ядро
   пересобирает его по профилю браузера (`outbound/fingerprint.rs`, таблица `Profile` по пресетам uTLS, на которых
@@ -1070,8 +1077,9 @@ const char *unbihex_version(void);
 - Нет `unwrap()` на данных из сети; паника — только для инвариантов программы. `unsafe` — только §2.2.
 - Секреты (uuid, пароли, ключи, ссылки) не пишутся в логи: `Secret` и `Debug` конфигов показывают `***`.
 - В логах нет содержимого трафика; отдельные соединения пишутся только на уровне `debug`.
-- Проверку сертификата TLS отключить нельзя ни в конфиге, ни в ссылках (`insecure`, `allowInsecure`,
-  `skip-cert-verify` отклоняются). VLESS без шифрования — только с `allow_plaintext`.
+- Проверка сертификата TLS отключается только явно: `allow_insecure` в конфиге или `allowInsecure=1` / `insecure=1`
+  в ссылке VLESS, VMess, Trojan (как в v2rayNG и Happ); у Hysteria 2, NaiveProxy, TrustTunnel такие параметры
+  по-прежнему отклоняются. VLESS без шифрования — только с `allow_plaintext`.
 - Открытый прокси (SOCKS/HTTP без `users` не на loopback) — ошибка конфига.
 
 ---

@@ -23,6 +23,7 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let (mut service, mut authority, mut mode) = (String::new(), String::new(), String::new());
     let mut headers = WsHeaders::default();
     let mut frag = LinkFragment::default();
+    let mut insecure = false;
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let v = v.into_owned();
         match k.as_ref() {
@@ -49,22 +50,14 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
             "authority" => authority = v,
             "mode" => mode = v,
             // Like v2rayN: the first of a comma list.
-            "host" => {
-                host = v
-                    .split(',')
-                    .map(str::trim)
-                    .find(|h| !h.is_empty())
-                    .map(String::from)
-            }
+            "host" => host = super::first_host(&v),
             "headerType" if !(v.is_empty() || v == "none") => {
                 return Err(Error::Unsupported(format!("trojan headerType={v}")));
             }
             "flow" if !v.is_empty() => {
                 return Err(Error::Unsupported(format!("trojan flow={v}")));
             }
-            "allowInsecure" | "insecure" if matches!(v.as_str(), "1" | "true") => {
-                return Err(Error::Unsupported("trojan: insecure TLS".into()));
-            }
+            "allowInsecure" | "insecure" => insecure = super::insecure_flag(&v),
             _ => {}
         }
     }
@@ -74,7 +67,7 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
         "" | "tcp" | "raw" | "grpc" | "gun" => None,
         "ws" | "websocket" | "httpupgrade" => Some(WsConfig {
             path,
-            host,
+            host: host.clone(),
             httpupgrade: net == "httpupgrade",
             headers: headers.build()?,
         }),
@@ -82,14 +75,14 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
     };
     let (tls, reality) = match security.as_str() {
         "tls" => {
-            // Like v2rayN: without an SNI the HTTP host names the site.
-            let sni = sni.or_else(|| ws.as_ref().and_then(|w| w.host_header().map(String::from)))
-                .or_else(|| Some(server.clone()));
+            // Like v2rayN: without an SNI the transport's host names the site.
+            let host = if grpc.is_some() { authority.as_str() } else { host.as_deref().unwrap_or("") };
             let tls = TlsConfig {
                 enabled: true,
-                sni,
+                sni: super::tls_sni(sni, ws.as_ref(), host, &server),
                 alpn,
                 pinned_sha256: Vec::new(),
+                allow_insecure: insecure,
                 fingerprint: fp,
             };
             (Some(tls), None)
@@ -191,6 +184,29 @@ mod tests {
         assert!(t.tls.is_none());
     }
 
+    /// v2rayN: no `sni` → the transport's host (gRPC: authority); `allowInsecure` is kept.
+    #[test]
+    fn sni_from_transport_host_and_insecure() {
+        let tls = |q: &str| {
+            let OutboundConfig::Trojan(t) =
+                parse_link(&format!("trojan://pw@13.143.178.155:443?{q}"), "p").unwrap()
+            else {
+                panic!()
+            };
+            t.tls.unwrap()
+        };
+        let t = tls("type=ws&host=cdn.example%2Cb.example");
+        assert_eq!(t.sni.as_deref(), Some("cdn.example"));
+        assert!(!t.allow_insecure);
+        let t = tls("type=grpc&serviceName=s&authority=g.example&allowInsecure=1");
+        assert_eq!(t.sni.as_deref(), Some("g.example"));
+        assert!(t.allow_insecure);
+        assert_eq!(tls("type=grpc&serviceName=s&host=x.example").sni.as_deref(), Some("13.143.178.155"));
+        assert_eq!(tls("sni=s.example&type=ws&host=c.example&insecure=true").sni.as_deref(), Some("s.example"));
+        assert!(tls("insecure=true").allow_insecure);
+        assert_eq!(tls("").sni.as_deref(), Some("13.143.178.155"));
+    }
+
     #[test]
     fn unsupported_settings_are_refused() {
         for q in [
@@ -199,7 +215,6 @@ mod tests {
             "type=xhttp",
             "headerType=http",
             "flow=xtls-rprx-direct",
-            "allowInsecure=1",
             "fp=netscape",
             "security=reality&sni=a.example",
             "security=reality&pbk=wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE&type=ws",

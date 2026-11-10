@@ -264,11 +264,16 @@ client sets one for every server or for one. Parsing (`link.rs`): all parameters
 percent-decoded, the host may be IPv6 in brackets.
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:
-  - `security=tls|reality|none`; `sni` / `serverName` (the host by default), `alpn`, `fp` / `fingerprint` (§11.2);
-    REALITY takes `pbk` / `publicKey`, `sid` / `shortId`;
+  - `security=tls|reality|none`; `sni` / `serverName`, `alpn`, `fp` / `fingerprint` (§11.2), `allowInsecure=1` /
+    `insecure=1` (`true` too) turns certificate verification off (`allow_insecure`, §11.2); REALITY takes `pbk` /
+    `publicKey`, `sid` / `shortId`;
+  - **the TLS name without `sni`**, as in v2rayN / v2rayNG: the transport's host (`host` of `ws`/`httpupgrade`/
+    `xhttp`, `Host` from `headers`, gRPC's `authority`; the first of a comma list), else the server address. Xray
+    itself takes the address only, so a server given by IP with a certificate for the CDN name works only this way.
+    REALITY's name is `sni` only;
   - `type=tcp|raw` (or none), or `type=xhttp|splithttp` with `path`, `host`, `mode`, `extra` (Xray settings JSON, §11.5),
-    or `type=ws|httpupgrade` with `path` and `host` (§11.10; `host` is the first of a comma list and, without `sni`,
-    the TLS name, as in v2rayN); Vision and REALITY over WebSocket are an error, as in Xray;
+    or `type=ws|httpupgrade` with `path` and `host` (§11.10; `host` is the first of a comma list); Vision and
+    REALITY over WebSocket are an error, as in Xray;
     or `type=grpc` (or `gun`) with `serviceName` (else `path`), `authority`, `mode=multi|gun` (§11.18; TLS, REALITY
     or none; Vision over gRPC is an error, as in Xray);
   - `fm` / `finalmask` (Xray 26's `finalmask`, JSON) and the older `fragment=tlshello,<length>,<interval>` give the
@@ -299,15 +304,16 @@ as Xray 26 writes it; `obfs` wins; `salamander` with `packetSize` and other mask
   `tcp`/`raw` without header camouflage, `ws`, `httpupgrade` (§11.10), `grpc` (§11.18; in v2rayN JSON `serviceName`
   is in `path`, `authority` in `host`, the `multi`/`gun` mode in `type`; the URL form has `serviceName`, `authority`,
   `mode`); `host` is the first of a comma list; without
-  `sni` the TLS name comes from `host`, then the server (as in v2rayN). `headers` and `ua` as with VLESS (in v2rayN
+  `sni` the TLS name is as with VLESS (`host`, gRPC's `authority`, then the server). `allowInsecure` / `insecure` as
+  with VLESS. `headers` and `ua` as with VLESS (in v2rayN
   JSON `headers` is an object or the same JSON as a string). Refused: other transports (`h2`,
-  `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, `allowInsecure=1`, an unknown cipher
+  `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, an unknown cipher
   (the error names it); `scy=none`/`zero` mean `auto` (§11.9).
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, `tls` by default; `sni` / `peer` /
   `serverName`, `alpn`, `fp`, and `pbk`, `sid` for REALITY; `type=tcp|raw|ws|httpupgrade` with `path`, `host`,
-  `headers` and `ua` (as with VLESS: without `sni` the WebSocket's TLS name comes from `host`), or `type=grpc` with
-  `serviceName`, `authority`, `mode` (as with VLESS, over TLS or REALITY). Refused: `security=none` and others, other
-  transports, `headerType` other than `none`, `flow`, `allowInsecure=1`, an empty password.
+  `headers` and `ua`, or `type=grpc` with `serviceName`, `authority`, `mode` (as with VLESS, over TLS or REALITY);
+  the TLS name without `sni` and `allowInsecure` / `insecure` as with VLESS. Refused: `security=none` and others,
+  other transports, `headerType` other than `none`, `flow`, an empty password.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, versions 0–2, §11.11): `hostname`, `addresses` (port 443 by
   default), `custom_sni`, `has_ipv6`, user and password, `certificate` (a DER chain), `anti_dpi` → `fragment`, `name`.
   Refused: a version above 2, `skip_verification`, HTTP/3, `client_random_prefix` / `client_random_auth_key`, a
@@ -639,8 +645,11 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
 ### 11.2 TLS client
 
 - `rustls` with the `ring` provider, `webpki-roots` roots, TLS 1.2 and 1.3, `sni` (the host by default), `alpn`.
-  Certificate verification is always on. `pinned_sha256`: SHA-256 of the DER leaf certificate, checked **on top of**
-  normal verification. One `ClientConfig` per outbound.
+  Certificate verification is on unless `allow_insecure` (from a link's `allowInsecure=1` or a subscription's JSON):
+  then the chain and the name are not checked, the handshake signature still is. `pinned_sha256`: SHA-256 of the DER
+  leaf certificate, checked **on top of** normal verification (instead of it with `allow_insecure`). One
+  `ClientConfig` per outbound; the balancer's checks (§11.16) go through the same outbound, with the same `sni`,
+  ALPN, fingerprint, `allow_insecure` and fragmentation.
 - **Browser fingerprint** (`fingerprint`, a link's `fp`). rustls's ClientHello is easy to tell from a browser's
   (JA3/JA4), and DPI blocks by it. The `vendor/rustls` patch hands the encoded ClientHello over before it is hashed and
   sent; the engine rebuilds it from a browser profile (`outbound/fingerprint.rs`, a `Profile` table after the uTLS
@@ -1106,8 +1115,9 @@ next time the `VpnService` starts.
 - No `unwrap()` on network data; panics only for program invariants. `unsafe` only as in §2.2.
 - Secrets (uuid, passwords, keys, links) never reach the logs: `Secret` and config `Debug` show `***`.
 - Logs never contain traffic contents; individual connections are logged at `debug` only.
-- TLS certificate verification cannot be disabled, neither in the config nor in links (`insecure`, `allowInsecure`,
-  `skip-cert-verify` are refused). Unencrypted VLESS only with `allow_plaintext`.
+- TLS certificate verification is turned off only explicitly: `allow_insecure` in the config or `allowInsecure=1` /
+  `insecure=1` in a VLESS, VMess or Trojan link (as in v2rayNG and Happ); Hysteria 2, NaiveProxy and TrustTunnel
+  still refuse them. Unencrypted VLESS only with `allow_plaintext`.
 - An open proxy (SOCKS/HTTP without `users` off loopback) is a config error.
 
 ---

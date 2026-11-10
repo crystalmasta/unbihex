@@ -90,6 +90,7 @@ impl SecureUpstream {
             sni: Some(host.clone()),
             alpn,
             pinned_sha256: Vec::new(),
+            allow_insecure: false,
             fingerprint: Some("none".into()),
         };
         let tls = TlsClient::with_trust(&cfg, host, roots.to_vec(), None)?;

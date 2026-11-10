@@ -69,7 +69,7 @@ fn url_form(rest: &str) -> Result<(String, String, u16, Fields)> {
             "sni" | "serverName" => f.sni = v,
             "alpn" => f.alpn = v,
             "fp" | "fingerprint" => f.fp = v,
-            "allowInsecure" | "insecure" => f.insecure = matches!(v.as_str(), "1" | "true"),
+            "allowInsecure" | "insecure" => f.insecure = super::insecure_flag(&v),
             _ => {}
         }
     }
@@ -121,8 +121,8 @@ fn json_form(body: &str) -> Result<(String, String, u16, Fields)> {
         sni: field("sni"),
         alpn: field("alpn"),
         fp: field("fp"),
-        insecure: matches!(field("allowInsecure").as_str(), "1" | "true")
-            || matches!(field("insecure").as_str(), "1" | "true"),
+        insecure: super::insecure_flag(&field("allowInsecure"))
+            || super::insecure_flag(&field("insecure")),
         headers,
         // `fm` as a JSON string (like the URL parameter) or the object itself.
         fragment: LinkFragment {
@@ -179,15 +179,18 @@ fn build(tag: &str, uuid: String, server: String, port: u16, f: Fields) -> Resul
     let tls = match f.security.to_ascii_lowercase().as_str() {
         "" | "none" => None,
         "tls" => {
-            if f.insecure {
-                return Err(Error::Unsupported("vmess: insecure TLS".into()));
-            }
-            // Like v2rayN: without an SNI the HTTP host names the site.
-            let sni = Some(f.sni.clone())
-                .filter(|s| !s.is_empty())
-                .or_else(|| ws.as_ref().and_then(|w| w.host_header().map(String::from)))
-                .or_else(|| host.clone())
-                .or_else(|| Some(server.clone()));
+            // Like v2rayN: without an SNI the transport's host names the site
+            // (gRPC's authority sits in `host` of the base64 form).
+            let transport_host = match (&grpc, host.as_deref()) {
+                (Some(_), _) if !f.authority.is_empty() => f.authority.as_str(),
+                (_, h) => h.unwrap_or(""),
+            };
+            let sni = super::tls_sni(
+                Some(f.sni.clone()).filter(|s| !s.is_empty()),
+                ws.as_ref(),
+                transport_host,
+                &server,
+            );
             Some(TlsConfig {
                 enabled: true,
                 sni,
@@ -199,6 +202,7 @@ fn build(tag: &str, uuid: String, server: String, port: u16, f: Fields) -> Resul
                     .map(String::from)
                     .collect(),
                 pinned_sha256: Vec::new(),
+                allow_insecure: f.insecure,
                 fingerprint: Some(f.fp.clone()).filter(|s| !s.is_empty()),
             })
         }
@@ -285,12 +289,39 @@ mod tests {
         assert_eq!(v.security, "aes-128-gcm");
     }
 
+    /// v2rayN: no `sni` → the transport's host (gRPC: authority in `host`).
+    #[test]
+    fn sni_from_transport_host_and_insecure() {
+        let tls = |j: serde_json::Value| {
+            let OutboundConfig::Vmess(v) = parse_link(&v2rayn(j), "p").unwrap() else {
+                panic!()
+            };
+            v.tls.unwrap()
+        };
+        let t = tls(serde_json::json!({"add":"87.192.1.2","port":"443","id":UUID,"net":"grpc",
+            "path":"svc","host":"g.example","tls":"tls","allowInsecure":"1"}));
+        assert_eq!(t.sni.as_deref(), Some("g.example"));
+        assert!(t.allow_insecure);
+        let t = tls(serde_json::json!({"add":"87.192.1.2","port":"443","id":UUID,"net":"httpupgrade",
+            "host":"u.example","tls":"tls","allowInsecure":true}));
+        assert_eq!(t.sni.as_deref(), Some("u.example"));
+        assert!(t.allow_insecure, "a JSON true counts too");
+        let OutboundConfig::Vmess(v) = parse_link(
+            &format!("vmess://{UUID}@87.192.1.2:443?type=grpc&security=tls&serviceName=s&authority=a.example&insecure=1"),
+            "p",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        let t = v.tls.unwrap();
+        assert_eq!((t.sni.as_deref(), t.allow_insecure), (Some("a.example"), true));
+    }
+
     #[test]
     fn unsupported_settings_are_refused() {
         for j in [
             serde_json::json!({"add":"a","port":1,"id":UUID,"net":"tcp","type":"http"}),
             serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"reality"}),
-            serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"tls","allowInsecure":"1"}),
             serde_json::json!({"add":"a","port":1,"id":UUID,"scy":"aes-256-cfb"}),
             serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"tls","fp":"netscape"}),
             serde_json::json!({"add":"a","port":1,"id":"not-a-uuid"}),

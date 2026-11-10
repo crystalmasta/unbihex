@@ -434,6 +434,7 @@ async fn vision_and_reality_against_xray() {
         sni: Some("vless.test".into()),
         alpn: Vec::new(),
         pinned_sha256: Vec::new(),
+        allow_insecure: false,
         fingerprint: None,
     };
     let tls = TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![outer.cert_der.clone()])
@@ -630,6 +631,7 @@ async fn xhttp_cdn_obfuscation_against_xray() {
                 sni: Some("cdn.test".into()),
                 alpn: protocols.clone(),
                 pinned_sha256: Vec::new(),
+                allow_insecure: false,
                 fingerprint: Some("none".into()),
             };
             TlsClient::with_extra_roots(&tc, "cdn.test", vec![outer.cert_der.clone()]).unwrap()
@@ -704,6 +706,7 @@ async fn xhttp_uplink_placement_against_xray() {
             sni: Some("uplink.test".into()),
             alpn: vec!["h2".into()],
             pinned_sha256: Vec::new(),
+            allow_insecure: false,
             fingerprint: Some("none".into()),
         };
         let tls =
@@ -798,6 +801,7 @@ async fn xhttp_against_xray() {
         sni: Some("vless.test".into()),
         alpn: vec!["h2".into(), "http/1.1".into()],
         pinned_sha256: Vec::new(),
+        allow_insecure: false,
         fingerprint: None,
     };
     let alpn = tls_cfg.alpn.clone();
@@ -957,6 +961,7 @@ async fn vmess_against_xray() {
                         sni: Some("vmess.test".into()),
                         alpn: Vec::new(),
                         pinned_sha256: Vec::new(),
+                        allow_insecure: false,
                         fingerprint: None,
                     }),
                     fragment: None,
@@ -995,6 +1000,7 @@ fn test_tls(sni: &str) -> unbihex_engine::config::TlsConfig {
         sni: Some(sni.into()),
         alpn: Vec::new(),
         pinned_sha256: Vec::new(),
+        allow_insecure: false,
         fingerprint: None,
     }
 }
@@ -1428,6 +1434,116 @@ async fn grpc_against_xray() {
             Err(e) => Err(std::io::Error::other(e.to_string())),
         };
         assert!(!matches!(r, Ok(n) if n > 0), "a wrong service name must not relay: {r:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A server given by IP whose certificate names only its CDN host, as the "bypass"
+/// servers of a subscription are: the link has `host` (gRPC: `authority`) and no
+/// `sni`. v2rayN / v2rayNG send the host as the server name; with the address the
+/// name check fails ("certificate not valid for name 127.0.0.1"). Then
+/// `allowInsecure=1` against a certificate nobody trusts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn link_sni_from_host_against_xray() {
+    use unbihex_engine::config::OutboundConfig;
+
+    let Some(bin) = xray_bin() else {
+        eprintln!("XRAY_BIN is not set: skipping the SNI-from-host interop test");
+        return;
+    };
+    init_tracing();
+    let pem = cert("cdn-host.test");
+    let echo = tcp_echo().await;
+    let dir = std::env::temp_dir().join(format!("unbihex-pem-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("cert.pem"), &pem.cert_pem).unwrap();
+    std::fs::write(dir.join("key.pem"), &pem.key_pem).unwrap();
+
+    // (network, the server's transport settings, the link's transport query)
+    let cases = [
+        ("ws", serde_json::json!({"path": "/p", "host": "cdn-host.test"}), "type=ws&path=%2Fp&host=cdn-host.test"),
+        (
+            "httpupgrade",
+            serde_json::json!({"path": "/p", "host": "cdn-host.test"}),
+            "type=httpupgrade&path=%2Fp&host=cdn-host.test",
+        ),
+        ("xhttp", serde_json::json!({"path": "/p", "mode": "auto"}), "type=xhttp&path=%2Fp&host=cdn-host.test&mode=auto"),
+        ("grpc", serde_json::json!({"serviceName": "svc"}), "type=grpc&serviceName=svc&authority=cdn-host.test"),
+        ("tcp", serde_json::json!({}), "type=tcp&allowInsecure=1"),
+    ];
+    for (network, settings, query) in cases {
+        let port = free_port();
+        let mut stream = stream_settings("tcp", true, &dir);
+        stream["network"] = network.into();
+        if network != "tcp" {
+            stream[format!("{network}Settings")] = settings;
+        }
+        stream["tlsSettings"]["alpn"] = serde_json::json!(["h2", "http/1.1"]);
+        let _xray = start_xray(
+            &bin,
+            serde_json::json!({
+                "log": { "loglevel": "debug" },
+                "inbounds": [{
+                    "listen": "127.0.0.1", "port": port, "protocol": "vless",
+                    "settings": { "clients": [{ "id": UUID }], "decryption": "none" },
+                    "streamSettings": stream
+                }],
+                "outbounds": [loopback_freedom()]
+            }),
+        )
+        .await;
+        let build = |query: &str, trust: bool| -> Arc<dyn Outbound> {
+            let link = format!("vless://{UUID}@127.0.0.1:{port}?security=tls&fp=chrome&{query}#ip");
+            let OutboundConfig::Vless(c) = unbihex_engine::link::parse_link(&link, "ip").unwrap() else {
+                panic!("not vless");
+            };
+            let tls = c.tls.clone().unwrap();
+            let sockets = Arc::new(SocketFactory::default());
+            let roots = if trust { vec![pem.cert_der.clone()] } else { Vec::new() };
+            if let Some(x) = &c.xhttp {
+                let mut t = tls.clone();
+                t.alpn = vec!["h2".into(), "http/1.1".into()];
+                let client = TlsClient::with_extra_roots(&t, &c.server, roots).unwrap();
+                let x = XhttpClient::new(
+                    x,
+                    endpoint(port),
+                    sockets.clone(),
+                    Some(client),
+                    &t.alpn,
+                    tls.sni.as_deref(),
+                    None,
+                    None,
+                )
+                .unwrap();
+                let uuid = *uuid::Uuid::parse_str(UUID).unwrap().as_bytes();
+                return Arc::new(
+                    VlessOutbound::from_parts("ip", uuid, endpoint(port), None, sockets)
+                        .with_xhttp(Some(Arc::new(x))),
+                );
+            }
+            Arc::new(
+                VlessOutbound::new(&c, endpoint(port), sockets)
+                    .unwrap()
+                    .with_extra_roots(&c, roots)
+                    .unwrap(),
+            )
+        };
+        let insecure = query.contains("allowInsecure=1");
+        eprintln!("vless {network} by IP: {query}");
+        plain_roundtrip(build(query, !insecure).as_ref(), echo).await;
+        // The address as the name (an explicit sni=127.0.0.1, what we sent before)
+        // or an untrusted certificate without allowInsecure fails.
+        let bad = if insecure {
+            query.replace("&allowInsecure=1", "")
+        } else {
+            format!("{query}&sni=127.0.0.1")
+        };
+        let e = match build(&bad, !insecure).connect_tcp(&session(echo)).await {
+            Ok(_) => panic!("{network}: {bad} must fail"),
+            Err(e) => e.to_string(),
+        };
+        eprintln!("  without it: {e}");
+        assert!(e.contains("certificate") || e.contains("Certificate"), "{e}");
     }
     let _ = std::fs::remove_dir_all(dir);
 }

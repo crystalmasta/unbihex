@@ -1044,7 +1044,7 @@ impl VlessConfig {
     }
 }
 
-/// TLS client settings. Certificate verification cannot be disabled.
+/// TLS client settings. Certificate verification is off only with `allow_insecure`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -1060,6 +1060,10 @@ pub struct TlsConfig {
     /// Hex SHA-256 of the leaf certificate (DER). Checked in addition to normal validation.
     #[serde(default)]
     pub pinned_sha256: Vec<String>,
+    /// Accept any certificate (a link's `allowInsecure=1` / `insecure=1`, Xray's
+    /// `allowInsecure`); `pinned_sha256`, when set, is still required.
+    #[serde(default)]
+    pub allow_insecure: bool,
     /// Browser whose ClientHello is sent (`fp` of a link): `chrome`, `firefox`, `safari`,
     /// `ios`, `android`, `edge`, `360`, `qq`, `random` or `randomized`; `none` sends
     /// rustls's own ClientHello.

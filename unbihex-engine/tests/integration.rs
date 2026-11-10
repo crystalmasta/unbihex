@@ -224,6 +224,7 @@ async fn vless_over_tls() {
         sni: Some("vless.test".into()),
         alpn: vec![],
         pinned_sha256: vec![],
+        allow_insecure: false,
         fingerprint: None,
     };
     let tls =
@@ -274,6 +275,7 @@ async fn vless_over_tls() {
     // A wrong pin fails even though the chain is trusted.
     let pinned = TlsConfig {
         pinned_sha256: vec!["00".repeat(32)],
+        allow_insecure: false,
         ..tls_cfg.clone()
     };
     let tls =

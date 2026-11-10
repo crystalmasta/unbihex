@@ -357,6 +357,7 @@ async fn strangers_get_the_real_site() {
         sni: Some(SITE.into()),
         alpn: vec![],
         pinned_sha256: vec![],
+        allow_insecure: false,
         fingerprint: Some("chrome".into()),
     };
     let tls = TlsClient::with_extra_roots(&tls_cfg, SITE, vec![s.site.cert.clone()]).unwrap();
