@@ -30,6 +30,9 @@ pub enum ClientError {
     /// Already connected / not connected.
     #[error("{0}")]
     State(String),
+    /// Checking for or downloading an update failed.
+    #[error("обновление: {0}")]
+    Update(String),
 }
 
 /// Result with [`ClientError`].

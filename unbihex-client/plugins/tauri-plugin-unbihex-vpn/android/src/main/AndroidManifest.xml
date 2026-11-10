@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- "Обновить": opens the system installer for a downloaded, verified APK (issue #54). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Choosing apps for the VPN: every installed package, system ones too
          (Android 11+ hides the rest without it). -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
@@ -40,7 +42,7 @@
         <activity android:name="com.unbihex.vpn.VpnTilePreferencesActivity" android:exported="true" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
         </activity>
-        <!-- The log shared as a file (Telegram and the like). -->
+        <!-- The log shared as a file (Telegram and the like) and an update APK for the installer. -->
         <provider android:name="com.unbihex.vpn.UnbihexFileProvider"
             android:authorities="${applicationId}.unbihex.files"
             android:exported="false" android:grantUriPermissions="true">

@@ -9,8 +9,10 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.util.Base64
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.result.ActivityResult
 import androidx.core.content.FileProvider
 import app.tauri.annotation.ActivityCallback
@@ -275,6 +277,58 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         } catch (e: Exception) {
             invoke.reject("Не удалось поделиться журналом: ${e.message}")
+        }
+    }
+
+    private fun updatesDir() = File(activity.cacheDir, "updates")
+
+    /** Where the Rust side puts a downloaded update; older files there are removed. */
+    @Command
+    fun updateDir(invoke: Invoke) {
+        val dir = updatesDir()
+        dir.mkdirs()
+        dir.listFiles()?.forEach { it.delete() }
+        val res = JSObject()
+        res.put("path", dir.absolutePath)
+        invoke.resolve(res)
+    }
+
+    @InvokeArg
+    class InstallArgs { var path: String = "" }
+
+    /**
+     * Opens the system installer for an APK of Unbihex that the Rust side downloaded
+     * into [updatesDir] and checked against SHA256SUMS.txt; Android itself refuses an
+     * APK signed with another key. Without "Install unknown apps" allowed for
+     * Unbihex, its settings page opens and the command says what to do.
+     */
+    @Command
+    fun installApk(invoke: Invoke) {
+        val args = invoke.parseArgs(InstallArgs::class.java)
+        try {
+            val file = File(args.path).canonicalFile
+            if (file.parentFile != updatesDir().canonicalFile || !file.isFile || !file.name.endsWith(".apk")) {
+                invoke.reject("Файл обновления не найден")
+                return
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) {
+                try {
+                    activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${activity.packageName}")))
+                } catch (_: Exception) {
+                }
+                invoke.reject("Android не разрешает Unbihex устанавливать обновления. В открывшихся настройках " +
+                    "включите «Разрешить установку из этого источника», вернитесь и нажмите «Обновить» ещё раз.")
+                return
+            }
+            val uri = FileProvider.getUriForFile(activity, UnbihexFileProvider.authority(activity), file)
+            val view = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            activity.startActivity(view)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Не удалось открыть установку: ${e.message}")
         }
     }
 

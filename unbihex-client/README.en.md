@@ -417,7 +417,13 @@ What it holds (fields an older file lacks get their defaults):
   - `dns_upstream`: the remote DNS, `dns_direct`: the home DNS (empty: none), in the forms listed under "The engine's DNS"
     above;
   - `mux`: UDP through one Mux.Cool connection;
-  - `android_apps_mode`: `all` / `only` / `except`, `android_apps`: package names.
+  - `android_apps_mode`: `all` / `only` / `except`, `android_apps`: package names;
+  - `check_updates`: check for updates automatically (on by default, at most once a day).
+
+Next to it, `update.json` keeps the time and result of the last update check (the latest release of
+`crystalmasta/unbihex` on GitHub). The installer is downloaded only with the "Обновить" button (Windows, Android)
+and checked against `SHA256SUMS.txt` of the same release; macOS and Linux get the release link, `unbihex-cli` has
+the `check-update` command.
 
 ## Author and license
 

@@ -411,7 +411,13 @@ Windows — `%APPDATA%\com.unbihex.client`, Android/iOS — внутренняя
   - `tls_fingerprint` — отпечаток для всех серверов, пусто — как в ссылке;
   - `dns_upstream` — удалённый DNS, `dns_direct` — домашний (пусто — нет), в форматах из «DNS ядра» выше;
   - `mux` — UDP через одно соединение Mux.Cool;
-  - `android_apps_mode` — `all` / `only` / `except`, `android_apps` — имена пакетов.
+  - `android_apps_mode` — `all` / `only` / `except`, `android_apps` — имена пакетов;
+  - `check_updates` — проверять обновления автоматически (по умолчанию да, не чаще раза в сутки).
+
+Рядом лежит `update.json` — время и результат последней проверки обновлений (последний релиз
+`crystalmasta/unbihex` на GitHub). Установщик скачивается только по кнопке «Обновить» (Windows, Android) и
+сверяется с `SHA256SUMS.txt` того же релиза; на macOS и Linux — только ссылка на релиз, в `unbihex-cli` —
+команда `check-update`.
 
 ## Автор и лицензия
 

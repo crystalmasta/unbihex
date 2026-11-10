@@ -19,6 +19,8 @@ uuid.workspace = true
 base64 = "0.22"
 percent-encoding = "2"
 url = "2"
+# SHA-256 of downloaded updates (already in the tree through the engine).
+sha2 = "0.10"
 ipnet = "2"
 parking_lot = "0.12"
 # HTTPS for subscriptions: rustls with ring (no cmake/nasm needed on Windows).

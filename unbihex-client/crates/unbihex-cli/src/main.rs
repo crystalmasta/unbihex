@@ -49,6 +49,8 @@ usage: unbihex-cli [--dir <folder>] [<command>]
                            never touched; SIGHUP reloads the file
   check -c <config.json>   validate an engine config
   version
+  check-update             ask GitHub for a newer release (prints the release page;
+                           nothing is downloaded)
 
 Data lives in --dir, else $UNBIHEX_DIR, else $XDG_CONFIG_HOME/unbihex-cli or
 ~/.config/unbihex-cli. Logs go to stderr; RUST_LOG=debug shows more.";
@@ -409,6 +411,14 @@ async fn run(client: &Client, cmd: &str, args: &[String]) -> Result<(), String> 
             env!("CARGO_PKG_VERSION"),
             unbihex_client_core::ENGINE_VERSION
         ),
+        "check-update" => {
+            let info = unbihex_client_core::update::check().await.map_err(|e| e.to_string())?;
+            if info.newer {
+                println!("unbihex {} is available (this is {}): {}", info.latest.version, info.current, info.latest.url);
+            } else {
+                println!("up to date: {} is the latest release", info.current);
+            }
+        }
         _ => return Err(USAGE.into()),
     }
     Ok(())

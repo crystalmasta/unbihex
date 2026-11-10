@@ -1,4 +1,4 @@
-// Events the backend sends: state-changed, ping-result, toast, autostart-admin.
+// Events the backend sends: state-changed, ping-result, toast, autostart-admin, update-available.
 import { listen } from "./tauri.js";
 
 export const onBackendEvent = (name, fn) => listen(name, fn);

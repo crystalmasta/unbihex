@@ -1,5 +1,22 @@
 // Вкладка «Общие».
 export const generalMarkup = `          <fieldset data-tab="general">
+            <legend>Обновления<button type="button" class="info-btn" data-info="i-updates" aria-label="Подробнее">ⓘ</button></legend>
+            <p class="info" id="i-updates" hidden>Unbihex спрашивает у GitHub последний релиз <code>crystalmasta/unbihex</code> (только по HTTPS) не чаще раза в сутки. Ничего не скачивается без кнопки «Обновить». На Windows скачивается установщик, на Android — APK для вашего процессора; файл сверяется с SHA-256 из того же релиза, подпись APK проверяет Android. На macOS и Linux — только ссылка на релиз. Ошибка сети не мешает VPN: проверка тихо повторится позже.</p>
+            <label class="check"><input name="check_updates" type="checkbox" /> <span>Проверять обновления автоматически</span></label>
+            <div class="form-actions">
+              <button type="button" class="btn" id="update-check">Проверить сейчас</button>
+              <p class="hint" id="update-status"></p>
+            </div>
+            <div class="update-box" id="update-box" hidden>
+              <div class="update-title" id="update-title"></div>
+              <pre class="update-notes" id="update-notes"></pre>
+              <div class="form-actions">
+                <button type="button" class="btn primary" id="update-install">Обновить</button>
+                <a href="#" class="link" id="update-page" data-href="">Страница релиза</a>
+              </div>
+            </div>
+          </fieldset>
+          <fieldset data-tab="general">
             <legend>Запуск</legend>
             <div id="desktop-autostart">
               <label class="check"><input name="auto_start" type="checkbox" /> <span>Запускать при входе в Windows</span></label>

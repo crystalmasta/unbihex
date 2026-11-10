@@ -50,3 +50,7 @@ export const clearLogs = () => invoke("clear_logs");
 // The log with secrets masked: as text, or saved / shared as a .txt file (the saved path, or null).
 export const exportLogs = () => invoke("export_logs");
 export const saveLogs = () => invoke("save_logs");
+
+// Updates (issue #54): the latest release compared with this build; "Обновить".
+export const checkUpdate = () => invoke("check_update");
+export const installUpdate = () => invoke("install_update");
