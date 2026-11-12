@@ -692,3 +692,90 @@ async fn mixed_inbound_serves_both_protocols_and_refuses_loops() {
     );
     inst.shutdown().await;
 }
+
+/// SOCKS5 UDP ASSOCIATE: the TCP control connection and the relay address of the reply.
+async fn udp_associate(proxy: SocketAddr, from_port: u16) -> (TcpStream, SocketAddr) {
+    let mut s = TcpStream::connect(proxy).await.unwrap();
+    s.write_all(&[5, 1, 0]).await.unwrap();
+    let mut m = [0u8; 2];
+    s.read_exact(&mut m).await.unwrap();
+    assert_eq!(m, [5, 0]);
+    let mut req = vec![5, 3, 0, 1, 0, 0, 0, 0];
+    req.extend_from_slice(&from_port.to_be_bytes());
+    s.write_all(&req).await.unwrap();
+    let mut head = [0u8; 4];
+    s.read_exact(&mut head).await.unwrap();
+    assert_eq!(&head[..2], &[5, 0], "UDP ASSOCIATE refused");
+    let relay = unbihex_engine::address::read_socks_addr(&mut {
+        let mut b = vec![head[3]];
+        let mut rest = [0u8; 6];
+        s.read_exact(&mut rest).await.unwrap();
+        b.extend_from_slice(&rest);
+        std::io::Cursor::new(b)
+    })
+    .await
+    .unwrap();
+    (s, relay.socket_addr().unwrap())
+}
+
+/// One datagram through the relay; the reply's payload and the source in its header.
+async fn udp_via(c: &tokio::net::UdpSocket, relay: SocketAddr, to: SocketAddr, payload: &[u8]) -> Option<(String, Vec<u8>)> {
+    let mut d = vec![0, 0, 0];
+    unbihex_engine::address::write_socks_addr(&to.into(), &mut d).unwrap();
+    d.extend_from_slice(payload);
+    c.send_to(&d, relay).await.unwrap();
+    let mut buf = vec![0u8; 65_535];
+    // Windows reports a closed port as an error on the next receive: no reply either.
+    let n = tokio::time::timeout(Duration::from_secs(2), c.recv(&mut buf)).await.ok()?.ok()?;
+    let (from, used) = unbihex_engine::address::parse_socks_addr(&buf[3..n]).unwrap();
+    Some((from.to_string(), buf[3 + used..n].to_vec()))
+}
+
+#[tokio::test]
+async fn socks_and_mixed_udp_associate() {
+    for kind in ["socks", "mixed"] {
+        let (echo1, echo2) = (udp_echo().await, udp_echo().await);
+        let port = free_port();
+        let inst = start(format!(
+            r#"{{"inbounds":[{{ "type": "{kind}", "tag": "in", "listen": "0.0.0.0:{port}",
+                    "users": [{{"username": "u", "password": "p"}}], "loopback_without_auth": true }}],
+                 "outbounds":[{{"type":"direct","tag":"direct"}}]}}"#
+        ))
+        .await;
+        let c = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (control, relay) = udp_associate(proxy_addr(port), 0).await;
+        // A listener on 0.0.0.0 names the address the client used, not 0.0.0.0.
+        assert_eq!(relay.ip().to_string(), "127.0.0.1", "{kind}");
+        // A DNS-like exchange with two destinations of one association.
+        for (to, q) in [(echo1, &b"query one"[..]), (echo2, b"query two"), (echo1, b"again")] {
+            let (from, back) = udp_via(&c, relay, to, q).await.expect("no reply");
+            assert_eq!((from, back.as_slice()), (to.to_string(), q), "{kind}");
+        }
+        // Closing the control connection ends the association.
+        drop(control);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(udp_via(&c, relay, echo1, b"late").await.is_none(), "{kind}: closed");
+        // A client that named its port: other ports of its IP are not it.
+        let named = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (_control, relay) = udp_associate(proxy_addr(port), named.local_addr().unwrap().port()).await;
+        assert!(udp_via(&c, relay, echo1, b"stranger").await.is_none(), "{kind}: other port");
+        assert!(udp_via(&named, relay, echo1, b"me").await.is_some(), "{kind}: named port");
+        inst.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn udp_associate_can_be_turned_off() {
+    let port = free_port();
+    let inst = start(format!(
+        r#"{{"inbounds":[{{ "type": "socks", "tag": "in", "listen": "127.0.0.1:{port}", "udp": false }}],
+             "outbounds":[{{"type":"direct","tag":"direct"}}]}}"#
+    ))
+    .await;
+    let mut s = TcpStream::connect(proxy_addr(port)).await.unwrap();
+    s.write_all(&[5, 1, 0, 5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+    let mut r = [0u8; 4];
+    s.read_exact(&mut r).await.unwrap();
+    assert_eq!(r, [5, 0, 5, 7], "command not supported");
+    inst.shutdown().await;
+}

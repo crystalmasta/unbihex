@@ -1,4 +1,4 @@
-//! SOCKS5 server (RFC 1928 / RFC 1929). CONNECT only.
+//! SOCKS5 server (RFC 1928 / RFC 1929): CONNECT and UDP ASSOCIATE (`socks_udp`).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+use super::socks_udp::{self, Association};
 use super::{check_user, needs_auth};
 use crate::address::read_socks_addr;
 use crate::config::ProxyInboundConfig;
@@ -17,7 +18,37 @@ use crate::error::{Error, Result};
 use crate::session::{Network, Session};
 
 const REP_OK: u8 = 0x00;
+const REP_FAILURE: u8 = 0x01;
 const REP_CMD_NOT_SUPPORTED: u8 = 0x07;
+
+const CMD_CONNECT: u8 = 0x01;
+const CMD_UDP_ASSOCIATE: u8 = 0x03;
+
+/// What a finished handshake asks for.
+pub(super) enum Accepted {
+    /// CONNECT: a TCP session.
+    Connect(TcpStream, Session),
+    /// UDP ASSOCIATE: the control connection and the association.
+    Associate(TcpStream, Association),
+}
+
+/// Runs what a handshake accepted until it is done.
+pub(super) async fn serve_accepted(
+    a: Accepted,
+    peer: SocketAddr,
+    cfg: &ProxyInboundConfig,
+    d: Arc<Dispatcher>,
+) {
+    match a {
+        Accepted::Connect(stream, sess) if cfg.sniff => {
+            d.dispatch_tcp_sniffing(sess, Box::new(stream)).await
+        }
+        Accepted::Connect(stream, sess) => d.dispatch_tcp(sess, Box::new(stream)).await,
+        Accepted::Associate(control, assoc) => {
+            socks_udp::run(control, assoc, peer, cfg.tag.clone(), cfg.sniff, d).await
+        }
+    }
+}
 
 /// Binds the listening socket (fails fast on a busy port).
 pub async fn bind(cfg: &ProxyInboundConfig) -> Result<TcpListener> {
@@ -63,10 +94,7 @@ pub async fn serve(
             let r = tokio::time::timeout(handshake_timeout, handshake(stream, peer, &cfg)).await;
             drop(permit);
             match r {
-                Ok(Ok(Some((stream, sess)))) if cfg.sniff => {
-                    d.dispatch_tcp_sniffing(sess, Box::new(stream)).await
-                }
-                Ok(Ok(Some((stream, sess)))) => d.dispatch_tcp(sess, Box::new(stream)).await,
+                Ok(Ok(Some(a))) => serve_accepted(a, peer, &cfg, d).await,
                 Ok(Ok(None)) => {}
                 Ok(Err(e)) => tracing::debug!("socks {peer}: {e}"),
                 Err(_) => tracing::debug!("socks {peer}: handshake timed out"),
@@ -80,7 +108,7 @@ pub(super) async fn handshake(
     mut s: TcpStream,
     peer: SocketAddr,
     cfg: &ProxyInboundConfig,
-) -> Result<Option<(TcpStream, Session)>> {
+) -> Result<Option<Accepted>> {
     let mut head = [0u8; 2];
     s.read_exact(&mut head).await?;
     if head[0] != 0x05 {
@@ -123,15 +151,37 @@ pub(super) async fn handshake(
         return Err(Error::protocol("bad request version"));
     }
     let target = read_socks_addr(&mut s).await?;
-    if req[1] != 0x01 {
-        s.write_all(&[0x05, REP_CMD_NOT_SUPPORTED, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            .await?;
-        return Ok(None);
+    match req[1] {
+        CMD_CONNECT => {}
+        CMD_UDP_ASSOCIATE if cfg.udp => {
+            // The socket goes on the address the client reached us at, so that the
+            // reply names one it can send to (not 0.0.0.0).
+            let ip = match cfg.listen.ip() {
+                ip if ip.is_unspecified() => s.local_addr()?.ip(),
+                ip => ip,
+            };
+            let hint = target.socket_addr().unwrap_or_else(|| SocketAddr::new(ip, 0));
+            let assoc = match Association::bind(ip, hint).await {
+                Ok(a) => a,
+                Err(e) => {
+                    s.write_all(&[0x05, REP_FAILURE, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                        .await?;
+                    return Err(e);
+                }
+            };
+            s.write_all(&assoc.reply()?).await?;
+            return Ok(Some(Accepted::Associate(s, assoc)));
+        }
+        _ => {
+            s.write_all(&[0x05, REP_CMD_NOT_SUPPORTED, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await?;
+            return Ok(None);
+        }
     }
     // Reply before connecting upstream to save a round trip; failures close the stream.
     s.write_all(&[0x05, REP_OK, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await?;
-    Ok(Some((
+    Ok(Some(Accepted::Connect(
         s,
         Session {
             network: Network::Tcp,

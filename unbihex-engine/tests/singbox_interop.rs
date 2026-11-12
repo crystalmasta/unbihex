@@ -388,3 +388,49 @@ async fn quic_initial_of_sing_box_is_sniffed() {
     eprintln!("sing-box's first datagram: {} bytes", datagrams[0].len());
     assert_eq!(name, Sniff::Name("hy2.sing-box.example".into()));
 }
+
+/// sing-box as a SOCKS5 client with UDP (its `socks` outbound uses UDP ASSOCIATE)
+/// through our socks inbound to a UDP echo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sing_box_socks_udp_through_our_inbound() {
+    let Some(bin) = std::env::var("SINGBOX_BIN").ok().filter(|p| !p.is_empty()) else {
+        eprintln!("SINGBOX_BIN is not set: skipping the SOCKS UDP test");
+        return;
+    };
+    init_tracing();
+    let echo = common::udp_echo().await;
+    let ours = free_port();
+    let cfg = unbihex_engine::Config::from_json(&format!(
+        r#"{{"inbounds":[{{"type":"socks","tag":"in","listen":"127.0.0.1:{ours}"}}],
+             "outbounds":[{{"type":"direct","tag":"direct"}}]}}"#
+    ))
+    .unwrap();
+    let inst = unbihex_engine::Instance::start(cfg, unbihex_engine::PlatformHooks::default())
+        .await
+        .unwrap();
+    let port = free_port();
+    let _sb = start_sing_box(
+        &bin,
+        serde_json::json!({
+            "log": { "level": "debug" },
+            "inbounds": [{
+                "type": "direct", "listen": "127.0.0.1", "listen_port": port,
+                "override_address": "127.0.0.1", "override_port": echo.port()
+            }],
+            "outbounds": [{ "type": "socks", "server": "127.0.0.1", "server_port": ours, "version": "5" }]
+        }),
+        port,
+    )
+    .await;
+    let c = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut buf = vec![0u8; 2048];
+    for q in [&b"first query"[..], b"second query"] {
+        c.send_to(q, ("127.0.0.1", port)).await.unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(5), c.recv(&mut buf))
+            .await
+            .expect("no reply through sing-box and our SOCKS UDP")
+            .unwrap();
+        assert_eq!(&buf[..n], q);
+    }
+    inst.shutdown().await;
+}

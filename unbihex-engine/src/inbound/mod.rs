@@ -9,6 +9,7 @@ pub mod reality;
 #[cfg(feature = "server")]
 mod reality_shape;
 pub mod socks;
+mod socks_udp;
 pub mod tun;
 #[cfg(feature = "server")]
 pub mod vless;
@@ -69,6 +70,7 @@ mod tests {
             users: vec![],
             loopback_without_auth: true,
             sniff: true,
+            udp: true,
         };
         let lan: SocketAddr = "192.168.1.20:50000".parse().unwrap();
         let local: SocketAddr = "127.0.0.1:50000".parse().unwrap();

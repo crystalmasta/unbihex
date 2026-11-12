@@ -48,7 +48,8 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   TCP and ICMP also test servers whose protocol is not supported; in TUN mode the tests bypass the tunnel.
 - Desktop modes:
   - **System proxy** — no administrator rights; the engine listens on `127.0.0.1:10809` (HTTP) and `:10808` (SOCKS5 and
-    HTTP on one port, so `HTTP_PROXY=http://127.0.0.1:10808` works too);
+    HTTP on one port, so `HTTP_PROXY=http://127.0.0.1:10808` works too; SOCKS5 also takes UDP ASSOCIATE: UDP
+    and QUIC from programs and routers that use it);
   - **TUN** — all of the computer's traffic (administrator, `wintun.dll` next to the exe);
   - **Port only** — the system is left alone; set the proxy in your programs by hand.
 - "Allow connections from the local network": the proxy listens on `0.0.0.0`, and devices on the network need the

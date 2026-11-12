@@ -354,6 +354,10 @@ pub struct ProxyInboundConfig {
     /// domain rules apply when the client (a router, say) sends only addresses.
     #[serde(default = "default_true")]
     pub sniff: bool,
+    /// Accept SOCKS5 UDP ASSOCIATE (the SOCKS part of `socks` and `mixed`); off,
+    /// the command is refused with 0x07.
+    #[serde(default = "default_true")]
+    pub udp: bool,
 }
 
 /// A login and password accepted by a proxy inbound.

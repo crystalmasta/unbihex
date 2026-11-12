@@ -538,7 +538,16 @@ The socket is created with `socket2` and configured **before** `connect`/`bind`,
   constant-time comparison. `loopback_without_auth: true` lets clients from a loopback address in without a password
   (local apps and the system proxy cannot send one), others still log in.
 - CONNECT → `dispatch_tcp`. Reply `0x00` goes out right after the outbound is picked, without waiting for the remote
-  connection; if connecting fails, the connection is closed. UDP ASSOCIATE and BIND → `0x07`.
+  connection; if connecting fails, the connection is closed. BIND → `0x07`.
+- UDP ASSOCIATE (`udp`, default `true`, likewise for the SOCKS part of mixed; `false` → `0x07`;
+  `inbound/socks_udp.rs`): a UDP socket on the inbound's IP (any port); the reply's `BND.ADDR`/`BND.PORT` is an
+  address the client can reach (an inbound on `0.0.0.0`/`::` answers with the local address of the TCP connection).
+  Datagrams are taken only from the IP of the TCP client (and from the port of the request, unless 0), with the same
+  authentication as TCP; `FRAG ≠ 0` is dropped, and so is the association's own socket as a target. Each target is
+  its own flow through `dispatch_udp` (with `sniff`, with QUIC sniffing, §10.3): rules, fake IP, connection limits
+  and `udp_idle_secs`, the loop guard and keeping remote clients off loopback, as for TCP; replies go to the client
+  with the target's SOCKS header. Up to 512 targets per association, a queue of 64 datagrams per target (dropped
+  when full). The association and all its flows live as long as the TCP connection stays open.
 - `sniff` (default `true`, likewise for HTTP and mixed): when the target is a bare IP, the name for the rules is
   read from the TLS SNI or HTTP `Host`, as on the TUN (§10.3). Needed when the client (a router, say) hands the
   proxy only addresses; otherwise domain rules (the blocked-only mode) never apply to it.
@@ -594,8 +603,7 @@ The socket is created with `socket2` and configured **before** `connect`/`bind`,
   together by offset, so the ClientHello may span two datagrams (Chrome with ML-KEM) and come in shuffled pieces
   (Chrome's chaos protection); coalesced packets in a datagram are parsed too. The SNI goes to `Session.sniffed` as
   for TCP; the datagrams read are passed on unchanged; a first datagram that is not an Initial gives no name. Turned
-  on by the same `sniff` of the TUN. The SOCKS/HTTP/mixed inbounds take no UDP (no UDP ASSOCIATE), so QUIC does not
-  come through them.
+  on by the same `sniff` of the TUN, and for UDP ASSOCIATE flows of SOCKS/mixed by theirs (§10.1).
 
 ### 10.4 Mixed (SOCKS5 + HTTP on one port)
 

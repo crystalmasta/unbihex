@@ -637,6 +637,7 @@ mod tests {
                 panic!("unexpected inbound {i:?}");
             };
             assert!(p.loopback_without_auth);
+            assert!(p.udp, "SOCKS UDP ASSOCIATE for LAN devices");
             assert_eq!(p.users.len(), 1);
             assert_eq!(p.users[0].username, "unbihex");
             assert_eq!(p.users[0].password.expose(), s.lan_password);

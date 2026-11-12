@@ -59,10 +59,11 @@ pub async fn serve(
             let r = tokio::time::timeout(handshake_timeout, handshake(stream, peer, &cfg)).await;
             drop(permit);
             match r {
-                Ok(Ok(Some((stream, sess)))) if cfg.sniff => {
+                Ok(Ok(Some(Accepted::Socks(a)))) => socks::serve_accepted(a, peer, &cfg, d).await,
+                Ok(Ok(Some(Accepted::Http(stream, sess)))) if cfg.sniff => {
                     d.dispatch_tcp_sniffing(sess, stream).await
                 }
-                Ok(Ok(Some((stream, sess)))) => d.dispatch_tcp(sess, stream).await,
+                Ok(Ok(Some(Accepted::Http(stream, sess)))) => d.dispatch_tcp(sess, stream).await,
                 Ok(Ok(None)) => {}
                 Ok(Err(e)) => tracing::debug!("mixed {peer}: {e}"),
                 Err(_) => tracing::debug!("mixed {peer}: handshake timed out"),
@@ -71,21 +72,28 @@ pub async fn serve(
     }
 }
 
+/// What the handshake of either protocol accepted.
+enum Accepted {
+    Socks(socks::Accepted),
+    Http(BoxStream, Session),
+}
+
 /// SOCKS5 starts with its version byte 0x05; anything else is treated as HTTP.
 async fn handshake(
     s: TcpStream,
     peer: SocketAddr,
     cfg: &ProxyInboundConfig,
-) -> Result<Option<(BoxStream, Session)>> {
+) -> Result<Option<Accepted>> {
     let mut first = [0u8; 1];
     if s.peek(&mut first).await? == 0 {
         return Ok(None);
     }
     if first[0] == 0x05 {
-        let r = socks::handshake(s, peer, cfg).await?;
-        Ok(r.map(|(s, sess)| (Box::new(s) as BoxStream, sess)))
+        Ok(socks::handshake(s, peer, cfg).await?.map(Accepted::Socks))
     } else {
-        http::handshake(s, peer, cfg).await
+        Ok(http::handshake(s, peer, cfg)
+            .await?
+            .map(|(s, sess)| Accepted::Http(s, sess)))
     }
 }
 
