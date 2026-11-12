@@ -378,9 +378,14 @@ fn run_stack(
                         sniffed: None,
                     };
                     let d = dispatcher.clone();
-                    tokio::spawn(
-                        async move { d.dispatch_udp(sess, Box::new(TunUdp::new(udp))).await },
-                    );
+                    tokio::spawn(async move {
+                        let flow = Box::new(TunUdp::new(udp));
+                        if sniff {
+                            d.dispatch_udp_sniffing(sess, flow).await;
+                        } else {
+                            d.dispatch_udp(sess, flow).await;
+                        }
+                    });
                 }
                 _ => {}
             }

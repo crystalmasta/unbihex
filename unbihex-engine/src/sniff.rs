@@ -12,6 +12,8 @@ use tokio::io::AsyncReadExt;
 use crate::net::PrefixedStream;
 use crate::outbound::BoxStream;
 
+pub mod quic;
+
 /// How long to wait for the client's first bytes.
 pub const SNIFF_TIMEOUT: Duration = Duration::from_millis(300);
 

@@ -4,7 +4,8 @@
 //! `SINGBOX_BIN=/path/to/sing-box cargo test --test singbox_interop`.
 //! Covers VLESS over WebSocket and HTTPUpgrade with the request headers from the
 //! config, plain and behind an nginx-like gate that wants one User-Agent; and
-//! NaiveProxy (HTTP/2 CONNECT with padding) against sing-box's `naive` inbound; Trojan and VLESS over gRPC.
+//! NaiveProxy (HTTP/2 CONNECT with padding) against sing-box's `naive` inbound; Trojan and VLESS over gRPC; and the QUIC
+//! sniffer on the Initial packets of sing-box's Hysteria 2 client.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -333,4 +334,57 @@ async fn grpc_against_sing_box() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A real QUIC client other than ours: sing-box's Hysteria 2 (quic-go) dials an IP with a
+/// server name; the QUIC sniffer reads that name from its first datagrams (SPEC §10.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_initial_of_sing_box_is_sniffed() {
+    use unbihex_engine::sniff::{Sniff, quic};
+
+    let Some(bin) = std::env::var("SINGBOX_BIN").ok().filter(|p| !p.is_empty()) else {
+        eprintln!("SINGBOX_BIN is not set: skipping the QUIC sniffing test");
+        return;
+    };
+    init_tracing();
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = free_port();
+    let _sb = start_sing_box(
+        &bin,
+        serde_json::json!({
+            "log": { "level": "debug" },
+            "inbounds": [{ "type": "mixed", "listen": "127.0.0.1", "listen_port": port }],
+            "outbounds": [{
+                "type": "hysteria2", "tag": "hy2", "server": "127.0.0.1",
+                "server_port": udp.local_addr().unwrap().port(), "password": "x",
+                "tls": { "enabled": true, "server_name": "hy2.sing-box.example", "insecure": true }
+            }]
+        }),
+        port,
+    )
+    .await;
+    // Any request makes sing-box dial the server.
+    tokio::spawn(async move {
+        if let Ok(mut s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            let target = "203.0.113.1:80".parse().unwrap();
+            let _ = unbihex_engine::outbound::socks::socks5_connect(&mut s, &target, None).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
+    let mut datagrams = Vec::new();
+    let mut buf = vec![0u8; 65_535];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let name = loop {
+        let (n, _) = tokio::time::timeout_at(deadline, udp.recv_from(&mut buf))
+            .await
+            .expect("no datagram from sing-box")
+            .unwrap();
+        datagrams.push(buf[..n].to_vec());
+        match quic::server_name(&datagrams) {
+            Sniff::Incomplete if datagrams.len() < 4 => continue,
+            other => break other,
+        }
+    };
+    eprintln!("sing-box's first datagram: {} bytes", datagrams[0].len());
+    assert_eq!(name, Sniff::Name("hy2.sing-box.example".into()));
 }

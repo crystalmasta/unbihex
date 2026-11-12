@@ -586,7 +586,16 @@ The socket is created with `socket2` and configured **before** `connect`/`bind`,
   `Host` in HTTP/1.x. The name goes to `Session.sniffed` and only domain conditions of rules (and rule-sets) see it;
   IP conditions look at the real address, and the connection goes to the original IP (like Xray's `routeOnly`). The
   bytes read are passed on unchanged. On ports where the server speaks first (21, 25, 110, 143, 587, 3306, 5900)
-  there is no wait. UDP (QUIC) is not parsed.
+  there is no wait.
+  **QUIC** (`sniff/quic.rs`, like Xray's `quic` sniffer): a UDP flow to a real IP on port 443 (YouTube, Chrome over
+  HTTP/3) has its first datagrams (up to 4 and up to 300 ms) parsed as client Initial packets of QUIC v1 (RFC 9001)
+  or v2 (RFC 9369): the keys come from the DCID (HKDF with the version's salt), header protection is removed with
+  AES-ECB and the payload decrypted with AES-128-GCM; the CRYPTO frames (PADDING, PING and ACK are skipped) are put
+  together by offset, so the ClientHello may span two datagrams (Chrome with ML-KEM) and come in shuffled pieces
+  (Chrome's chaos protection); coalesced packets in a datagram are parsed too. The SNI goes to `Session.sniffed` as
+  for TCP; the datagrams read are passed on unchanged; a first datagram that is not an Initial gives no name. Turned
+  on by the same `sniff` of the TUN. The SOCKS/HTTP/mixed inbounds take no UDP (no UDP ASSOCIATE), so QUIC does not
+  come through them.
 
 ### 10.4 Mixed (SOCKS5 + HTTP on one port)
 

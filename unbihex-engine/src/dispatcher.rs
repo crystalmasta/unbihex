@@ -489,7 +489,22 @@ impl Dispatcher {
     }
 
     /// Handles one UDP flow until it is idle or fails.
-    pub async fn dispatch_udp(&self, mut sess: Session, inbound: Box<dyn PacketStream>) {
+    pub async fn dispatch_udp(&self, sess: Session, inbound: Box<dyn PacketStream>) {
+        self.dispatch_udp_with(sess, inbound, false).await;
+    }
+
+    /// Like [`Dispatcher::dispatch_udp`], but a flow to a real IP on port 443 first
+    /// has the server name of its QUIC Initial read for the rules (the TUN, SPEC §10.3).
+    pub async fn dispatch_udp_sniffing(&self, sess: Session, inbound: Box<dyn PacketStream>) {
+        self.dispatch_udp_with(sess, inbound, true).await;
+    }
+
+    async fn dispatch_udp_with(
+        &self,
+        mut sess: Session,
+        mut inbound: Box<dyn PacketStream>,
+        sniff: bool,
+    ) {
         let Some(_permit) = self.acquire() else {
             tracing::debug!("{} udp {}: connection limit reached", sess.inbound_tag, sess.target);
             return;
@@ -497,6 +512,9 @@ impl Dispatcher {
         if let Err(e) = self.restore_fake_ip(&mut sess) {
             tracing::debug!("{} udp {}: {e}", sess.inbound_tag, sess.target);
             return;
+        }
+        if sniff {
+            inbound = sniff_udp(&mut sess, inbound).await;
         }
         let mut attempt = 0;
         // Set when a retry must send the datagram the failed attempt ate.
@@ -562,10 +580,86 @@ impl Dispatcher {
     }
 }
 
+/// The QUIC server name of a flow to a real IP on port 443 goes to `sess.sniffed`;
+/// the datagrams read for it are given back by the returned flow.
+async fn sniff_udp(sess: &mut Session, inbound: Box<dyn PacketStream>) -> Box<dyn PacketStream> {
+    if sess.target.addr.as_domain().is_some() || sess.target.port != crate::sniff::quic::PORT {
+        return inbound;
+    }
+    let (name, flow) = crate::sniff::quic::peek(inbound).await;
+    if let Some(n) = &name {
+        tracing::debug!("{} udp {}: QUIC name {n}", sess.inbound_tag, sess.target);
+    }
+    sess.sniffed = name;
+    flow
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::Network;
+
+    /// A UDP flow to a bare IP on 443 whose QUIC Initial names a blocked site takes
+    /// the domain rule (SPEC §10.3); other ports and plain datagrams do not.
+    #[tokio::test]
+    async fn quic_names_pick_the_route_of_udp_flows() {
+        use crate::sniff::quic::tests::{Script, crypto, initial_packet, quic_client_hello};
+        use rustls::quic::Version;
+
+        let cfg = crate::config::Config::from_json(
+            r#"{"outbounds":[{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}],
+               "route":{"rules":[{"domain_suffix":["blocked.example"],"outbound":"block"}]}}"#,
+        )
+        .unwrap();
+        let resolver = Arc::new(Resolver::System);
+        let ctx = crate::outbound::OutboundContext {
+            sockets: Arc::default(),
+            resolver: resolver.clone(),
+            server_resolver: resolver,
+            fakeip: None,
+        };
+        let mut outbounds = Vec::new();
+        for o in &cfg.outbounds {
+            outbounds.push(crate::outbound::build_outbound(o, &ctx).await.unwrap());
+        }
+        let d = Dispatcher::new(
+            Router::new(&cfg).unwrap(),
+            outbounds,
+            cfg.limits.clone(),
+            None,
+            Arc::default(),
+        );
+        let hello = quic_client_hello(Version::V1, "www.blocked.example", 1300);
+        let half = hello.len() / 2;
+        let initial = vec![
+            initial_packet(Version::V1, &[9; 8], 0, &crypto(0, &hello[..half]), 1200),
+            initial_packet(Version::V1, &[9; 8], 1, &crypto(half, &hello[half..]), 1200),
+        ];
+        let route = |target: &str, datagrams: Vec<Vec<u8>>| {
+            let mut s = Session {
+                network: Network::Udp,
+                source: Some("10.199.233.1:50000".parse().unwrap()),
+                target: target.parse().unwrap(),
+                inbound_tag: "tun-in".into(),
+                sniffed: None,
+            };
+            let d = &d;
+            async move {
+                let flow = sniff_udp(&mut s, Box::new(Script::new(datagrams))).await;
+                // The datagrams read are still there for the relay.
+                let mut buf = vec![0u8; 2048];
+                let n = flow.recv(&mut buf).await.unwrap();
+                assert!(n > 0);
+                (d.route(&s).await.unwrap().outbound.tag().to_string(), s.sniffed)
+            }
+        };
+        let (tag, name) = route("203.0.113.7:443", initial.clone()).await;
+        assert_eq!((tag.as_str(), name.as_deref()), ("block", Some("www.blocked.example")));
+        assert_eq!(route("[2001:db8::7]:443", initial.clone()).await.0, "block");
+        // Another port is not looked at; a datagram that is not QUIC names nothing.
+        assert_eq!(route("203.0.113.7:8443", initial).await, ("direct".into(), None));
+        assert_eq!(route("203.0.113.7:443", vec![b"dns?".to_vec()]).await.0, "direct");
+    }
 
     fn sess(source: &str, target: &str, inbound: &str) -> Session {
         Session {
