@@ -63,6 +63,9 @@ pub async fn serve(
             let r = tokio::time::timeout(handshake_timeout, handshake(stream, peer, &cfg)).await;
             drop(permit);
             match r {
+                Ok(Ok(Some((stream, sess)))) if cfg.sniff => {
+                    d.dispatch_tcp_sniffing(sess, Box::new(stream)).await
+                }
                 Ok(Ok(Some((stream, sess)))) => d.dispatch_tcp(sess, Box::new(stream)).await,
                 Ok(Ok(None)) => {}
                 Ok(Err(e)) => tracing::debug!("socks {peer}: {e}"),

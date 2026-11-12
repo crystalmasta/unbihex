@@ -350,6 +350,10 @@ pub struct ProxyInboundConfig {
     /// must log in. Has no effect without `users`.
     #[serde(default)]
     pub loopback_without_auth: bool,
+    /// Read the TLS server name or HTTP `Host` of TCP connections to a bare IP, so
+    /// domain rules apply when the client (a router, say) sends only addresses.
+    #[serde(default = "default_true")]
+    pub sniff: bool,
 }
 
 /// A login and password accepted by a proxy inbound.

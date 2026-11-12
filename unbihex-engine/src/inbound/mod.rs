@@ -68,6 +68,7 @@ mod tests {
             listen: "0.0.0.0:1080".parse().unwrap(),
             users: vec![],
             loopback_without_auth: true,
+            sniff: true,
         };
         let lan: SocketAddr = "192.168.1.20:50000".parse().unwrap();
         let local: SocketAddr = "127.0.0.1:50000".parse().unwrap();

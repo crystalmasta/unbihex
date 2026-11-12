@@ -539,6 +539,9 @@ The socket is created with `socket2` and configured **before** `connect`/`bind`,
   (local apps and the system proxy cannot send one), others still log in.
 - CONNECT → `dispatch_tcp`. Reply `0x00` goes out right after the outbound is picked, without waiting for the remote
   connection; if connecting fails, the connection is closed. UDP ASSOCIATE and BIND → `0x07`.
+- `sniff` (default `true`, likewise for HTTP and mixed): when the target is a bare IP, the name for the rules is
+  read from the TLS SNI or HTTP `Host`, as on the TUN (§10.3). Needed when the client (a router, say) hands the
+  proxy only addresses; otherwise domain rules (the blocked-only mode) never apply to it.
 - ATYP 1 (IPv4), 3 (domain 1..=255), 4 (IPv6). The handshake timeout is `handshake_timeout_secs`.
 
 ### 10.2 HTTP proxy (RFC 9110)

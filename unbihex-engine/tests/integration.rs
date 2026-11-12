@@ -377,6 +377,35 @@ async fn block_rule_closes_connection() {
 }
 
 #[tokio::test]
+async fn proxy_inbounds_sniff_names_of_bare_ip_targets() {
+    // A router hands the proxy only addresses; the HTTP Host (or TLS SNI) still
+    // decides the route, unless sniffing is turned off.
+    async fn first_byte(sniff: bool) -> usize {
+        let echo = tcp_echo().await;
+        let port = free_port();
+        let inst = start(format!(
+            r#"{{"inbounds":[{{ "type": "socks", "tag": "socks-in", "listen": "127.0.0.1:{port}", "sniff": {sniff} }}],
+                 "outbounds":[{{"type":"direct","tag":"direct"}},{{"type":"block","tag":"block"}}],
+                 "route":{{"rules":[{{"domain":["blocked.example"],"outbound":"block"}}]}}}}"#
+        ))
+        .await;
+        let mut s = socks_connect(proxy_addr(port), &echo.to_string()).await;
+        let _ = s
+            .write_all(b"GET / HTTP/1.1\r\nHost: blocked.example\r\n\r\n")
+            .await;
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap_or(0);
+        inst.shutdown().await;
+        n
+    }
+    assert_eq!(first_byte(true).await, 0, "sniffed name must hit the block rule");
+    assert_eq!(first_byte(false).await, 1, "without sniffing the IP goes direct");
+}
+
+#[tokio::test]
 async fn link_outbound_and_socks_auth() {
     let echo = tcp_echo().await;
     let vless = vless_server().await;
