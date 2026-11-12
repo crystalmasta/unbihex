@@ -232,6 +232,9 @@ docker run -d --name unbihex --restart unless-stopped -v /share/Container/unbihe
 docker logs unbihex
 ```
 
+UDP over SOCKS (UDP ASSOCIATE) opens a socket on a random port that `-p` does not publish. If clients need UDP
+(QUIC, games, calls), run the container with `--network host` instead of `-p 10808:10808 -p 10809:10809`.
+
 Your own engine config instead of a subscription: `docker run … unbihex-cli run -c /data/config.json`. TUN mode in
 a container needs `--network host --cap-add NET_ADMIN --device /dev/net/tun`.
 

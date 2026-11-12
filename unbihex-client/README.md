@@ -227,6 +227,9 @@ docker run -d --name unbihex --restart unless-stopped -v /share/Container/unbihe
 docker logs unbihex
 ```
 
+UDP через SOCKS (UDP ASSOCIATE) открывает сокет на случайном порту, и `-p` его не пробрасывает. Если клиентам нужен
+UDP (QUIC, игры, звонки), запускайте контейнер с `--network host` вместо `-p 10808:10808 -p 10809:10809`.
+
 Свой конфиг ядра вместо подписки: `docker run … unbihex-cli run -c /data/config.json`. Режим TUN в контейнере
 требует `--network host --cap-add NET_ADMIN --device /dev/net/tun`.
 
