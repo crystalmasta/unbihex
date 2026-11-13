@@ -47,6 +47,16 @@ export const openUrl = (url) => invoke("plugin:opener|open_url", { url });
 // Log
 export const getLogs = () => invoke("get_logs");
 export const clearLogs = () => invoke("clear_logs");
+// Developer mode: the connection journal and its reports.
+export const setDevMode = (on) => invoke("set_dev_mode", { on });
+export const journalPage = (since) => invoke("journal_page", { since });
+export const journalClear = () => invoke("journal_clear");
+export const reportSave = (seqs, filter) => invoke("report_save", { seqs, filter });
+export const reportsList = () => invoke("reports_list");
+export const reportRead = (name) => invoke("report_read", { name });
+export const reportShare = (name) => invoke("report_share", { name });
+export const reportDirChoose = () => invoke("report_dir_choose");
+export const reportDirReset = () => invoke("report_dir_reset");
 // The log with secrets masked: as text, or saved / shared as a .txt file (the saved path, or null).
 export const exportLogs = () => invoke("export_logs");
 export const saveLogs = () => invoke("save_logs");

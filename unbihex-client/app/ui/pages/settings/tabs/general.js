@@ -40,6 +40,23 @@ export const generalMarkup = `          <fieldset data-tab="general">
               </select>
             </label>
           </fieldset>
+          <fieldset data-tab="general" id="dev-settings" hidden>
+            <legend>Режим разработчика<button type="button" class="info-btn" data-info="i-dev" aria-label="Подробнее">ⓘ</button></legend>
+            <p class="info" id="i-dev" hidden>В «Журнале» появляется вкладка «Соединения»: каждое соединение и UDP-поток (приложение, домен, порт, правило, маршрут, байты, длительность, причина закрытия), DNS-запросы, смена шаблона и сервера автовыбором. За каждое подключение пишется отчёт <code>unbihex-report-*.jsonl</code> (JSON Lines, ключи, UUID и пароли скрыты). Удаляются только свои старые отчёты сверх числа ниже. Приложение-владелец определяется на Android, Windows и Linux; на macOS и iOS — «—». Включается семью нажатиями по версии внизу «Общих».</p>
+            <div class="form-actions">
+              <span class="hint" id="report-dir"></span>
+            </div>
+            <div class="form-actions">
+              <button type="button" class="btn" id="report-dir-choose">Выбрать папку для отчётов</button>
+              <button type="button" class="btn" id="report-dir-reset">Папка приложения</button>
+            </div>
+            <label><span class="lbl">Хранить отчётов (1–100)</span>
+              <input name="report_keep" type="number" min="1" max="100" step="1" />
+            </label>
+            <div class="form-actions">
+              <button type="button" class="btn danger" id="dev-off">Выключить режим разработчика</button>
+            </div>
+          </fieldset>
           <fieldset data-tab="general">
             <legend>Сброс</legend>
             <div class="form-actions">

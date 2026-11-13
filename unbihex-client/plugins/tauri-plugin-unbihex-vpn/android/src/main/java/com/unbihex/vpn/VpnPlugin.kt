@@ -247,6 +247,65 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @InvokeArg
+    class OwnersArgs {
+        var items: Array<OwnerItem> = arrayOf()
+    }
+
+    /** Developer mode: the apps owning connections, `{names: [name | null]}`. */
+    @Command
+    fun connectionOwners(invoke: Invoke) {
+        val args = invoke.parseArgs(OwnersArgs::class.java)
+        val res = JSObject()
+        res.put("names", DevJournal.owners(activity.applicationContext, args.items))
+        invoke.resolve(res)
+    }
+
+    /** Developer mode: a folder for reports (Storage Access Framework), `{uri}`. */
+    @Command
+    fun pickFolder(invoke: Invoke) {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        startActivityForResult(invoke, intent, "onFolderPicked")
+    }
+
+    @ActivityCallback
+    fun onFolderPicked(invoke: Invoke, result: ActivityResult) {
+        val res = JSObject()
+        val uri = result.data?.data
+        if (result.resultCode == Activity.RESULT_OK && uri != null) {
+            try {
+                activity.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+                res.put("uri", uri.toString())
+            } catch (e: Exception) {
+                invoke.reject("Нет доступа к папке: ${e.message}")
+                return
+            }
+        }
+        invoke.resolve(res)
+    }
+
+    @InvokeArg
+    class ExportArgs {
+        var uri: String = ""
+        var path: String = ""
+        var keep: Int = 10
+    }
+
+    /** Developer mode: a finished report into the chosen folder, the oldest beyond `keep` deleted. */
+    @Command
+    fun exportReport(invoke: Invoke) {
+        val args = invoke.parseArgs(ExportArgs::class.java)
+        try {
+            DevJournal.export(activity.applicationContext, args.uri, args.path, args.keep)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Отчёт не скопирован в папку: ${e.message}")
+        }
+    }
+
+    @InvokeArg
     class ShareArgs {
         var name: String = "unbihex-log.txt"
         var text: String = ""

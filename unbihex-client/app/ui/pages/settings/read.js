@@ -37,6 +37,7 @@ export function formSettings() {
     whitelist_routing: f.whitelist_routing.value || null,
     whitelist_allowed: lines(f.whitelist_allowed.value),
     whitelist_blocked: lines(f.whitelist_blocked.value),
+    report_keep: Math.min(100, Math.max(1, parseInt(f.report_keep.value, 10) || 10)),
     send_hwid: f.send_hwid.checked,
     device_name: f.device_name.value.trim(),
     auto_start: f.auto_start.checked,

@@ -10,7 +10,7 @@ import { initOpenLinks } from "../features/open-link/index.js";
 import { mountSubscriptionEdit } from "../features/subscription-edit/index.js";
 import { mountTemplateEdit } from "../features/template-edit/index.js";
 import { mountAppsList } from "../widgets/apps-list/index.js";
-import { renderAbout } from "../widgets/about/index.js";
+import { initAbout, renderAbout } from "../widgets/about/index.js";
 import { showUpdate } from "../features/app-update/index.js";
 import { mountServerMenu } from "../widgets/server-menu/index.js";
 import { initHome, renderHome } from "../pages/home/index.js";
@@ -40,6 +40,7 @@ initServers();
 initSubs();
 settings.initSettings();
 initLogs();
+initAbout();
 initOpenLinks();
 startDataClicks();
 
@@ -52,6 +53,7 @@ onRender("update", () => showUpdate(store.S.update));
 onRender("settings-template", settings.syncSavedTemplate);
 onRender("adblock", settings.renderAdblock);
 onRender("network", settings.renderNetwork);
+onRender("dev-settings", settings.renderDevSettings);
 
 // Signals from lower layers.
 on("navigate", switchView);

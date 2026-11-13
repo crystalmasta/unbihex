@@ -6,6 +6,7 @@ import { fillAdblock } from "./adblock.js";
 import { appsCount } from "./controls.js";
 import { checkSettingsDirty, setSettingsBase, settingsBase } from "./dirty.js";
 import { syncDnsPresets } from "./dns.js";
+import { renderDevSettings } from "./dev.js";
 import { renderGeo } from "./geo.js";
 import { formSettings } from "./read.js";
 import { renderTemplates } from "./templates.js";
@@ -56,6 +57,8 @@ export function fillSettings() {
   showSettingsTab(currentSettingsTab());
   appsCount();
   f.log_level.value = s.log_level;
+  f.report_keep.value = s.report_keep || 10;
+  renderDevSettings();
   f.geosite_url.value = s.geosite_url;
   f.geoip_url.value = s.geoip_url;
   f.geo_auto_update.checked = s.geo_auto_update;

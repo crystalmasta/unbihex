@@ -3,6 +3,8 @@ import { $ } from "../../shared/lib/index.js";
 import { bindInfoButtons, toast } from "../../shared/ui/index.js";
 import { applySettings } from "../../entities/settings/index.js";
 import { checkNow, installNow } from "../../features/app-update/index.js";
+import { disableDevMode } from "../../features/dev-mode/index.js";
+import { chooseReportDir, resetReportDir } from "../../features/dev-reports/index.js";
 import { initSaveBar } from "../../widgets/save-bar/index.js";
 import { initSettingsTabs, showSettingsTab } from "../../widgets/settings-tabs/index.js";
 import { initAdblock } from "./adblock.js";
@@ -20,6 +22,7 @@ export { settingsDirty } from "./dirty.js";
 export { readSettings } from "./read.js";
 export { renderAdblock, setAdblockPresets } from "./adblock.js";
 export { renderGeo } from "./geo.js";
+export { renderDevSettings } from "./dev.js";
 export { renderTemplates } from "./templates.js";
 export { renderNetwork } from "./whitelist.js";
 
@@ -53,6 +56,9 @@ export function initSettings() {
   initDns();
   initGeo();
   initAdblock();
+  $("#report-dir-choose").addEventListener("click", (e) => chooseReportDir(e.currentTarget));
+  $("#report-dir-reset").addEventListener("click", (e) => resetReportDir(e.currentTarget));
+  $("#dev-off").addEventListener("click", (e) => disableDevMode(e.currentTarget));
   $("#update-check").addEventListener("click", (e) => checkNow(e.currentTarget));
   $("#update-install").addEventListener("click", (e) => installNow(e.currentTarget));
 }

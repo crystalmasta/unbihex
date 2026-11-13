@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "android")]
 mod android_vpn;
+mod devmode;
 mod logs;
 
 use std::sync::Arc;
@@ -1279,6 +1280,7 @@ pub fn run() {
             #[cfg(target_os = "android")]
             android_vpn::attach(owner, app.handle().clone());
             logs::set_level(&level, &client.settings().log_level);
+            devmode::setup(app.handle(), &client);
             {
                 let client = client.clone();
                 logs::on_connect_timeout(move || client.whitelist.note_timeout());
@@ -1356,6 +1358,15 @@ pub fn run() {
             relaunch_admin,
             store_apps_loopback,
             android_apps,
+            devmode::set_dev_mode,
+            devmode::journal_page,
+            devmode::journal_clear,
+            devmode::report_save,
+            devmode::reports_list,
+            devmode::report_read,
+            devmode::report_share,
+            devmode::report_dir_choose,
+            devmode::report_dir_reset,
         ]);
 
     #[cfg_attr(mobile, allow(unused_mut))]

@@ -103,6 +103,48 @@ impl<R: Runtime> UnbihexVpn<R> {
             .map_err(Into::into)
     }
 
+    /// Android (developer mode): the applications that own connections, one
+    /// name (or `None`) per item `{udp, src, dst}`.
+    #[cfg(target_os = "android")]
+    pub fn connection_owners(&self, items: &serde_json::Value) -> crate::Result<Vec<Option<String>>> {
+        #[derive(serde::Deserialize)]
+        struct Owners {
+            names: Vec<Option<String>>,
+        }
+        self.0
+            .run_mobile_plugin::<Owners>("connectionOwners", serde_json::json!({"items": items}))
+            .map(|o| o.names)
+            .map_err(Into::into)
+    }
+
+    /// Android (developer mode): the system folder picker (Storage Access
+    /// Framework); the chosen tree's URI with a persisted permission, `None`
+    /// when cancelled.
+    #[cfg(target_os = "android")]
+    pub fn pick_folder(&self) -> crate::Result<Option<String>> {
+        #[derive(serde::Deserialize)]
+        struct Picked {
+            uri: Option<String>,
+        }
+        self.0
+            .run_mobile_plugin::<Picked>("pickFolder", ())
+            .map(|p| p.uri)
+            .map_err(Into::into)
+    }
+
+    /// Android (developer mode): copies the report file `path` into the tree
+    /// `uri` and deletes the tree's oldest `unbihex-report-*.jsonl` beyond `keep`.
+    #[cfg(target_os = "android")]
+    pub fn export_report(&self, uri: &str, path: &str, keep: u32) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>(
+                "exportReport",
+                serde_json::json!({"uri": uri, "path": path, "keep": keep}),
+            )
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     /// Brings the tunnel down.
     pub fn stop(&self) -> crate::Result<()> {
         #[cfg(target_os = "android")]
