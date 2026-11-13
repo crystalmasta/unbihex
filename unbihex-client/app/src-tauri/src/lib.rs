@@ -995,7 +995,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 // ---------------------------------------------------------------- startup
 
-fn start_background(app: AppHandle) {
+fn start_background(app: AppHandle, #[cfg(desktop)] start_in_tray: bool) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         #[cfg(target_os = "android")]
@@ -1019,12 +1019,12 @@ fn start_background(app: AppHandle) {
                 && let Err(e) = do_connect(&app, &state.client).await
             {
                 tracing::warn!("auto-connect: {e}");
-                // Not silently: started at login the app sits in the tray, and in
-                // TUN mode without administrator rights the VPN never comes up.
-                // The window shows why (and offers a restart as administrator).
+                // During quiet startup, show the failure on the next UI load.
                 *state.notice.lock() = Some(format!("Автоподключение не удалось: {e}"));
                 #[cfg(desktop)]
-                show_window(&app);
+                if !start_in_tray {
+                    show_window(&app);
+                }
             }
             notify(&app);
         }
@@ -1130,10 +1130,17 @@ pub fn run() {
             // tray without flashing a window or loading WebView2 for nothing.
             // Without a tray there would be no way in, so the window opens anyway.
             #[cfg(desktop)]
-            if !(std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some()) {
+            let start_in_tray =
+                std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some();
+            #[cfg(desktop)]
+            if !start_in_tray {
                 show_window(app.handle());
             }
-            start_background(app.handle().clone());
+            start_background(
+                app.handle().clone(),
+                #[cfg(desktop)]
+                start_in_tray,
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
