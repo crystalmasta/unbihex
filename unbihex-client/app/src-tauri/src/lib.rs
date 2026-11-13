@@ -803,23 +803,6 @@ fn store_apps_loopback(state: State<'_, AppState>, allow: bool) -> Result<usize,
 /// or swiped away while the VPN kept running (Android).
 #[cfg(any(desktop, target_os = "android"))]
 fn show_window(app: &AppHandle) {
-    #[cfg(windows)]
-    {
-        let app = app.clone();
-        // WebView2 creation can deadlock inside a Windows event handler.
-        tauri::async_runtime::spawn_blocking(move || {
-            // Serialize creation so repeated tray clicks and launch signals share one window.
-            static SHOW_WINDOW: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let _guard = SHOW_WINDOW.lock().unwrap_or_else(|e| e.into_inner());
-            show_window_inner(&app);
-        });
-    }
-    #[cfg(not(windows))]
-    show_window_inner(app);
-}
-
-#[cfg(any(desktop, target_os = "android"))]
-fn show_window_inner(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         #[cfg(desktop)]
         {
@@ -995,7 +978,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 // ---------------------------------------------------------------- startup
 
-fn start_background(app: AppHandle, #[cfg(desktop)] start_in_tray: bool) {
+fn start_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         #[cfg(target_os = "android")]
@@ -1019,12 +1002,12 @@ fn start_background(app: AppHandle, #[cfg(desktop)] start_in_tray: bool) {
                 && let Err(e) = do_connect(&app, &state.client).await
             {
                 tracing::warn!("auto-connect: {e}");
-                // During quiet startup, show the failure on the next UI load.
+                // Not silently: started at login the app sits in the tray, and in
+                // TUN mode without administrator rights the VPN never comes up.
+                // The window shows why (and offers a restart as administrator).
                 *state.notice.lock() = Some(format!("Автоподключение не удалось: {e}"));
                 #[cfg(desktop)]
-                if !start_in_tray {
-                    show_window(&app);
-                }
+                show_window(&app);
             }
             notify(&app);
         }
@@ -1130,17 +1113,10 @@ pub fn run() {
             // tray without flashing a window or loading WebView2 for nothing.
             // Without a tray there would be no way in, so the window opens anyway.
             #[cfg(desktop)]
-            let start_in_tray =
-                std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some();
-            #[cfg(desktop)]
-            if !start_in_tray {
+            if !(std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some()) {
                 show_window(app.handle());
             }
-            start_background(
-                app.handle().clone(),
-                #[cfg(desktop)]
-                start_in_tray,
-            );
+            start_background(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1192,7 +1168,12 @@ pub fn run() {
     #[cfg(windows)]
     {
         let handle = app.handle().clone();
-        if let Err(e) = instance.listen(move || show_window(&handle)) {
+        if let Err(e) = instance.listen(move || {
+            let app = handle.clone();
+            if let Err(e) = handle.run_on_main_thread(move || show_window(&app)) {
+                tracing::warn!("instance activation: {e}");
+            }
+        }) {
             tracing::error!("instance listener: {e}");
         }
     }
