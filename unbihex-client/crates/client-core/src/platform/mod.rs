@@ -56,7 +56,8 @@ pub fn detect_default() -> Result<DefaultRoute> {
         Err(Some(vpn)) => return Err(other_vpn_error(&vpn.label)),
         Err(None) => {
             let e = default.err().unwrap_or_else(|| "нет подходящего адаптера".into());
-            return Err(ClientError::platform(format!("не найден основной сетевой интерфейс: {e}")));
+            tracing::debug!(interfaces = adapters.len(), ?default_index, "no suitable uplink");
+            return Err(ClientError::NoUplink(e));
         }
     };
     let iface = &ifaces[pos];
