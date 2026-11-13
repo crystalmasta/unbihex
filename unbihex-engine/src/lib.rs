@@ -6,6 +6,7 @@ pub mod dispatcher;
 pub mod dns;
 /// Engine errors.
 pub mod error;
+pub mod events;
 pub mod inbound;
 pub mod link;
 mod mux;
@@ -381,6 +382,11 @@ impl Instance {
     /// Live traffic counters.
     pub fn counters(&self) -> Arc<stats::Counters> {
         self.counters.clone()
+    }
+
+    /// The connection journal (SPEC §7, item 8): silent until subscribed to.
+    pub fn events(&self) -> Arc<events::Events> {
+        self.dispatcher.events().clone()
     }
 
     /// Stops all inbounds and waits up to 5 seconds for their tasks.

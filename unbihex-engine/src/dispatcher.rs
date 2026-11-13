@@ -13,8 +13,9 @@ use crate::config::Limits;
 use crate::dns::Resolver;
 use crate::dns::fakeip::FakeIpPool;
 use crate::error::{Error, Result};
+use crate::events::{self, ConnClose, ConnOpen, Event, Events};
 use crate::outbound::{BoxStream, Outbound, PacketStream};
-use crate::relay::{relay_tcp, relay_udp};
+use crate::relay::{relay_tcp_moved, relay_udp};
 use crate::router::{Router, is_private_ip};
 use crate::session::{Network, Session};
 use crate::stats::Counters;
@@ -100,6 +101,40 @@ struct Route {
     ips: Option<Vec<IpAddr>>,
 }
 
+/// What routing decided, kept for the connection journal even when it then failed.
+#[derive(Default)]
+struct RouteNote {
+    rule: Option<String>,
+    outbound: Option<Arc<dyn Outbound>>,
+}
+
+/// One connection being journaled (only while someone subscribes to events).
+struct Trace {
+    conn: u64,
+    start_ms: u64,
+    started: std::time::Instant,
+    /// The destination as the application asked for it.
+    dst: String,
+}
+
+impl Trace {
+    fn new(events: &Events, sess: &Session) -> Option<Trace> {
+        events.enabled().then(|| Trace {
+            conn: events.next_conn(),
+            start_ms: events::now_ms(),
+            started: std::time::Instant::now(),
+            dst: sess.target.to_string(),
+        })
+    }
+}
+
+fn net_name(n: Network) -> &'static str {
+    match n {
+        Network::Tcp => "tcp",
+        Network::Udp => "udp",
+    }
+}
+
 /// Rules plus the outbounds they name; replaced as a whole on hot reload.
 pub struct Table {
     router: Router,
@@ -143,6 +178,8 @@ pub struct Dispatcher {
     /// Single-label names and `localhost` may resolve privately too (a client's LAN;
     /// not on a server, where `metadata` can be the cloud's metadata service).
     local_names: bool,
+    /// The connection journal (developer mode).
+    events: Arc<Events>,
 }
 
 /// Whether a direct answer for `domain` may be private, loopback or link-local: for
@@ -185,7 +222,69 @@ impl Dispatcher {
             guard: None,
             private_names: HashSet::new(),
             local_names: true,
+            events: Arc::default(),
         }
+    }
+
+    /// The connection journal of this dispatcher.
+    pub fn events(&self) -> &Arc<Events> {
+        &self.events
+    }
+
+    /// Journals the start of a connection (with its name, once known).
+    fn trace_open(&self, t: &Option<Trace>, sess: &Session) {
+        if let Some(t) = t {
+            self.events.emit(Event::Open(ConnOpen {
+                conn: t.conn,
+                ts: t.start_ms,
+                net: net_name(sess.network),
+                inbound: sess.inbound_tag.clone(),
+                src: sess.source,
+                dst: t.dst.clone(),
+                host: sess.domain().map(str::to_owned),
+            }));
+        }
+    }
+
+    /// Journals the end of a connection.
+    fn trace_close(
+        &self,
+        t: Option<Trace>,
+        sess: &Session,
+        note: &RouteNote,
+        bytes: (u64, u64),
+        reason: &'static str,
+        error: Option<String>,
+    ) {
+        let Some(t) = t else { return };
+        let ob = note.outbound.as_ref();
+        let route = match ob {
+            _ if reason == "blocked" => "block",
+            Some(o) if o.is_block() => "block",
+            Some(o) if o.is_direct() => "direct",
+            Some(_) => "proxy",
+            None => "",
+        };
+        let member = ob.and_then(|o| o.balancer()).and_then(|b| self.events.member_used(&b));
+        self.events.emit(Event::Close(ConnClose {
+            conn: t.conn,
+            start: t.start_ms,
+            end: events::now_ms(),
+            net: net_name(sess.network),
+            inbound: sess.inbound_tag.clone(),
+            src: sess.source,
+            dst: t.dst,
+            host: sess.domain().map(str::to_owned),
+            rule: note.rule.clone(),
+            outbound: ob.map(|o| o.tag().to_string()),
+            route,
+            member,
+            up: bytes.0,
+            down: bytes.1,
+            ms: events::ms(t.started.elapsed()),
+            reason,
+            error,
+        }));
     }
 
     /// Domain suffixes (with subdomains) that may resolve to private addresses for
@@ -299,9 +398,19 @@ impl Dispatcher {
     /// (like Xray's IPIfNonMatch), so IP rules also hold for names. Sessions routed
     /// to a proxy are never resolved locally: that would leak the name to local DNS.
     async fn route(&self, sess: &Session) -> Result<Route> {
+        self.route_noted(sess, &mut RouteNote::default()).await
+    }
+
+    /// [`Dispatcher::route`] that also notes the rule and outbound picked.
+    async fn route_noted(&self, sess: &Session, note: &mut RouteNote) -> Result<Route> {
         let table = self.table.load_full();
-        let (tag, by_domain) = table.router.pick_rule(sess);
+        let traced = self.events.enabled();
+        let (tag, by_domain, label) = table.router.pick_labeled(sess);
         let mut outbound = table.outbound(tag)?;
+        if traced {
+            note.rule = Some(label.to_string());
+            note.outbound = Some(outbound.clone());
+        }
         let (Some(resolver), true) = (&self.resolver, outbound.is_direct()) else {
             return Ok(Route {
                 outbound,
@@ -310,6 +419,21 @@ impl Dispatcher {
         };
         let mut ips = match &sess.target.addr {
             Address::Ip(ip) => vec![*ip],
+            Address::Domain(d) if traced => {
+                let started = std::time::Instant::now();
+                let r = resolver.resolve(d).await;
+                self.events.emit(Event::Dns(events::DnsEvent {
+                    ts: events::now_ms(),
+                    name: d.clone(),
+                    qtype: "A/AAAA".into(),
+                    resolver: format!("direct ({})", resolver.kind()),
+                    rcode: None,
+                    answer: r.as_ref().map(|v| v.iter().map(IpAddr::to_string).collect()).unwrap_or_default(),
+                    ms: events::ms(started.elapsed()),
+                    error: r.as_ref().err().map(Error::to_string),
+                }));
+                r?
+            }
             Address::Domain(d) => resolver.resolve(d).await?,
         };
         if ips.is_empty() {
@@ -320,7 +444,13 @@ impl Dispatcher {
             let mut picked = Vec::with_capacity(ips.len());
             for ip in &ips {
                 probe.target.addr = Address::Ip(*ip);
-                picked.push((*ip, table.outbound(table.router.pick(&probe))?));
+                let (tag, _, label) = table.router.pick_labeled(&probe);
+                let o = table.outbound(tag)?;
+                if traced && (o.is_block() || picked.is_empty()) {
+                    note.rule = Some(format!("{label} (ip {ip})"));
+                    note.outbound = Some(o.clone());
+                }
+                picked.push((*ip, o));
             }
             if picked.iter().any(|(_, o)| o.is_block()) {
                 return Err(Error::Blocked);
@@ -379,12 +509,16 @@ impl Dispatcher {
     }
 
     async fn dispatch_tcp_with(&self, mut sess: Session, mut inbound: BoxStream, sniff: bool) {
+        let trace = Trace::new(&self.events, &sess);
+        let mut note = RouteNote::default();
         let Some(_permit) = self.acquire() else {
             tracing::debug!("{} tcp {}: connection limit reached", sess.inbound_tag, sess.target);
+            self.trace_close(trace, &sess, &note, (0, 0), "limit", Some("connection limit reached".into()));
             return;
         };
         if let Err(e) = self.restore_fake_ip(&mut sess) {
             tracing::debug!("{} tcp {}: {e}", sess.inbound_tag, sess.target);
+            self.trace_close(trace, &sess, &note, (0, 0), "dns", Some(e.to_string()));
             return;
         }
         if sniff && sess.target.addr.as_domain().is_none() {
@@ -392,8 +526,9 @@ impl Dispatcher {
             inbound = stream;
             sess.sniffed = name;
         }
+        self.trace_open(&trace, &sess);
         let connect = async {
-            let route = self.route(&sess).await?;
+            let route = self.route_noted(&sess, &mut note).await?;
             let remote = match &route.ips {
                 Some(ips) => route.outbound.connect_tcp_resolved(&sess, ips).await?,
                 None => route.outbound.connect_tcp(&sess).await?,
@@ -404,10 +539,12 @@ impl Dispatcher {
             Ok(Ok(r)) => r,
             Ok(Err(e @ Error::Config(_))) => {
                 tracing::error!("{e}");
+                self.trace_close(trace, &sess, &note, (0, 0), "error", Some(e.to_string()));
                 return;
             }
             Ok(Err(e)) => {
                 tracing::debug!("{} tcp {}: {e}", sess.inbound_tag, sess.target);
+                self.trace_close(trace, &sess, &note, (0, 0), events::error_reason(&e), Some(e.to_string()));
                 return;
             }
             Err(_) => {
@@ -416,6 +553,7 @@ impl Dispatcher {
                     sess.inbound_tag,
                     sess.target
                 );
+                self.trace_close(trace, &sess, &note, (0, 0), "timeout", Some("connect timed out".into()));
                 return;
             }
         };
@@ -429,14 +567,32 @@ impl Dispatcher {
         );
         let idle = Duration::from_secs(self.limits.tcp_idle_secs);
         let (up, down) = self.counters.pair(ob.is_direct());
-        if let Err(e) = relay_tcp(inbound, remote, idle, up, down).await {
+        let moved = (AtomicU64::new(0), AtomicU64::new(0));
+        let r = relay_tcp_moved(inbound, remote, idle, up, down, &moved).await;
+        if let Err(e) = &r {
             tracing::debug!("{} via {}: {e}", sess.target, ob.tag());
+        }
+        if trace.is_some() {
+            let bytes = (moved.0.load(Ordering::Relaxed), moved.1.load(Ordering::Relaxed));
+            let (reason, error) = match &r {
+                Ok(_) => ("closed", None),
+                Err(e) => (events::io_reason(e), Some(e.to_string())),
+            };
+            self.trace_close(trace, &sess, &note, bytes, reason, error);
         }
     }
 
     /// Opens the outbound side of a UDP flow for `sess` (fake IPs already restored).
     async fn open_udp(&self, sess: &Session) -> Result<(Arc<dyn Outbound>, Box<dyn PacketStream>)> {
-        let route = self.route(sess).await?;
+        self.open_udp_noted(sess, &mut RouteNote::default()).await
+    }
+
+    async fn open_udp_noted(
+        &self,
+        sess: &Session,
+        note: &mut RouteNote,
+    ) -> Result<(Arc<dyn Outbound>, Box<dyn PacketStream>)> {
+        let route = self.route_noted(sess, note).await?;
         let remote = match &route.ips {
             Some(ips) => route.outbound.connect_udp_resolved(sess, ips).await?,
             None => route.outbound.connect_udp(sess).await?,
@@ -505,27 +661,36 @@ impl Dispatcher {
         mut inbound: Box<dyn PacketStream>,
         sniff: bool,
     ) {
+        let trace = Trace::new(&self.events, &sess);
+        let mut note = RouteNote::default();
         let Some(_permit) = self.acquire() else {
             tracing::debug!("{} udp {}: connection limit reached", sess.inbound_tag, sess.target);
+            self.trace_close(trace, &sess, &note, (0, 0), "limit", Some("connection limit reached".into()));
             return;
         };
         if let Err(e) = self.restore_fake_ip(&mut sess) {
             tracing::debug!("{} udp {}: {e}", sess.inbound_tag, sess.target);
+            self.trace_close(trace, &sess, &note, (0, 0), "dns", Some(e.to_string()));
             return;
         }
         if sniff {
             inbound = sniff_udp(&mut sess, inbound).await;
         }
+        self.trace_open(&trace, &sess);
+        let mut bytes = (0u64, 0u64);
         let mut attempt = 0;
         // Set when a retry must send the datagram the failed attempt ate.
         let mut replay: Option<Vec<u8>> = None;
         loop {
             let setup_started = std::time::Instant::now();
+            let opened =
+                tokio::time::timeout(self.handshake_timeout(), self.open_udp_noted(&sess, &mut note)).await;
             let (ob, remote) =
-                match tokio::time::timeout(self.handshake_timeout(), self.open_udp(&sess)).await {
+                match opened {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => {
                         tracing::debug!("{} udp {}: {e}", sess.inbound_tag, sess.target);
+                        self.trace_close(trace, &sess, &note, bytes, events::error_reason(&e), Some(e.to_string()));
                         return;
                     }
                     Err(_) => {
@@ -534,6 +699,7 @@ impl Dispatcher {
                             sess.inbound_tag,
                             sess.target
                         );
+                        self.trace_close(trace, &sess, &note, bytes, "timeout", Some("connect timed out".into()));
                         return;
                     }
                 };
@@ -555,6 +721,7 @@ impl Dispatcher {
                 replay.as_deref(),
             )
             .await;
+            bytes = (bytes.0 + outcome.up_bytes, bytes.1 + outcome.down_bytes);
             // A multiplexer that the server does not implement closes the far
             // side before delivering anything; retry this flow on the plain
             // stream path. A failure on the application side is not a reason to
@@ -575,6 +742,12 @@ impl Dispatcher {
                 );
                 continue;
             }
+            let reason = match (outcome.idle, outcome.remote_error) {
+                (true, _) => "idle",
+                (false, true) => "remote",
+                (false, false) => "closed",
+            };
+            self.trace_close(trace, &sess, &note, bytes, reason, None);
             break;
         }
     }
@@ -659,6 +832,73 @@ mod tests {
         // Another port is not looked at; a datagram that is not QUIC names nothing.
         assert_eq!(route("203.0.113.7:8443", initial).await, ("direct".into(), None));
         assert_eq!(route("203.0.113.7:443", vec![b"dns?".to_vec()]).await.0, "direct");
+    }
+
+    /// With a subscriber, every TCP session is journaled: opened, then closed with
+    /// its rule, route, bytes and reason; a blocked one says so.
+    #[tokio::test]
+    async fn sessions_are_journaled_only_while_subscribed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let cfg = crate::config::Config::from_json(
+            r#"{"outbounds":[{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}],
+               "route":{"rules":[{"domain_suffix":["blocked.example"],"outbound":"block"}]}}"#,
+        )
+        .unwrap();
+        let resolver = Arc::new(Resolver::System);
+        let ctx = crate::outbound::OutboundContext {
+            sockets: Arc::default(),
+            resolver: resolver.clone(),
+            server_resolver: resolver,
+            fakeip: None,
+        };
+        let mut outbounds = Vec::new();
+        for o in &cfg.outbounds {
+            outbounds.push(crate::outbound::build_outbound(o, &ctx).await.unwrap());
+        }
+        let d = Dispatcher::new(Router::new(&cfg).unwrap(), outbounds, cfg.limits.clone(), None, Arc::default());
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = server.accept().await {
+                let mut buf = [0u8; 4];
+                s.read_exact(&mut buf).await.unwrap();
+                s.write_all(b"pong!").await.unwrap();
+            }
+        });
+        let run = |target: String| {
+            let d = &d;
+            async move {
+                let (mut app, inbound) = tokio::io::duplex(1024);
+                let s = sess("127.0.0.1:40000", &target, "socks");
+                let relay = d.dispatch_tcp(s, Box::new(inbound));
+                let client = async {
+                    let _ = app.write_all(b"ping").await;
+                    let _ = app.shutdown().await;
+                    let mut back = Vec::new();
+                    let _ = app.read_to_end(&mut back).await;
+                };
+                tokio::join!(relay, client);
+            }
+        };
+        run(addr.to_string()).await;
+        let mut rx = d.events().subscribe(16);
+        run(addr.to_string()).await;
+        run("www.blocked.example:443".into()).await;
+        d.events().unsubscribe();
+        let mut got = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            got.push(ev);
+        }
+        assert_eq!(got.len(), 4, "{got:?}");
+        let Event::Open(open) = &got[0] else { panic!("{got:?}") };
+        assert_eq!(open.dst, addr.to_string());
+        let Event::Close(c) = &got[1] else { panic!("{got:?}") };
+        assert_eq!((c.conn, c.route, c.reason, c.up, c.down), (open.conn, "direct", "closed", 4, 5));
+        assert_eq!(c.rule.as_deref(), Some("final"));
+        let Event::Close(b) = &got[3] else { panic!("{got:?}") };
+        assert_eq!((b.route, b.reason), ("block", "blocked"));
+        assert_eq!(b.rule.as_deref(), Some("#1 domain_suffix:blocked.example"));
+        assert_eq!(b.host.as_deref(), Some("www.blocked.example"));
     }
 
     fn sess(source: &str, target: &str, inbound: &str) -> Session {

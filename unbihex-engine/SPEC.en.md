@@ -402,6 +402,19 @@ impl Dispatcher {
 6. Bytes are counted in `stats::Counters`: proxied or direct (`Outbound::is_direct`).
 7. Per-connection logs are at `debug` (at `info` they would add up to a browsing history):
    `inbound_tag network source -> target via outbound_tag`. Connection errors are at `debug` too.
+8. **Connection journal** (the client's developer mode; `events.rs`, `Instance::events()`): while nobody subscribes
+   (`Events::subscribe(capacity)`), nothing is collected — the hot path checks one atomic flag. A subscriber gets a
+   channel of `capacity` events (the client: 20,000); when it falls behind, new events are dropped and counted in
+   `Events::dropped()`, connections never wait. Events are JSON with an `ev` field: `open` (number `conn`, time, `net`,
+   `inbound`, `src`, `dst` — the address as the application asked for it, a fake IP in the TUN; `host` — the name from
+   the target, the fake IP or sniffing), `close` (the same plus `start`/`end`/`ms`, `rule` — `#N conditions` from the
+   config, `#N-#M` for merged rules, `final` with no match, `(ip …)` when re-picked by address; `outbound`, `route` =
+   `direct`/`proxy`/`block`, the balancer `member`, `up`/`down` bytes, `reason` = `closed`, `idle`, `timeout`,
+   `refused`, `reset`, `handshake`, `dns`, `blocked`, `forbidden`, `limit`, `remote`, `error`, and the `error` text),
+   `dns` (queries of the TUN DNS server and name resolution of direct sessions: name, type, `resolver` — `fake-ip`,
+   `local`, `home DNS …`, `<server> via <outbound>`…, `rcode`, answer, time), `switch` (a balancer, §11.16, changed
+   members: `from`, `to`, `reason` — `from_down` or `faster` with the delays; noticed on the first connection after the
+   change) and `note` (a line from the app: `Events::note(category, text)`).
 
 ---
 

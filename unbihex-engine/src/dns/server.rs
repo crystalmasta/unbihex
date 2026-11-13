@@ -36,6 +36,13 @@ const ROUTED_STAGGER: Duration = Duration::from_secs(1);
 /// The query is sent again over the same flow after this long without an answer.
 const ROUTED_RESEND: Duration = Duration::from_secs(1);
 
+/// Who answered a query and why it failed, for the connection journal.
+#[derive(Default)]
+struct DnsTrace {
+    resolver: String,
+    error: Option<String>,
+}
+
 /// Answers DNS queries captured by the TUN inbound.
 pub struct DnsServer {
     fakeip: Arc<FakeIpPool>,
@@ -109,6 +116,43 @@ impl DnsServer {
 
     /// Returns the response datagram, or None when the packet should be dropped.
     pub async fn handle(&self, packet: &[u8]) -> Option<Vec<u8>> {
+        let events = self.via.as_ref().map(|(d, _)| d.events()).filter(|e| e.enabled());
+        let Some(events) = events else {
+            return self.answer(packet, &mut None).await;
+        };
+        let started = std::time::Instant::now();
+        let mut trace = Some(DnsTrace::default());
+        let resp = self.answer(packet, &mut trace).await;
+        let trace = trace.unwrap_or_default();
+        let Ok(query) = Message::from_vec(packet) else { return resp };
+        let Some(q) = query.queries.first() else { return resp };
+        let parsed = resp.as_deref().and_then(|r| Message::from_vec(r).ok());
+        let answer: Vec<String> = parsed
+            .as_ref()
+            .map(|r| r.answers.iter().map(|a| a.data.to_string()).collect())
+            .unwrap_or_default();
+        let fake = parsed.as_ref().is_some_and(|r| {
+            r.answers.iter().any(|a| matches!(&a.data, RData::A(ip) if self.fakeip.is_fake(IpAddr::V4(ip.0))))
+        });
+        let resolver = match (trace.resolver.is_empty(), fake) {
+            (false, _) => trace.resolver,
+            (true, true) => "fake-ip".into(),
+            (true, false) => "local".into(),
+        };
+        events.emit(crate::events::Event::Dns(crate::events::DnsEvent {
+            ts: crate::events::now_ms(),
+            name: q.name().to_ascii().trim_end_matches('.').to_string(),
+            qtype: q.query_type().to_string(),
+            resolver,
+            rcode: parsed.as_ref().map(|r| format!("{:?}", r.metadata.response_code)),
+            answer,
+            ms: crate::events::ms(started.elapsed()),
+            error: trace.error,
+        }));
+        resp
+    }
+
+    async fn answer(&self, packet: &[u8], trace: &mut Option<DnsTrace>) -> Option<Vec<u8>> {
         let msg = match Message::from_vec(packet) {
             Ok(m) => m,
             Err(_) if packet.len() >= 2 => {
@@ -162,6 +206,9 @@ impl DnsServer {
             && !(local && is_zone_query(qtype))
             && self.upstream_is_public()
         {
+            if let Some(t) = trace {
+                t.resolver = "local-only name".into();
+            }
             return error(&msg, ResponseCode::NXDomain);
         }
         // Names a rule blocks outright (ad-blocking lists) do not exist: apps give
@@ -171,6 +218,9 @@ impl DnsServer {
             && let Ok(name) = normalize_domain(&domain)
             && d.blocks_name(&name, tag)
         {
+            if let Some(t) = trace {
+                t.resolver = "blocked by rule".into();
+            }
             return error(&msg, ResponseCode::NXDomain);
         }
         if !local
@@ -181,7 +231,7 @@ impl DnsServer {
             && proxied.is_none()
             && self.is_excluded(&domain)
         {
-            return self.forward(&msg, packet, None).await;
+            return self.forward(&msg, packet, None, trace).await;
         }
         match qtype {
             RecordType::A if !local => match normalize_domain(&domain) {
@@ -198,12 +248,15 @@ impl DnsServer {
                     ));
                     resp.to_vec().ok()
                 }
-                Err(_) => self.forward(&msg, packet, proxied).await,
+                Err(_) => self.forward(&msg, packet, proxied, trace).await,
             },
             RecordType::AAAA | RecordType::HTTPS | RecordType::SVCB if !local => {
+                if let Some(t) = trace {
+                    t.resolver = "fake-ip (empty)".into();
+                }
                 response(&msg).to_vec().ok()
             }
-            _ => self.forward(&msg, packet, proxied).await,
+            _ => self.forward(&msg, packet, proxied, trace).await,
         }
     }
 
@@ -215,9 +268,28 @@ impl DnsServer {
     }
 
     /// Sends a query upstream; `proxied`: through that outbound, as the name's own.
-    async fn forward(&self, msg: &Message, packet: &[u8], proxied: Option<Arc<dyn Outbound>>) -> Option<Vec<u8>> {
+    async fn forward(
+        &self,
+        msg: &Message,
+        packet: &[u8],
+        proxied: Option<Arc<dyn Outbound>>,
+        trace: &mut Option<DnsTrace>,
+    ) -> Option<Vec<u8>> {
+        let routed = |via: Option<&Arc<dyn Outbound>>, i: usize| {
+            let server = self.upstream.upstream().get(i).map(ToString::to_string).unwrap_or_default();
+            match via {
+                Some(o) => format!("{server} via {}", o.tag()),
+                None => format!("{server} (routed)"),
+            }
+        };
         let r = match (&self.via, &self.direct) {
-            (Some((d, tag)), _) if proxied.is_some() => self.forward_routed(d, tag, proxied.as_ref(), msg, packet).await,
+            (Some((d, tag)), _) if proxied.is_some() => {
+                let r = self.forward_routed(d, tag, proxied.as_ref(), msg, packet).await;
+                if let Some(t) = trace.as_mut() {
+                    t.resolver = routed(proxied.as_ref(), self.preferred.load(Ordering::Relaxed));
+                }
+                r
+            }
             (Some((d, tag)), Some(direct)) => {
                 let name = msg.queries[0].name().to_ascii();
                 let name = name.trim_end_matches('.');
@@ -226,22 +298,42 @@ impl DnsServer {
                     Ok(o) if o.is_block() => Err(Error::Blocked),
                     Ok(o) if o.is_direct() => {
                         tracing::debug!("dns {name}: home DNS");
+                        if let Some(t) = trace.as_mut() {
+                            let list: Vec<String> = direct.upstream().iter().map(ToString::to_string).collect();
+                            t.resolver = format!("home DNS {}", list.join(", "));
+                        }
                         direct.exchange(packet).await
                     }
                     Ok(o) => {
                         tracing::debug!("dns {name}: remote DNS via {}", o.tag());
-                        self.forward_routed(d, tag, Some(&o), msg, packet).await
+                        let r = self.forward_routed(d, tag, Some(&o), msg, packet).await;
+                        if let Some(t) = trace.as_mut() {
+                            t.resolver = routed(Some(&o), self.preferred.load(Ordering::Relaxed));
+                        }
+                        r
                     }
                     Err(e) => Err(e),
                 }
             }
-            (Some((d, tag)), None) => self.forward_routed(d, tag, None, msg, packet).await,
+            (Some((d, tag)), None) => {
+                let r = self.forward_routed(d, tag, None, msg, packet).await;
+                if let Some(t) = trace.as_mut() {
+                    t.resolver = routed(None, self.preferred.load(Ordering::Relaxed));
+                }
+                r
+            }
             (None, _) => self.upstream.exchange(packet).await,
         };
         match r {
             Ok(r) => Some(r),
             Err(e) => {
                 tracing::debug!("dns forward failed: {e}");
+                if let Some(t) = trace.as_mut() {
+                    if t.resolver.is_empty() {
+                        t.resolver = "upstream".into();
+                    }
+                    t.error = Some(e.to_string());
+                }
                 error(msg, ResponseCode::ServFail)
             }
         }
@@ -800,6 +892,27 @@ mod tests {
         .unwrap();
         assert_eq!(r.metadata.response_code, ResponseCode::ServFail);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// With a subscriber, each query is journaled with who answered it.
+    #[tokio::test]
+    async fn queries_are_journaled_with_their_resolver() {
+        let (upstream, _) = fake_upstream().await;
+        let s = routed_server(upstream, "direct").await;
+        let mut rx = s.via.as_ref().unwrap().0.events().subscribe(8);
+        s.handle(&query("example.com.", RecordType::A)).await.unwrap();
+        s.handle(&query("example.com.", RecordType::MX)).await.unwrap();
+        s.via.as_ref().unwrap().0.events().unsubscribe();
+        let mut got = Vec::new();
+        while let Some(crate::events::Event::Dns(d)) = rx.recv().await {
+            got.push(d);
+        }
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].name.as_str(), got[0].qtype.as_str(), got[0].resolver.as_str()), ("example.com", "A", "fake-ip"));
+        assert_eq!(got[0].answer.len(), 1);
+        assert_eq!(got[1].qtype, "MX");
+        assert!(got[1].resolver.contains(&upstream.to_string()), "{}", got[1].resolver);
+        assert_eq!(got[1].rcode.as_deref(), Some("NoError"));
     }
 
     #[tokio::test]

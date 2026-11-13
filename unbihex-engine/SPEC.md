@@ -394,6 +394,19 @@ impl Dispatcher {
 6. Байты считаются в `stats::Counters`: через прокси или напрямую (`Outbound::is_direct`).
 7. Логи на соединение — на уровне `debug` (на `info` они складывали бы историю посещений):
    `inbound_tag network source -> target via outbound_tag`. Ошибки подключения — тоже `debug`.
+8. **Журнал соединений** (режим разработчика клиента; `events.rs`, `Instance::events()`): пока никто не подписан
+   (`Events::subscribe(capacity)`), не собирается ничего — горячий путь проверяет один атомарный флаг. Подписчик
+   получает канал на `capacity` событий (клиент — 20 000); не успевает — новые события отбрасываются со счётчиком
+   `Events::dropped()`, соединения не ждут. События — JSON с полем `ev`:
+   `open` (номер `conn`, время, `net`, `inbound`, `src`, `dst` — адрес как его запросило приложение, в TUN это fake-IP;
+   `host` — имя из цели, fake-IP или сниффинга), `close` (то же плюс `start`/`end`/`ms`, `rule` — `#N условия` из
+   конфига, `#N-#M` для слитых правил, `final` без совпадения, `(ip …)` при повторном выборе по адресу; `outbound`,
+   `route` = `direct`/`proxy`/`block`, `member` балансировщика, `up`/`down` в байтах, `reason` = `closed`, `idle`,
+   `timeout`, `refused`, `reset`, `handshake`, `dns`, `blocked`, `forbidden`, `limit`, `remote`, `error` и текст
+   `error`), `dns` (запросы DNS-сервера TUN и резолвинг direct-сессий: имя, тип, `resolver` — `fake-ip`, `local`,
+   `home DNS …`, `<сервер> via <outbound>`…, `rcode`, ответ, время), `switch` (балансировщик §11.16 сменил участника:
+   `from`, `to`, `reason` — `from_down` или `faster` с задержками; замечается на первом соединении после смены) и
+   `note` (строка приложения: `Events::note(category, text)`).
 
 ---
 

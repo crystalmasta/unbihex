@@ -57,6 +57,16 @@ pub(crate) fn bootstrap_resolver(
 }
 
 impl Resolver {
+    /// Which resolver this is, with its servers, for the connection journal.
+    pub fn kind(&self) -> String {
+        let list = |c: &DnsClient| c.upstream().iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        match self {
+            Resolver::System => "system".into(),
+            Resolver::Upstream(c) => list(c),
+            Resolver::SystemThenUpstream(c) => format!("system, then {}", list(c)),
+        }
+    }
+
     /// Resolves a host name; IP literals are returned as is.
     pub async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>> {
         if let Ok(Address::Ip(ip)) = Address::parse_host(host) {

@@ -95,12 +95,30 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
+    let moved = (AtomicU64::new(0), AtomicU64::new(0));
+    relay_tcp_moved(a, b, idle, up_count, down_count, &moved).await
+}
+
+/// Like [`relay_tcp`]; `moved` gets this connection's (a→b, b→a) bytes as they
+/// go, so they are known after an error too (the connection journal).
+pub async fn relay_tcp_moved<A, B>(
+    a: A,
+    b: B,
+    idle: Duration,
+    up_count: &AtomicU64,
+    down_count: &AtomicU64,
+    moved: &(AtomicU64, AtomicU64),
+) -> std::io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
     let (mut ar, mut aw) = tokio::io::split(a);
     let (mut br, mut bw) = tokio::io::split(b);
     let act = Activity::new();
-    let (up_moved, down_moved) = (AtomicU64::new(0), AtomicU64::new(0));
-    let up = copy_one(&mut ar, &mut bw, &act, &up_moved, up_count);
-    let down = copy_one(&mut br, &mut aw, &act, &down_moved, down_count);
+    let (up_moved, down_moved) = (&moved.0, &moved.1);
+    let up = copy_one(&mut ar, &mut bw, &act, up_moved, up_count);
+    let down = copy_one(&mut br, &mut aw, &act, down_moved, down_count);
     tokio::pin!(up, down);
 
     let grace = idle.min(HALF_CLOSE_GRACE);
@@ -182,6 +200,8 @@ async fn pump_down(
 
 /// How a UDP relay ended.
 pub struct UdpOutcome {
+    /// Bytes sent from the application.
+    pub up_bytes: u64,
     /// Bytes that came back from the far side. Zero means the far side never
     /// answered, which is how a transport that cannot carry this flow shows up.
     pub down_bytes: u64,
@@ -210,6 +230,7 @@ pub async fn relay_udp(
     let down_local = AtomicU64::new(0);
     let inflight = Inflight::default();
     let mut outcome = UdpOutcome {
+        up_bytes: 0,
         down_bytes: 0,
         remote_error: false,
         idle: false,
@@ -246,6 +267,7 @@ pub async fn relay_udp(
         }
     }
     outcome.down_bytes = down_local.load(Ordering::Relaxed);
+    outcome.up_bytes = up_local.load(Ordering::Relaxed);
     if outcome.remote_error && outcome.down_bytes == 0 {
         outcome.replay = inflight.0.lock().take();
     }

@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock};
 use ipnet::IpNet;
 
 use crate::address::{Address, normalize_domain};
-use crate::config::{Config, NetworkSpec, RuleConfig};
+use crate::config::{Config, NetworkSpec, PortSpec, RuleConfig};
 use crate::error::Result;
 use crate::rules::{GeoCache, IpList, RuleSet, SiteList};
 use crate::session::{Network, Session};
@@ -93,6 +93,8 @@ struct Rule {
     /// Rule-sets: at least one must match.
     sets: Vec<Arc<RuleSet>>,
     outbound: String,
+    /// `#N conditions` for the connection journal (merged rules: `#N-#M`).
+    label: Arc<str>,
 }
 
 /// Shared data for compiling rules.
@@ -150,6 +152,7 @@ impl Rule {
                 .filter_map(|t| ctx.sets.get(t).cloned())
                 .collect(),
             outbound: rc.outbound.clone(),
+            label: Arc::from(""),
         })
     }
 
@@ -209,9 +212,11 @@ impl Rule {
             self.domains.exact.extend(next.domains.exact);
             self.domains.suffix.extend(next.domains.suffix);
             self.domains.keyword.extend(next.domains.keyword);
+            self.label = merged_label(&self.label, &next.label);
             None
         } else if self.only_cidrs() && next.only_cidrs() {
             self.cidrs.extend(next.cidrs);
+            self.label = merged_label(&self.label, &next.label);
             None
         } else {
             Some(next)
@@ -251,6 +256,43 @@ impl Rule {
     }
 }
 
+/// `#N` (1-based, as in the config) and the first values of up to three conditions.
+fn rule_label(i: usize, rc: &RuleConfig) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut add = |name: &str, values: Vec<String>| {
+        if let Some(first) = values.first() {
+            let more = if values.len() > 1 { format!(" +{}", values.len() - 1) } else { String::new() };
+            parts.push(format!("{name}:{first}{more}"));
+        }
+    };
+    add("rule_set", rc.rule_set.clone());
+    add("geosite", rc.geosite.clone());
+    add("geoip", rc.geoip.clone());
+    add("domain", rc.domain.clone());
+    add("domain_suffix", rc.domain_suffix.clone());
+    add("domain_keyword", rc.domain_keyword.clone());
+    add("ip_cidr", rc.ip_cidr.iter().map(|n| n.to_string()).collect());
+    add("ip_private", rc.ip_private.iter().map(|p| p.to_string()).collect());
+    add("port", rc.port.iter().map(|p| match p { PortSpec::Single(n) => n.to_string(), PortSpec::Range(r) => r.clone() }).collect());
+    add("network", rc.network.iter().map(|n| format!("{n:?}").to_ascii_lowercase()).collect());
+    add("inbound", rc.inbound.clone());
+    parts.truncate(3);
+    let mut label = format!("#{}", i + 1);
+    for p in parts {
+        label.push(' ');
+        label.push_str(&p);
+    }
+    label
+}
+
+/// `#3 a` merged with `#4 b` → `#3-#4 a`.
+fn merged_label(first: &str, next: &str) -> Arc<str> {
+    let (head, rest) = first.split_once(' ').unwrap_or((first, ""));
+    let head = head.split('-').next().unwrap_or(head);
+    let last = next.split(' ').next().unwrap_or(next);
+    Arc::from(format!("{head}-{last} {rest}").trim_end())
+}
+
 /// Picks an outbound tag for each session.
 #[derive(Debug)]
 pub struct Router {
@@ -276,8 +318,9 @@ impl Router {
         }
         let mut ctx = Ctx { cfg, cache, sets };
         let mut rules: Vec<Rule> = Vec::new();
-        for rc in &cfg.route.rules {
-            let rule = Rule::compile(rc, &mut ctx)?;
+        for (i, rc) in cfg.route.rules.iter().enumerate() {
+            let mut rule = Rule::compile(rc, &mut ctx)?;
+            rule.label = Arc::from(rule_label(i, rc));
             let leftover = match rules.last_mut() {
                 Some(last) => last.try_merge(rule),
                 None => Some(rule),
@@ -305,11 +348,18 @@ impl Router {
     /// a rule with domain conditions or rule-sets matched a domain target. Such a
     /// choice is not re-checked against the resolved addresses.
     pub fn pick_rule(&self, s: &Session) -> (&str, bool) {
+        let (tag, by_domain, _) = self.pick_labeled(s);
+        (tag, by_domain)
+    }
+
+    /// Like [`Router::pick_rule`], plus the rule's label for the connection
+    /// journal (`#N conditions`; `final` when no rule matched).
+    pub fn pick_labeled(&self, s: &Session) -> (&str, bool, &str) {
         self.rules
             .iter()
             .find(|r| r.matches(s))
-            .map_or((self.final_outbound.as_str(), false), |r| {
-                (r.outbound.as_str(), r.decided_by_domain(s))
+            .map_or((self.final_outbound.as_str(), false, "final"), |r| {
+                (r.outbound.as_str(), r.decided_by_domain(s), &*r.label)
             })
     }
 
