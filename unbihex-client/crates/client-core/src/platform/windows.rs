@@ -47,7 +47,9 @@ pub(super) fn relaunch_elevated_args(args: &str) -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe = wide(&exe.to_string_lossy());
     let verb = wide("runas");
-    let args = wide(args);
+    // The GUI child waits for this process to finish route/proxy cleanup before
+    // acquiring its single-instance lock. Keep the lock throughout the UAC prompt.
+    let args = wide(&format!("{args} --unbihex-restart-parent={}", std::process::id()));
     // SAFETY: every pointer is a NUL-terminated UTF-16 buffer that outlives the call;
     // null HWND and directory are allowed by ShellExecuteW.
     let r = unsafe {
