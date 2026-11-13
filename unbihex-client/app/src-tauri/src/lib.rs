@@ -803,6 +803,23 @@ fn store_apps_loopback(state: State<'_, AppState>, allow: bool) -> Result<usize,
 /// or swiped away while the VPN kept running (Android).
 #[cfg(any(desktop, target_os = "android"))]
 fn show_window(app: &AppHandle) {
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        // WebView2 creation can deadlock inside a Windows event handler.
+        tauri::async_runtime::spawn_blocking(move || {
+            // Serialize creation so repeated tray clicks and launch signals share one window.
+            static SHOW_WINDOW: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _guard = SHOW_WINDOW.lock().unwrap_or_else(|e| e.into_inner());
+            show_window_inner(&app);
+        });
+    }
+    #[cfg(not(windows))]
+    show_window_inner(app);
+}
+
+#[cfg(any(desktop, target_os = "android"))]
+fn show_window_inner(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         #[cfg(desktop)]
         {
@@ -1168,12 +1185,7 @@ pub fn run() {
     #[cfg(windows)]
     {
         let handle = app.handle().clone();
-        if let Err(e) = instance.listen(move || {
-            let app = handle.clone();
-            if let Err(e) = handle.run_on_main_thread(move || show_window(&app)) {
-                tracing::warn!("instance activation: {e}");
-            }
-        }) {
+        if let Err(e) = instance.listen(move || show_window(&handle)) {
             tracing::error!("instance listener: {e}");
         }
     }
