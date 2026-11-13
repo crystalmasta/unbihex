@@ -801,6 +801,54 @@ fn store_apps_loopback(state: State<'_, AppState>, allow: bool) -> Result<usize,
 /// or swiped away while the VPN kept running (Android).
 #[cfg(any(desktop, target_os = "android"))]
 fn show_window(app: &AppHandle) {
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || show_windows_window(&app));
+    }
+    #[cfg(not(windows))]
+    show_window_inner(app);
+}
+
+#[cfg(windows)]
+fn show_windows_window(app: &AppHandle) {
+    static WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = WINDOW_CREATION.try_lock() else {
+        return;
+    };
+    let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
+        return;
+    };
+    // A failed asynchronous build may leave its label registered in Tauri.
+    for (label, delay) in [("main", 0), ("main-retry-1", 2), ("main-retry-2", 8)] {
+        if let Some(window) = app.get_webview_window(label) {
+            if window.hwnd().is_ok() {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+                return;
+            }
+            continue;
+        }
+        std::thread::sleep(Duration::from_secs(delay));
+        let mut config = config.clone();
+        config.label = label.into();
+        match tauri::WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
+            Ok(window) => match window.hwnd() {
+                Ok(_) => {
+                    let _ = window.set_focus();
+                    return;
+                }
+                Err(e) => tracing::warn!("window {label} was not created: {e}"),
+            },
+            Err(e) => tracing::warn!("window {label}: {e}"),
+        }
+    }
+    tracing::error!("could not open the main window after WebView2 startup attempts");
+}
+
+#[cfg(any(all(desktop, not(windows)), target_os = "android"))]
+fn show_window_inner(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         #[cfg(desktop)]
         {
@@ -976,7 +1024,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 // ---------------------------------------------------------------- startup
 
-fn start_background(app: AppHandle) {
+fn start_background(app: AppHandle, #[cfg(windows)] start_in_tray: bool) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         #[cfg(target_os = "android")]
@@ -1000,11 +1048,13 @@ fn start_background(app: AppHandle) {
                 && let Err(e) = do_connect(&app, &state.client).await
             {
                 tracing::warn!("auto-connect: {e}");
-                // Not silently: started at login the app sits in the tray, and in
-                // TUN mode without administrator rights the VPN never comes up.
-                // The window shows why (and offers a restart as administrator).
+                // A quiet Windows startup keeps the error for the next UI load.
                 *state.notice.lock() = Some(format!("Автоподключение не удалось: {e}"));
-                #[cfg(desktop)]
+                #[cfg(windows)]
+                if !start_in_tray {
+                    show_window(&app);
+                }
+                #[cfg(all(desktop, not(windows)))]
                 show_window(&app);
             }
             notify(&app);
@@ -1094,10 +1144,20 @@ pub fn run() {
             // tray without flashing a window or loading WebView2 for nothing.
             // Without a tray there would be no way in, so the window opens anyway.
             #[cfg(desktop)]
-            if !(std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some()) {
+            let start_in_tray =
+                std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some();
+            #[cfg(windows)]
+            let start_in_tray =
+                start_in_tray && !app.state::<AppState>().client.settings().auto_start_show_window;
+            #[cfg(desktop)]
+            if !start_in_tray {
                 show_window(app.handle());
             }
-            start_background(app.handle().clone());
+            start_background(
+                app.handle().clone(),
+                #[cfg(windows)]
+                start_in_tray,
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

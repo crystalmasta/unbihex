@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Main window",
-  "windows": ["main"],
+  "windows": ["main", "main-retry-1", "main-retry-2"],
   "permissions": [
     "core:default",
     "opener:default"

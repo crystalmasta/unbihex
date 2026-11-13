@@ -16,7 +16,8 @@ export function initControls() {
   $("#settings-reset").addEventListener("click", resetSettings);
   $("#apps-pick").addEventListener("click", openAppsDialog);
   f.auto_start.addEventListener("change", (e) => {
-    $("#settings-form").auto_start_admin.disabled = !e.target.checked;
+    f.auto_start_admin.disabled = !e.target.checked;
+    f.auto_start_show_window.disabled = !e.target.checked;
   });
   f.allow_lan.addEventListener("change", (e) => {
     $("#lan-auth").hidden = !e.target.checked;
