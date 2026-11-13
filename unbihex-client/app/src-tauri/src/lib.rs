@@ -1017,7 +1017,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 // ---------------------------------------------------------------- startup
 
-fn start_background(app: AppHandle, #[cfg(windows)] start_in_tray: bool) {
+fn start_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         #[cfg(target_os = "android")]
@@ -1041,13 +1041,11 @@ fn start_background(app: AppHandle, #[cfg(windows)] start_in_tray: bool) {
                 && let Err(e) = do_connect(&app, &state.client).await
             {
                 tracing::warn!("auto-connect: {e}");
-                // A quiet Windows startup keeps the error for the next UI load.
+                // Not silently: started at login the app sits in the tray, and in
+                // TUN mode without administrator rights the VPN never comes up.
+                // The window shows why (and offers a restart as administrator).
                 *state.notice.lock() = Some(format!("Автоподключение не удалось: {e}"));
-                #[cfg(windows)]
-                if !start_in_tray {
-                    show_window(&app);
-                }
-                #[cfg(all(desktop, not(windows)))]
+                #[cfg(desktop)]
                 show_window(&app);
             }
             notify(&app);
@@ -1146,11 +1144,7 @@ pub fn run() {
             if !start_in_tray {
                 show_window(app.handle());
             }
-            start_background(
-                app.handle().clone(),
-                #[cfg(windows)]
-                start_in_tray,
-            );
+            start_background(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
