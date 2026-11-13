@@ -408,7 +408,7 @@ async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
         platform: platform_name(),
         mobile: cfg!(mobile),
         is_admin,
-        app_version: env!("UNBIHEX_DISPLAY_VERSION"),
+        app_version: env!("CARGO_PKG_VERSION"),
         engine_version: unbihex_client_core::ENGINE_VERSION,
         data_dir: state.client.dir().display().to_string(),
         notice: state.notice.lock().take(),
@@ -1110,7 +1110,7 @@ pub fn run() {
             logs::set_level(&level, &client.settings().log_level);
             tracing::info!(
                 "Unbihex {} (engine {}) on {}",
-                env!("UNBIHEX_DISPLAY_VERSION"),
+                env!("CARGO_PKG_VERSION"),
                 unbihex_client_core::ENGINE_VERSION,
                 platform_name()
             );
