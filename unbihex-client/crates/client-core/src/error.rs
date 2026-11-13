@@ -21,9 +21,6 @@ pub enum ClientError {
     /// An OS-level operation (routes, proxy, permissions) failed.
     #[error("система: {0}")]
     Platform(String),
-    /// No suitable physical uplink was available when starting a routed tunnel.
-    #[error("система: не найден основной сетевой интерфейс: {0}")]
-    NoUplink(String),
     /// Reading or writing the state file failed.
     #[error("файл: {0}")]
     Io(#[from] std::io::Error),

@@ -23,9 +23,6 @@ struct AppState {
     level: Option<logs::LevelHandle>,
     /// Serializes connect/disconnect so double clicks cannot race.
     op: Arc<tokio::sync::Mutex<()>>,
-    /// Manual connection commands set this while holding `op`.
-    #[cfg(windows)]
-    startup_connect_cancelled: std::sync::atomic::AtomicBool,
     /// A message for the UI to show once, such as a failed auto-connect at
     /// login: the window may not have existed when it happened.
     notice: parking_lot::Mutex<Option<String>>,
@@ -304,8 +301,6 @@ async fn do_disconnect(_app: &AppHandle, client: &Client) {
 #[tauri::command]
 async fn connect(app: AppHandle, state: State<'_, AppState>) -> Result<ConnectionInfo, String> {
     let _op = state.op.lock().await;
-    #[cfg(windows)]
-    state.startup_connect_cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
     #[cfg(desktop)]
     set_tray_transition(&app, true);
     let r = do_connect(&app, &state.client).await;
@@ -316,8 +311,6 @@ async fn connect(app: AppHandle, state: State<'_, AppState>) -> Result<Connectio
 #[tauri::command]
 async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let _op = state.op.lock().await;
-    #[cfg(windows)]
-    state.startup_connect_cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
     #[cfg(desktop)]
     set_tray_transition(&app, false);
     do_disconnect(&app, &state.client).await;
@@ -923,8 +916,6 @@ fn update_tray(app: &AppHandle) {
 async fn toggle_connection(app: AppHandle) {
     let state = app.state::<AppState>();
     let _op = state.op.lock().await;
-    #[cfg(windows)]
-    state.startup_connect_cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
     let was_connected = state.client.controller.is_connected().await;
     set_tray_transition(&app, !was_connected);
     if was_connected {
@@ -985,75 +976,39 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 // ---------------------------------------------------------------- startup
 
-async fn auto_connect_at_startup(app: &AppHandle, state: &AppState) {
-    #[cfg(windows)]
-    const NETWORK_RETRIES: u32 = 30;
-    #[cfg(windows)]
-    let mut retries_left = NETWORK_RETRIES;
-    // The loop can only repeat on Windows.
-    #[cfg_attr(not(windows), allow(clippy::never_loop))]
-    loop {
-        let _op = state.op.lock().await;
-        #[cfg(windows)]
-        if state.startup_connect_cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            return;
-        }
-        if !state.client.settings().auto_connect || state.client.selected_server().is_err() {
-            return;
-        }
-        #[cfg(target_os = "android")]
-        let connecting = {
-            use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
-            let handle = app.clone();
-            matches!(tauri::async_runtime::spawn_blocking(move || handle.unbihex_vpn().status()).await,
-                Ok(Ok(status)) if status.state == "connecting")
-        };
-        #[cfg(not(target_os = "android"))]
-        let connecting = false;
-        if connecting || state.client.controller.is_connected().await {
-            return;
-        }
-
-        #[cfg(desktop)]
-        set_tray_transition(app, true);
-        let result = do_connect(app, &state.client).await;
-        #[cfg(windows)]
-        if let Err(ClientError::NoUplink(reason)) = &result
-            && retries_left > 0
-        {
-            if retries_left == NETWORK_RETRIES {
-                tracing::info!(%reason, "auto-connect: waiting up to 60 seconds for the network");
-            }
-            retries_left -= 1;
-            notify(app);
-            drop(_op);
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        }
-
-        if let Err(e) = result {
-            tracing::warn!("auto-connect: {e}");
-            *state.notice.lock() = Some(format!("Автоподключение не удалось: {e}"));
-            #[cfg(desktop)]
-            show_window(app);
-        } else {
-            #[cfg(windows)]
-            if retries_left < NETWORK_RETRIES {
-                tracing::info!("auto-connect: connected after waiting for the network");
-            }
-        }
-        notify(app);
-        return;
-    }
-}
-
 fn start_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         #[cfg(target_os = "android")]
         watch_activities(app.clone());
         let state = app.state::<AppState>();
-        auto_connect_at_startup(&app, &state).await;
+        let auto = state.client.settings().auto_connect;
+        if auto && state.client.selected_server().is_ok() {
+            let _op = state.op.lock().await;
+            #[cfg(target_os = "android")]
+            let connecting = {
+                use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+                let handle = app.clone();
+                matches!(tauri::async_runtime::spawn_blocking(move || handle.unbihex_vpn().status()).await,
+                    Ok(Ok(status)) if status.state == "connecting")
+            };
+            #[cfg(not(target_os = "android"))]
+            let connecting = false;
+            #[cfg(desktop)]
+            set_tray_transition(&app, true);
+            if !connecting && !state.client.controller.is_connected().await
+                && let Err(e) = do_connect(&app, &state.client).await
+            {
+                tracing::warn!("auto-connect: {e}");
+                // Not silently: started at login the app sits in the tray, and in
+                // TUN mode without administrator rights the VPN never comes up.
+                // The window shows why (and offers a restart as administrator).
+                *state.notice.lock() = Some(format!("Автоподключение не удалось: {e}"));
+                #[cfg(desktop)]
+                show_window(&app);
+            }
+            notify(&app);
+        }
         loop {
             if let Some(r) = state.client.update_geodata_if_due().await {
                 match r {
@@ -1128,8 +1083,6 @@ pub fn run() {
                 op: owner.op.clone(),
                 #[cfg(not(target_os = "android"))]
                 op: Arc::new(tokio::sync::Mutex::new(())),
-                #[cfg(windows)]
-                startup_connect_cancelled: std::sync::atomic::AtomicBool::new(false),
                 notice: parking_lot::Mutex::new(notice),
             });
             #[cfg(desktop)]
