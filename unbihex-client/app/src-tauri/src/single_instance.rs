@@ -4,23 +4,24 @@
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_INVALID_PARAMETER, GetLastError, HANDLE,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_ALREADY_EXISTS, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventExW, CreateMutexExW, EVENT_MODIFY_STATE, OpenProcess,
-    PROCESS_SYNCHRONIZE, SetEvent, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
+    CreateEventExW, CreateMutexExW, EVENT_MODIFY_STATE, OpenProcess, PROCESS_SYNCHRONIZE,
+    SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject,
 };
 
 const NAME: &str = r"Local\com.unbihex.client";
 const RESTART_PARENT: &str = "--unbihex-restart-parent=";
 
 fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(Some(0)).collect()
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn owned(handle: HANDLE) -> io::Result<OwnedHandle> {
@@ -90,14 +91,22 @@ impl Instance {
         // SAFETY: names are terminated UTF-16; default security and non-inheritable
         // handles are intentional. Flags=0 creates an initially unset auto-reset event.
         let event = owned(unsafe {
-            CreateEventExW(std::ptr::null(), event_name.as_ptr(), 0,
-                SYNCHRONIZATION_SYNCHRONIZE | EVENT_MODIFY_STATE)
+            CreateEventExW(
+                std::ptr::null(),
+                event_name.as_ptr(),
+                0,
+                SYNCHRONIZATION_SYNCHRONIZE | EVENT_MODIFY_STATE,
+            )
         })?;
         // Existence is the lock: do not request ownership or release a mutex owned
         // by another thread. Request only synchronization access, not ALL_ACCESS.
         let raw = unsafe {
-            CreateMutexExW(std::ptr::null(), mutex_name.as_ptr(), 0,
-                SYNCHRONIZATION_SYNCHRONIZE)
+            CreateMutexExW(
+                std::ptr::null(),
+                mutex_name.as_ptr(),
+                0,
+                SYNCHRONIZATION_SYNCHRONIZE,
+            )
         };
         // GetLastError must be read immediately after CreateMutexExW.
         let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
@@ -123,16 +132,19 @@ impl Instance {
     pub fn listen(&mut self, activate: impl Fn() + Send + 'static) -> io::Result<()> {
         let event = self.event.try_clone()?;
         let stop = self.stop.clone();
-        self.listener = Some(thread::Builder::new().name("instance-activation".into()).spawn(move || {
-            while !stop.load(Ordering::Acquire) {
-                match wait(&event, 250) {
-                    Ok(()) if !stop.load(Ordering::Acquire) => activate(),
-                    Ok(()) => break,
-                    Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-                    Err(_) => break,
+        let listener = thread::Builder::new()
+            .name("instance-activation".into())
+            .spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    match wait(&event, 250) {
+                        Ok(()) if !stop.load(Ordering::Acquire) => activate(),
+                        Ok(()) => break,
+                        Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+                        Err(_) => break,
+                    }
                 }
-            }
-        })?);
+            })?;
+        self.listener = Some(listener);
         Ok(())
     }
 }
@@ -141,7 +153,9 @@ impl Drop for Instance {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         // SAFETY: wake our listener before joining; the event is still owned here.
-        unsafe { SetEvent(self.event.as_raw_handle()); }
+        unsafe {
+            SetEvent(self.event.as_raw_handle());
+        }
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
         }
@@ -158,7 +172,10 @@ mod tests {
         let name = format!(r"Local\unbihex-test-{}", uuid::Uuid::new_v4());
         let first = Instance::acquire_named(&name, true).unwrap().unwrap();
         assert!(Instance::acquire_named(&name, false).unwrap().is_none());
-        assert_eq!(wait(&first.event, 0).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            wait(&first.event, 0).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
         assert!(Instance::acquire_named(&name, true).unwrap().is_none());
         wait(&first.event, 1000).unwrap();
         drop(first);
@@ -170,24 +187,38 @@ mod tests {
         let name = format!(r"Local\unbihex-test-{}", uuid::Uuid::new_v4());
         let start = Arc::new(std::sync::Barrier::new(8));
         let finish = Arc::new(std::sync::Barrier::new(8));
-        let threads: Vec<_> = (0..8).map(|_| {
-            let (name, start, finish) = (name.clone(), start.clone(), finish.clone());
-            thread::spawn(move || {
-                start.wait();
-                let instance = Instance::acquire_named(&name, false).unwrap();
-                let owner = instance.is_some();
-                finish.wait(); // Keep the winning handle alive until all contenders tried.
-                drop(instance);
-                owner
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (name, start, finish) = (name.clone(), start.clone(), finish.clone());
+                thread::spawn(move || {
+                    start.wait();
+                    let instance = Instance::acquire_named(&name, false).unwrap();
+                    let owner = instance.is_some();
+                    finish.wait(); // Keep the winning handle alive until all contenders tried.
+                    drop(instance);
+                    owner
+                })
             })
-        }).collect();
-        assert_eq!(threads.into_iter().filter_map(|t| t.join().ok()).filter(|v| *v).count(), 1);
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .filter_map(|t| t.join().ok())
+                .filter(|v| *v)
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn rejects_invalid_restart_parent() {
-        for value in ["", "--unbihex-restart-parent=0", "--unbihex-restart-parent=no",
-            "--unbihex-restart-parent=4294967296", "--other=42"] {
+        for value in [
+            "",
+            "--unbihex-restart-parent=0",
+            "--unbihex-restart-parent=no",
+            "--unbihex-restart-parent=4294967296",
+            "--other=42",
+        ] {
             assert!(parse_parent(value).is_err());
         }
         assert!(parse_parent(&format!("{RESTART_PARENT}{}", std::process::id())).is_err());
