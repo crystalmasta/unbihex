@@ -302,6 +302,8 @@ pub struct Settings {
     /// them: a Task Scheduler task instead of the `Run` entry. The system is
     /// what counts here too; while autostart is off the UI offers it for TUN.
     pub auto_start_admin: bool,
+    /// Windows: open the main window when the app starts at login.
+    pub auto_start_show_window: bool,
     /// Android: show a "VPN is on" notification. It keeps the VPN running in the
     /// foreground, so swiping the app away does not drop it.
     pub android_notification: bool,
@@ -380,6 +382,7 @@ impl Default for Settings {
             auto_connect: false,
             auto_start: false,
             auto_start_admin: false,
+            auto_start_show_window: false,
             android_notification: true,
             tls_fingerprint: String::new(),
             android_apps_mode: AppsMode::All,

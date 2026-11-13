@@ -3,6 +3,7 @@ export const generalMarkup = `          <fieldset data-tab="general">
             <legend>Запуск</legend>
             <div id="desktop-autostart">
               <label class="check"><input name="auto_start" type="checkbox" /> <span>Запускать при входе в Windows</span></label>
+              <label class="check"><input name="auto_start_show_window" type="checkbox" /> <span>Открывать окно при автозапуске</span></label>
               <label class="check"><input name="auto_start_admin" type="checkbox" /> <span>С правами администратора<button type="button" class="info-btn" data-info="i-autostart-admin" aria-label="Подробнее">ⓘ</button></span></label>
               <p class="info" id="i-autostart-admin" hidden>Нужно для режима TUN. С правами администратора программа стартует заданием Планировщика заданий, без запроса UAC при входе. Включить или выключить такой автозапуск может только Unbihex, запущенный от администратора, — программа предложит перезапуск. Без этих прав в режиме TUN подключиться при входе не выйдет — откроется окно с причиной. Портативную версию отключите здесь, прежде чем удалять её папку.</p>
             </div>

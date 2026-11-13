@@ -801,6 +801,47 @@ fn store_apps_loopback(state: State<'_, AppState>, allow: bool) -> Result<usize,
 /// or swiped away while the VPN kept running (Android).
 #[cfg(any(desktop, target_os = "android"))]
 fn show_window(app: &AppHandle) {
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || show_windows_window(&app));
+    }
+    #[cfg(not(windows))]
+    show_window_inner(app);
+}
+
+#[cfg(windows)]
+fn show_windows_window(app: &AppHandle) {
+    static WINDOW_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = WINDOW_CREATION.try_lock() else {
+        return;
+    };
+    let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
+        return;
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+
+    // Tauri 2.12 waits for WebView2 before registering the window.
+    for delay in [0, 2, 8] {
+        std::thread::sleep(Duration::from_secs(delay));
+        match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build()) {
+            Ok(window) => {
+                let _ = window.set_focus();
+                return;
+            }
+            Err(e) => tracing::warn!("could not create the main window: {e}"),
+        }
+    }
+    tracing::error!("could not open the main window after WebView2 startup attempts");
+}
+
+#[cfg(any(all(desktop, not(windows)), target_os = "android"))]
+fn show_window_inner(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         #[cfg(desktop)]
         {
@@ -1094,7 +1135,13 @@ pub fn run() {
             // tray without flashing a window or loading WebView2 for nothing.
             // Without a tray there would be no way in, so the window opens anyway.
             #[cfg(desktop)]
-            if !(std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some()) {
+            let start_in_tray =
+                std::env::args().any(|a| a == "--autostart") && app.tray_by_id("main").is_some();
+            #[cfg(windows)]
+            let start_in_tray =
+                start_in_tray && !app.state::<AppState>().client.settings().auto_start_show_window;
+            #[cfg(desktop)]
+            if !start_in_tray {
                 show_window(app.handle());
             }
             start_background(app.handle().clone());

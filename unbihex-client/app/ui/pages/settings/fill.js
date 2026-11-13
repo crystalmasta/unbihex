@@ -40,6 +40,8 @@ export function fillSettings() {
   f.auto_start.checked = s.auto_start;
   f.auto_start_admin.checked = s.auto_start_admin;
   f.auto_start_admin.disabled = !s.auto_start;
+  f.auto_start_show_window.checked = s.auto_start_show_window;
+  f.auto_start_show_window.disabled = !s.auto_start;
   $("#desktop-autostart").hidden = S.platform !== "windows";
   f.auto_connect.checked = s.auto_connect;
   f.android_notification.checked = s.android_notification;
