@@ -819,29 +819,22 @@ fn show_windows_window(app: &AppHandle) {
     let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
         return;
     };
-    // A failed asynchronous build may leave its label registered in Tauri.
-    for (label, delay) in [("main", 0), ("main-retry-1", 2), ("main-retry-2", 8)] {
-        if let Some(window) = app.get_webview_window(label) {
-            if window.hwnd().is_ok() {
-                let _ = window.unminimize();
-                let _ = window.show();
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+
+    // Tauri 2.12 waits for WebView2 before registering the window.
+    for delay in [0, 2, 8] {
+        std::thread::sleep(Duration::from_secs(delay));
+        match tauri::WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build()) {
+            Ok(window) => {
                 let _ = window.set_focus();
                 return;
             }
-            continue;
-        }
-        std::thread::sleep(Duration::from_secs(delay));
-        let mut config = config.clone();
-        config.label = label.into();
-        match tauri::WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
-            Ok(window) => match window.hwnd() {
-                Ok(_) => {
-                    let _ = window.set_focus();
-                    return;
-                }
-                Err(e) => tracing::warn!("window {label} was not created: {e}"),
-            },
-            Err(e) => tracing::warn!("window {label}: {e}"),
+            Err(e) => tracing::warn!("could not create the main window: {e}"),
         }
     }
     tracing::error!("could not open the main window after WebView2 startup attempts");
