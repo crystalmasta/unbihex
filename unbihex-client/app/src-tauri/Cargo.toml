@@ -41,3 +41,6 @@ tauri = { version = "2", features = ["tray-icon"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "=0.21.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
