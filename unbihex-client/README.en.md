@@ -105,6 +105,21 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   fingerprint, auto-select and templates, copy the name, delete) are in a "⋯" menu, which a long press or a right
   click also opens. "О программе" opens the General tab, with a "Поддержать автора" (support the author) link.
 - Speed and traffic statistics, a log, a tray icon, auto-connect.
+- Developer mode (for testers): seven taps on the version line at the bottom of "Общие" — "Режим разработчика
+  включён"; it is turned off there too. "Журнал" gets an "Обычный / Соединения" switch: every TCP connection and UDP
+  flow (time, application, domain or address, port, protocol, the rule that matched, the route — direct, server or
+  block, bytes, duration, why it closed: timeout, refused, RST, handshake failure with the server…), DNS queries (who
+  answered, the answer, the time) and lines about routing changes (whitelists included) and auto-select switching
+  servers. Filters: period (5 min / 15 min / 1 h / whole session / from–to), application, route, errors only,
+  domain or IP search; pause and clear. Each connection writes a report `unbihex-report-*.jsonl` (JSON Lines: a
+  header with the client and engine versions, platform, OS, mode, routing and template, then one event per line;
+  keys, UUIDs and passwords masked as in the saved log); "Сохранить отчёт сейчас" saves one with the current
+  filters. The folder is your own (Android: the system folder picker; desktop: a dialog) or the app's (`reports`);
+  the last N reports are kept (10, from 1 to 100), and only our own old files are deleted. "Отчёты…" opens a saved
+  report in the same viewer and shares it (Android) or saves a copy (desktop). The owning application is found on
+  Android (10+: `getConnectionOwnerUid`, older: `/proc/net`), Windows (the TCP/UDP tables by local port) and Linux
+  (`/proc`; other users' processes need root); macOS and iOS show "—". With the mode off nothing is collected
+  (engine events: SPEC §7, item 8).
 - Start at Windows login: a plain one through the user's `Run` entry; one with administrator rights (TUN needs them)
   through a Task Scheduler task at this user's logon, with no password and no UAC prompt. Only Unbihex running as
   administrator can switch that task on or off (the app offers a restart); the uninstaller removes it too.
@@ -432,6 +447,8 @@ What it holds (fields an older file lacks get their defaults):
     them; both `null`: only the indicator on the power button); `whitelist_allowed` / `whitelist_blocked`: the hosts to
     check (empty: the defaults). Next to it, `whitelist` holds whether the mode is on and what it replaced (given back
     on leaving unless you changed it yourself). Details: SPEC §13.4.
+  - `dev_mode`: developer mode; `report_dir`: the folder for connection reports (a path or an Android `content://`
+    tree; empty: `reports` in the data folder); `report_keep`: how many reports to keep (10, 1–100).
 
 Next to it, `update.json` keeps the time and result of the last update check (the latest release of
 `crystalmasta/unbihex` on GitHub). The installer is downloaded only with the "Обновить" button (Windows, Android)
