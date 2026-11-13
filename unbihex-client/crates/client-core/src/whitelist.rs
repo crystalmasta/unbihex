@@ -459,6 +459,7 @@ impl Client {
             d.whitelist.active = want;
             let after = (d.settings.auto_select, d.settings.auto_template, d.settings.routing);
             tracing::info!("{message}");
+            self.controller.journal.note("routing", &message);
             Some(WhitelistEvent { active: want, message, reconnect: before != after })
         })
     }

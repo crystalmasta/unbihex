@@ -93,6 +93,8 @@ struct Running {
 pub struct Controller {
     #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
     data_dir: PathBuf,
+    /// Developer mode: the connection journal of the running engine.
+    pub journal: Arc<crate::devlog::Journal>,
     running: tokio::sync::Mutex<Option<Running>>,
     ping_env: parking_lot::Mutex<PingEnv>,
 }
@@ -152,6 +154,7 @@ impl Controller {
     /// `data_dir` holds the crash-recovery journals.
     pub fn new(data_dir: PathBuf) -> Self {
         Controller {
+            journal: Arc::new(crate::devlog::Journal::new(data_dir.join("reports"))),
             data_dir,
             running: tokio::sync::Mutex::new(None),
             ping_env: parking_lot::Mutex::new(PingEnv::default()),
@@ -344,9 +347,21 @@ impl Controller {
             }
         };
         let info = running.info.clone();
+        if let Some(i) = &running.instance {
+            self.journal.attach(i.events(), &info).await;
+        }
         *guard = Some(running);
         tracing::info!("connected ({})", info.mode);
         Ok(info)
+    }
+
+    /// Starts or stops journaling the running engine as developer mode is now.
+    pub async fn sync_journal(&self) {
+        let guard = self.running.lock().await;
+        match guard.as_ref().and_then(|r| Some((r.instance.as_ref()?, &r.info))) {
+            Some((i, info)) if self.journal.enabled() => self.journal.attach(i.events(), info).await,
+            _ => self.journal.detach().await,
+        }
     }
 
     /// Mobile (Android): starts the engine on a TUN descriptor from the VPN service.
@@ -404,6 +419,7 @@ impl Controller {
             http_port: None,
             external: false,
         };
+        self.journal.attach(instance.events(), &info).await;
         *guard = Some(Running {
             counters: Some(instance.counters()),
             instance: Some(instance),
@@ -447,6 +463,7 @@ impl Controller {
         running.info.server_id = server.id;
         running.info.server_name = server.name.clone();
         running.info.group = group_names(servers, settings);
+        self.journal.reloaded(&running.info);
         tracing::info!("hot reload: {}", server.name);
         Ok(Some(running.info.clone()))
     }
@@ -485,6 +502,7 @@ impl Controller {
                 drop(r.proxy);
                 drop(r.routes);
             }
+            self.journal.detach().await;
             if let Some(i) = r.instance {
                 i.shutdown().await;
             }

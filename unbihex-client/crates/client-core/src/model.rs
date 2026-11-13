@@ -394,6 +394,14 @@ pub struct Settings {
     pub whitelist_allowed: Vec<String>,
     /// Hosts a whitelist blocks; empty: [`crate::whitelist::DEFAULT_BLOCKED`].
     pub whitelist_blocked: Vec<String>,
+    /// Developer mode (seven taps on the version in the settings): the
+    /// connection journal and its reports ([`crate::devlog`]).
+    pub dev_mode: bool,
+    /// Developer mode: the folder for connection reports (a path, or an
+    /// Android `content://` tree); empty: the app's own folder.
+    pub report_dir: String,
+    /// Developer mode: how many connection reports to keep (1–100).
+    pub report_keep: u32,
 }
 
 /// Operator whitelists (only allowed sites and IPs reachable): how the client
@@ -529,6 +537,9 @@ impl Default for Settings {
             whitelist_routing: None,
             whitelist_allowed: Vec::new(),
             whitelist_blocked: Vec::new(),
+            dev_mode: false,
+            report_dir: String::new(),
+            report_keep: crate::devlog::DEFAULT_KEEP,
         }
     }
 }

@@ -73,6 +73,44 @@ pub(super) fn save_text_dialog(owner: isize, name: &str) -> Option<std::path::Pa
     Some(std::ffi::OsString::from_wide(&file[..len]).into())
 }
 
+/// The system folder picker over the window `owner` (an `HWND`, 0 for none);
+/// `None` when the user cancels.
+#[allow(unsafe_code)]
+pub(super) fn choose_folder_dialog(owner: isize, title: &str) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
+    use windows_sys::Win32::UI::Shell::{
+        BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW, SHGetPathFromIDListW,
+    };
+    let title = wide(title);
+    let mut display = vec![0u16; 260];
+    let info = BROWSEINFOW {
+        hwndOwner: owner as _,
+        pszDisplayName: display.as_mut_ptr(),
+        lpszTitle: title.as_ptr(),
+        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        ..Default::default()
+    };
+    // SAFETY: the dialog runs modally on this (blocking-pool) thread, set up for
+    // COM first; every pointer in `info` lives through the call; the returned
+    // item list is freed once its path is read into a buffer of MAX_PATH+.
+    unsafe {
+        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        let pidl = SHBrowseForFolderW(&info);
+        if pidl.is_null() {
+            return None;
+        }
+        let mut path = vec![0u16; 1024];
+        let ok = SHGetPathFromIDListW(pidl, path.as_mut_ptr());
+        CoTaskMemFree(pidl as *const _);
+        if ok == 0 {
+            return None;
+        }
+        let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+        Some(std::ffi::OsString::from_wide(&path[..len]).into())
+    }
+}
+
 pub(super) fn relaunch_elevated() -> Result<()> {
     relaunch_elevated_args("--elevated")
 }

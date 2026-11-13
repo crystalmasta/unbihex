@@ -96,6 +96,7 @@ impl Client {
             dir,
             whitelist: crate::whitelist::Watch::default(),
         };
+        client.sync_journal();
         if fresh && let Err(e) = client.save() {
             tracing::warn!("cannot save state: {e}");
         }
@@ -128,8 +129,42 @@ impl Client {
 
     pub(crate) fn mutate<T>(&self, f: impl FnOnce(&mut AppData) -> T) -> Result<T> {
         let r = f(&mut self.data.write());
+        self.sync_journal();
         self.save()?;
         Ok(r)
+    }
+
+    /// Tells the connection journal what it needs of the saved data.
+    fn sync_journal(&self) {
+        let d = self.data.read();
+        let s = &d.settings;
+        self.controller.journal.set_context(crate::devlog::JournalContext {
+            enabled: s.dev_mode,
+            keep: s.report_keep,
+            dir: s.report_dir.clone(),
+            routing: crate::whitelist::routing_label(s.routing).into(),
+            template: if s.auto_select == crate::model::AutoSelect::Off {
+                None
+            } else {
+                d.active_template().map(|t| t.name.clone())
+            },
+            secrets: if s.dev_mode { crate::redact::secrets(&d) } else { Vec::new() },
+        });
+    }
+
+    /// Developer mode on or off; a running connection starts or stops being journaled.
+    pub async fn set_dev_mode(&self, on: bool) -> Result<()> {
+        self.mutate(|d| d.settings.dev_mode = on)?;
+        if !on {
+            self.controller.journal.clear();
+        }
+        self.controller.sync_journal().await;
+        Ok(())
+    }
+
+    /// The folder for connection reports (a path or an Android tree); empty: the app's own.
+    pub fn set_report_dir(&self, dir: &str) -> Result<()> {
+        self.mutate(|d| d.settings.report_dir = dir.trim().to_string())
     }
 
     /// Adds subscription URLs and/or share links pasted by the user.
@@ -408,6 +443,10 @@ impl Client {
                 list.retain(|h| !h.trim().is_empty());
                 list.iter_mut().for_each(|h| *h = h.trim().to_string());
             }
+            // Changed by their own commands only (seven taps, the folder dialog).
+            s.dev_mode = d.settings.dev_mode;
+            s.report_dir = d.settings.report_dir.clone();
+            s.report_keep = s.report_keep.clamp(*crate::devlog::KEEP_RANGE.start(), *crate::devlog::KEEP_RANGE.end());
             d.settings = s;
         })
     }

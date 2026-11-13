@@ -6,6 +6,7 @@
 pub mod adblock;
 pub mod client;
 pub mod controller;
+pub mod devlog;
 pub mod error;
 pub mod geo;
 pub mod jsonsub;

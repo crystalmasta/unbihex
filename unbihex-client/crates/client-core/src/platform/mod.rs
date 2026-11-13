@@ -12,6 +12,9 @@ use unbihex_engine::{InterfaceBinding, TunInfo};
 
 use crate::error::{ClientError, Result};
 
+mod owner;
+pub use owner::owner_lookup;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -208,6 +211,31 @@ pub fn save_text_dialog(owner: isize, name: &str) -> Option<PathBuf> {
                 let downloads = home.join("Downloads");
                 Some(if downloads.is_dir() { downloads } else { home }.join(name))
             }
+        }
+    }
+}
+
+/// Asks for a folder (the system folder picker; `owner` — the parent window's
+/// `HWND` on Windows, else ignored). `None` when the user cancels or there is
+/// no picker (Linux without `zenity`).
+pub fn choose_folder_dialog(owner: isize, title: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    return os::choose_folder_dialog(owner, title);
+    #[cfg(not(windows))]
+    {
+        let _ = owner;
+        let out = if cfg!(target_os = "macos") {
+            let script = format!("POSIX path of (choose folder with prompt \"{}\")", title.replace(['"', '\\'], "_"));
+            Command::new("osascript").args(["-e", &script]).output()
+        } else {
+            Command::new("zenity").args(["--file-selection", "--directory", &format!("--title={title}")]).output()
+        };
+        match out {
+            Ok(o) if o.status.success() => {
+                let path = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+                (!path.is_empty()).then(|| PathBuf::from(path))
+            }
+            _ => None,
         }
     }
 }
