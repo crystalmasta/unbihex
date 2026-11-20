@@ -455,7 +455,11 @@ fn run_menu(dir: Option<String>, interactive: bool) -> ExitCode {
         Ok(r) => r,
         Err(e) => return fail(e),
     };
-    match tui::run(&runtime, Client::open(data_dir(dir)), logs) {
+    let client = match Client::open(data_dir(dir)) {
+        Ok(client) => client,
+        Err(e) => return fail(e),
+    };
+    match tui::run(&runtime, client, logs) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(e),
     }
@@ -517,7 +521,10 @@ fn main() -> ExitCode {
     let result = match engine_config {
         Some((path, config)) => runtime.block_on(run_config(&path, config)),
         None => {
-            let client = Client::open(data_dir(dir));
+            let client = match Client::open(data_dir(dir)) {
+                Ok(client) => client,
+                Err(e) => return fail(e),
+            };
             runtime.block_on(run(&client, &cmd, &args[1..]))
         }
     };

@@ -50,6 +50,8 @@ pub struct Client {
     data: parking_lot::RwLock<AppData>,
     /// The engine controller.
     pub controller: Arc<Controller>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    _profile_lock: std::fs::File,
 }
 
 /// The saved state, and whether it must be saved right away: it lacked the LAN
@@ -77,12 +79,29 @@ fn load(path: &Path) -> (AppData, bool) {
 }
 
 impl Client {
-    /// Loads `dir/state.json` and rolls back system changes left by a crash.
-    pub fn open(dir: impl Into<PathBuf>) -> Client {
+    /// Locks the desktop profile before loading state or recovering system settings.
+    pub fn open(dir: impl Into<PathBuf>) -> Result<Client> {
         let dir = dir.into();
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        crate::platform::recover(&dir);
+        let profile_lock = {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(dir.join("client.lock"))?;
+            match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {}
+                Err(e) if e.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                    return Err(ClientError::AlreadyRunning);
+                }
+                Err(e) => return Err(e.into()),
+            }
+            // Keep the file even after exit: unlinking it can split contenders across two locks.
+            crate::platform::recover(&dir);
+            file
+        };
         let (mut data, mut fresh) = load(&dir.join(STATE_FILE));
         // By dubr1k (github.com/dubr1k), PR #32.
         for server in &mut data.servers {
@@ -92,11 +111,13 @@ impl Client {
             controller: Arc::new(Controller::new(dir.clone())),
             data: parking_lot::RwLock::new(data),
             dir,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            _profile_lock: profile_lock,
         };
         if fresh && let Err(e) = client.save() {
             tracing::warn!("cannot save state: {e}");
         }
-        client
+        Ok(client)
     }
 
     /// The data folder.
@@ -783,7 +804,7 @@ mod tests {
     #[tokio::test]
     async fn saved_unsupported_cdn_is_rechecked_without_losing_identity() {
         let dir = tmp();
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         let extra = serde_json::json!({"seqPlacement":"query", "seqKey":"offset", "uplinkHTTPMethod":"GET"});
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("extra", &extra.to_string())
@@ -802,7 +823,7 @@ mod tests {
         }
         c.save().unwrap();
         drop(c);
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         let s = c.snapshot().servers.remove(0);
         assert_eq!(s.id, id);
         assert_eq!(s.name, "User label");
@@ -823,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn tile_label_is_the_selected_server_or_the_app_name() {
-        let c = Client::open(tmp());
+        let c = Client::open(tmp()).unwrap();
         assert_eq!(c.tile_label().await, "Unbihex");
         c.add_input(&format!("vless://{UUID}@a.example:443?security=tls#%F0%9F%87%A9%F0%9F%87%AA%20Berlin"))
             .await
@@ -833,7 +854,7 @@ mod tests {
 
     #[tokio::test]
     async fn pasted_json_configs_become_servers() {
-        let c = Client::open(tmp());
+        let c = Client::open(tmp()).unwrap();
         // The example from issue #12: sing-box, no TLS block.
         let sing_box = format!(
             r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"uuid":"{UUID}"}}]}}"#
@@ -853,7 +874,7 @@ mod tests {
     #[tokio::test]
     async fn manual_links_persist_and_select() {
         let dir = tmp();
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         let r = c
             .add_input(&format!(
                 "vless://{UUID}@a.com:443?security=tls#A\nhysteria://p@b.com:443#B\nnonsense"
@@ -865,7 +886,7 @@ mod tests {
         let d = c.snapshot();
         assert_eq!(d.selected_server().unwrap().name, "A");
         drop(c);
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         assert_eq!(c.snapshot().servers.len(), 2);
         let b = c.snapshot().servers[1].id;
         c.select(b).unwrap();
@@ -896,7 +917,7 @@ mod tests {
     #[tokio::test]
     async fn saved_unsupported_hysteria2_is_rechecked_without_losing_identity() {
         let dir = tmp();
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         c.add_input("hy2://pw@hy.example#My%20server")
             .await
             .unwrap();
@@ -909,7 +930,7 @@ mod tests {
         }
         c.save().unwrap();
         drop(c);
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         let s = c.snapshot().servers.remove(0);
         assert_eq!(s.id, id);
         assert_eq!(s.name, "User label");
@@ -964,7 +985,7 @@ mod tests {
     #[test]
     fn auto_group_follows_exclusions_and_templates() {
         let link = |host: &str| parse_server(&format!("vless://{UUID}@{host}:443?security=tls&sid=1#{host}")).unwrap();
-        let c = Client::open(tmp());
+        let c = Client::open(tmp()).unwrap();
         let (s1, s2) = (Uuid::new_v4(), Uuid::new_v4());
         let ids = c
             .mutate(|d| {
@@ -1064,7 +1085,7 @@ mod tests {
         // Marked mode: the template is active, the group stays the same.
         let dir = tmp();
         std::fs::write(dir.join(STATE_FILE), state("marked")).unwrap();
-        let cl = Client::open(&dir);
+        let cl = Client::open(&dir).unwrap();
         let d = cl.snapshot();
         assert_eq!(d.auto_templates.len(), 1);
         let t = &d.auto_templates[0];
@@ -1076,14 +1097,14 @@ mod tests {
         // Saved at once and only once: opening again keeps the same template.
         let saved = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
         assert!(!saved.contains("auto_marked") && !saved.contains("auto_group"), "{saved}");
-        let again = Client::open(&dir).snapshot();
+        drop(cl);
+        let again = Client::open(&dir).unwrap().snapshot();
         assert_eq!(again.auto_templates, d.auto_templates);
         assert_eq!(again.settings.auto_template, Some(t.id));
-        drop(cl);
         // Subscription mode: the marks are kept as a template, not active.
         let dir = tmp();
         std::fs::write(dir.join(STATE_FILE), state("subscription")).unwrap();
-        let d = Client::open(&dir).snapshot();
+        let d = Client::open(&dir).unwrap().snapshot();
         assert_eq!(d.auto_templates.len(), 1);
         assert_eq!(d.auto_templates[0].servers, [a, c]);
         assert_eq!(d.settings.auto_template, None);
@@ -1091,7 +1112,7 @@ mod tests {
         let dir = tmp();
         let none = state("marked").replace(r#""auto_marked":true"#, r#""auto_marked":false"#);
         std::fs::write(dir.join(STATE_FILE), none).unwrap();
-        let d = Client::open(&dir).snapshot();
+        let d = Client::open(&dir).unwrap().snapshot();
         assert_eq!(d.auto_templates.len(), 1);
         assert!(d.auto_templates[0].servers.is_empty());
         assert_eq!(d.settings.auto_template, Some(d.auto_templates[0].id));
@@ -1099,7 +1120,7 @@ mod tests {
         let dir = tmp();
         let plain = state("subscription").replace(r#""auto_marked":true"#, r#""auto_marked":false"#);
         std::fs::write(dir.join(STATE_FILE), plain).unwrap();
-        assert!(Client::open(&dir).snapshot().auto_templates.is_empty());
+        assert!(Client::open(&dir).unwrap().snapshot().auto_templates.is_empty());
     }
 
     #[test]
@@ -1107,9 +1128,9 @@ mod tests {
         let dir = tmp();
         // A state file from a version without LAN credentials.
         std::fs::write(dir.join(STATE_FILE), r#"{"settings":{"allow_lan":true}}"#).unwrap();
-        let pass = Client::open(&dir).settings().lan_password;
+        let pass = Client::open(&dir).unwrap().settings().lan_password;
         assert_eq!(pass.len(), 32);
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         assert_eq!(c.settings().lan_password, pass);
         c.set_settings(Settings {
             lan_username: " ".into(),
@@ -1117,7 +1138,8 @@ mod tests {
             ..c.settings()
         })
         .unwrap();
-        let s = Client::open(&dir).settings();
+        drop(c);
+        let s = Client::open(&dir).unwrap().settings();
         assert_eq!((s.lan_username.as_str(), s.lan_password), ("unbihex", pass));
     }
 }

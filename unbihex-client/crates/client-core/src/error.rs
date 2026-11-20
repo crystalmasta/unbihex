@@ -27,6 +27,9 @@ pub enum ClientError {
     /// The state file is damaged.
     #[error("данные: {0}")]
     Json(#[from] serde_json::Error),
+    /// Another process owns this profile and its network journals.
+    #[error("Unbihex уже запущен для этой папки данных")]
+    AlreadyRunning,
     /// Already connected / not connected.
     #[error("{0}")]
     State(String),

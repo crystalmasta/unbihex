@@ -1506,6 +1506,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5676,6 +5686,7 @@ name = "unbihex-client"
 version = "0.2.11"
 dependencies = [
  "jni 0.21.1",
+ "once_cell",
  "parking_lot",
  "serde",
  "serde_json",
@@ -5695,6 +5706,7 @@ name = "unbihex-client-core"
 version = "0.2.11"
 dependencies = [
  "base64 0.22.1",
+ "fs2",
  "ipnet",
  "libc",
  "netdev",

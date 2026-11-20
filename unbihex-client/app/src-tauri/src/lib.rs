@@ -740,6 +740,7 @@ fn clear_logs(state: State<'_, AppState>) {
 async fn relaunch_admin(app: AppHandle, state: State<'_, AppState>, autostart: Option<bool>) -> Result<(), String> {
     #[cfg(desktop)]
     {
+        let _op = state.op.lock().await;
         do_disconnect(&app, &state.client).await;
         #[cfg(windows)]
         let r = if autostart == Some(true) {
@@ -1043,6 +1044,23 @@ fn vpn_connected(app: &AppHandle) -> bool {
         .is_some_and(|state| tauri::async_runtime::block_on(state.client.controller.is_connected()))
 }
 
+#[cfg(windows)]
+fn open_desktop_client(dir: std::path::PathBuf) -> Result<Client, ClientError> {
+    // ShellExecute returns before the copy that requested elevation has exited.
+    let restarting = std::env::args_os().any(|arg| arg == "--elevated");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match Client::open(&dir) {
+            Err(ClientError::AlreadyRunning)
+                if restarting && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// App entry point (desktop `main` and the mobile entry).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1057,11 +1075,13 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir().join("unbihex"));
             #[cfg(target_os = "android")]
-            let owner = android_vpn::owner(&dir);
+            let owner = android_vpn::owner(&dir)?;
             #[cfg(target_os = "android")]
             let client = owner.client.clone();
-            #[cfg(not(target_os = "android"))]
-            let client = Arc::new(Client::open(dir));
+            #[cfg(windows)]
+            let client = Arc::new(open_desktop_client(dir)?);
+            #[cfg(not(any(target_os = "android", windows)))]
+            let client = Arc::new(Client::open(dir)?);
             #[cfg(target_os = "android")]
             android_vpn::attach(owner, app.handle().clone());
             logs::set_level(&level, &client.settings().log_level);

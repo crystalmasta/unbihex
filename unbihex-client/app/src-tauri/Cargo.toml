@@ -41,3 +41,4 @@ tauri = { version = "2", features = ["tray-icon"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "=0.21.1"
+once_cell = "1"
