@@ -282,6 +282,10 @@ build → Run workflow) и на тегах `v*`; результат — арте
 
 ## Сборка на Windows
 
+Rustup выбирает Rust 1.99.1 из [rust-toolchain.toml](../rust-toolchain.toml). Эта версия использует
+раскладку каталогов Cargo, с которой текущий `tauri-build` копирует WebView2Loader для целей
+`windows-gnu` и `windows-gnullvm`. Для старых тегов задавайте версию явно через `cargo +1.99.1`.
+
 1. Установите Rust (https://rustup.rs) с тулчейном MSVC и «Build Tools for Visual Studio» (C++).
    WebView2 уже есть в Windows 10/11.
 2. Быстрый запуск без установщика:
