@@ -30,9 +30,7 @@ jobs:
         with:
           node-version: '26'
       - name: Install Rust
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal
-          rustup override set 1.99.1
+        run: rustup show active-toolchain
       - name: Install Tauri dependencies on Linux
         if: runner.os == 'Linux'
         run: |
@@ -49,3 +47,38 @@ jobs:
       - name: Test the UI
         working-directory: unbihex-client
         run: node --test
+
+  windows-gnullvm:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust target
+        run: rustup target add x86_64-pc-windows-gnullvm
+      - name: Install LLVM-MinGW
+        run: |
+          $llvmPackage = 'llvm-mingw-20261117-ucrt-x86_64'
+          $archive = Join-Path $env:RUNNER_TEMP "$llvmPackage.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/20261117/$llvmPackage.zip"
+          curl.exe -fLsS --retry 2 --max-time 180 -o $archive $url
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($sha256 -ne '4d002e330a0f703625aa5ccbc37e96f8f824413e163bfc7336774aabd2c3a412') {
+              throw 'LLVM-MinGW SHA-256 mismatch'
+          }
+          tar -xf $archive -C $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "$llvmPackage/bin")
+      - name: Build Windows GNU release
+        run: cargo build --locked --release --manifest-path unbihex-client/Cargo.toml --target x86_64-pc-windows-gnullvm -p unbihex-client
+      - name: Check release resources
+        run: |
+          $release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-gnullvm/release'
+          foreach ($name in 'unbihex-client.exe', 'wintun.dll', 'WebView2Loader.dll') {
+              $artifact = Get-Item -LiteralPath (Join-Path $release $name)
+              if ($artifact.Length -eq 0) { throw "Empty release artifact $name" }
+          }

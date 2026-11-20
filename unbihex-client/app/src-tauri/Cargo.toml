@@ -3,7 +3,7 @@ name = "unbihex-client"
 description = "Unbihex VPN client (desktop, Android, iOS)"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.90"
 license.workspace = true
 authors.workspace = true
 homepage.workspace = true
@@ -21,7 +21,7 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.6", features = [] }
 
 [dependencies]
 unbihex-client-core.workspace = true

@@ -1,5 +1,4 @@
 [toolchain]
-# Matches release CI. tauri-build 2.6 assumes Cargo's pre-1.100 layout for Windows GNU resources.
-channel = "1.99.1"
+channel = "1.100.0"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
