@@ -21,6 +21,7 @@ percent-encoding = "2"
 url = "2"
 ipnet = "2"
 parking_lot = "0.12"
+tempfile = "3"
 # HTTPS for subscriptions: rustls with ring (no cmake/nasm needed on Windows).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "gzip", "brotli"] }
 
