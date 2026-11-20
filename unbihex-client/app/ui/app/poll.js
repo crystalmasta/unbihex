@@ -1,19 +1,21 @@
 // Once a second: the connection status (traffic, timer) and the open log.
-import { getStatus } from "../shared/api/index.js";
-import { refresh, render, store } from "../shared/model/index.js";
+import { refresh, refreshStatus, store } from "../shared/model/index.js";
 import { loadLogs } from "../pages/logs/index.js";
 import { getCurrentView } from "./router.js";
 
+let polling = false;
+
 async function tick() {
-  if (!store.S || store.busy || document.hidden) return;
+  if (polling || store.busy || document.hidden) return;
+  polling = true;
   try {
-    const st = await getStatus();
-    const changed = st.connected !== store.S.status.connected;
-    store.S.status = st;
-    if (changed) await refresh();
-    else render("home");
-  } catch {}
-  if (getCurrentView() === "logs") loadLogs();
+    if (!store.S || await refreshStatus()) await refresh();
+    if (getCurrentView() === "logs") await loadLogs();
+  } catch {
+    // A transient backend failure is retried on the next tick.
+  } finally {
+    polling = false;
+  }
 }
 
 export function startPolling() {

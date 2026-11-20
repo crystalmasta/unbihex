@@ -7,7 +7,7 @@ import { applyPingResult } from "../features/ping/index.js";
 
 export function listenBackend() {
   onBackendEvent("state-changed", () => {
-    if (!store.busy) refresh();
+    if (!store.busy) refresh().catch(() => {});
   });
   onBackendEvent("ping-result", (e) => applyPingResult(e.payload));
   onBackendEvent("toast", (e) => toast(String(e.payload), "error"));
