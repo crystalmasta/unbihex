@@ -113,6 +113,48 @@ async fn http_connect_and_plain_request() {
 }
 
 #[tokio::test]
+async fn shutdown_closes_established_local_proxy_tunnels() {
+    let echo = tcp_echo().await;
+    for kind in ["http", "mixed", "socks"] {
+        let port = free_port();
+        let engine = start(format!(
+            r#"{{"inbounds":[{{"type":"{kind}","tag":"proxy","listen":"127.0.0.1:{port}"}}],
+                 "outbounds":[{{"type":"direct","tag":"direct"}}]}}"#
+        ))
+        .await;
+        let mut stream = if kind == "socks" {
+            socks_connect(proxy_addr(port), &echo.to_string()).await
+        } else {
+            let mut stream = TcpStream::connect(proxy_addr(port)).await.unwrap();
+            stream
+                .write_all(format!("CONNECT {echo} HTTP/1.1\r\nHost: {echo}\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut head = [0u8; 39];
+            stream.read_exact(&mut head).await.unwrap();
+            assert_eq!(&head, b"HTTP/1.1 200 Connection Established\r\n\r\n");
+            stream
+        };
+        assert_eq!(echo_roundtrip(&mut stream, b"before shutdown").await, b"before shutdown");
+
+        engine.shutdown().await;
+        assert!(TcpStream::connect(proxy_addr(port)).await.is_err(), "{kind}");
+        let mut byte = [0];
+        let result = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .unwrap_or_else(|_| panic!("{kind} tunnel remained open"));
+        assert!(
+            matches!(result, Ok(0))
+                || result.is_err_and(|error| matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                )),
+            "{kind} tunnel still delivered data"
+        );
+    }
+}
+
+#[tokio::test]
 async fn socks_to_vless_plain_tcp_and_udp() {
     let echo = tcp_echo().await;
     let vless = vless_server().await;
