@@ -227,7 +227,7 @@ impl Client {
 
     /// Downloads a subscription again; returns the number of servers.
     pub async fn update_subscription(&self, id: Uuid) -> Result<usize> {
-        let (url, opts, as_json) = {
+        let (url, user_agent, opts, as_json) = {
             let d = self.data.read();
             let sub = d
                 .subscriptions
@@ -248,7 +248,12 @@ impl Client {
                 name: d.settings.device_name.clone(),
             });
             let retry_as_json = own.is_none() && !as_json;
-            (sub.url.clone(), FetchOptions { user_agent: ua, device, retry_as_json }, as_json)
+            (
+                sub.url.clone(),
+                sub.user_agent.clone(),
+                FetchOptions { user_agent: ua, device, retry_as_json },
+                as_json,
+            )
         };
         // Mobile whitelists may let through only the VPN server: then the panel is
         // asked again through it.
@@ -264,36 +269,35 @@ impl Client {
                 }
                 let n = servers.len();
                 self.mutate(|d| {
-                    d.replace_servers(id, servers);
-                    if let Some(sub) = d.subscription_mut(id) {
-                        if let Some(t) = f.title.filter(|_| !sub.custom_name) {
-                            sub.name = t;
-                        }
-                        sub.info = f.info;
-                        if let Some(h) = f.update_interval_hours {
-                            sub.update_interval_hours = h;
-                        }
-                        sub.support_url = f.support_url;
-                        sub.web_page_url = f.web_page_url;
-                        sub.updated_at = Some(now_secs());
-                        sub.last_error = None;
-                        // Remembered when the retry got JSON; forgotten when the
-                        // panel stops giving it.
-                        if f.json || as_json {
-                            sub.json_user_agent = f.json && sub.user_agent.is_none();
-                        }
+                    let sub = subscription_for_update(d, id, &url, user_agent.as_deref())?;
+                    if let Some(t) = f.title.filter(|_| !sub.custom_name) {
+                        sub.name = t;
                     }
+                    sub.info = f.info;
+                    if let Some(h) = f.update_interval_hours {
+                        sub.update_interval_hours = h;
+                    }
+                    sub.support_url = f.support_url;
+                    sub.web_page_url = f.web_page_url;
+                    sub.updated_at = Some(now_secs());
+                    sub.last_error = None;
+                    // Remembered when the retry got JSON; forgotten when the
+                    // panel stops giving it.
+                    if f.json || as_json {
+                        sub.json_user_agent = f.json && sub.user_agent.is_none();
+                    }
+                    d.replace_servers(id, servers);
                     d.ensure_selection();
-                })?;
-                Ok(n)
+                    Ok(n)
+                })?
             }
             Err(e) => {
                 let msg = e.to_string();
                 self.mutate(|d| {
-                    if let Some(sub) = d.subscription_mut(id) {
-                        sub.last_error = Some(msg);
-                    }
-                })?;
+                    let sub = subscription_for_update(d, id, &url, user_agent.as_deref())?;
+                    sub.last_error = Some(msg);
+                    Ok::<_, ClientError>(())
+                })??;
                 Err(e)
             }
         }
@@ -749,6 +753,17 @@ pub fn short_label(name: &str) -> String {
 pub const FINGERPRINTS: &[&str] =
     &["chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"];
 
+fn subscription_for_update<'a>(
+    data: &'a mut AppData,
+    id: Uuid,
+    url: &str,
+    user_agent: Option<&str>,
+) -> Result<&'a mut Subscription> {
+    data.subscription_mut(id)
+        .filter(|sub| sub.url == url && sub.user_agent.as_deref() == user_agent)
+        .ok_or_else(|| ClientError::State("обновление отменено: подписка удалена или изменена".into()))
+}
+
 fn check_fingerprint(fp: &str) -> Result<()> {
     if FINGERPRINTS.contains(&fp) {
         Ok(())
@@ -913,6 +928,69 @@ mod tests {
         assert_eq!(d.server(id).unwrap().ping_ms, Some(50));
         d.replace_servers(sub, vec![]);
         assert_eq!(d.selected, None);
+    }
+
+    #[tokio::test]
+    async fn a_delayed_subscription_response_cannot_undo_removal_or_edit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        for remove in [true, false] {
+            let dir = tmp();
+            let client = Client::open(&dir).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let sub = Subscription {
+                url: format!("http://{}/subscription", listener.local_addr().unwrap()),
+                ..Default::default()
+            };
+            let id = sub.id;
+            client.mutate(|data| data.subscriptions.push(sub)).unwrap();
+
+            let (request_received, request_started) = oneshot::channel();
+            let (edit_finished, release_response) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    header.push(socket.read_u8().await.unwrap());
+                }
+                request_received.send(()).unwrap();
+                release_response.await.unwrap();
+                let body = "socks://127.0.0.1:10808#late";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let edit = async {
+                request_started.await.unwrap();
+                if remove {
+                    client.remove_subscription(id).unwrap();
+                } else {
+                    client.edit_subscription(id, None, None, Some("new agent".into())).unwrap();
+                }
+                edit_finished.send(()).unwrap();
+            };
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(client.update_subscription(id), edit)
+            })
+            .await
+            .unwrap();
+            server.await.unwrap();
+
+            assert!(matches!(result, Err(ClientError::State(_))));
+            let state = client.snapshot();
+            assert!(state.servers.is_empty());
+            assert_eq!(state.subscriptions.len(), usize::from(!remove));
+            if let Some(sub) = state.subscriptions.first() {
+                assert_eq!(sub.user_agent.as_deref(), Some("new agent"));
+                assert!(sub.updated_at.is_none() && sub.last_error.is_none());
+            }
+            drop(client);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     // By dubr1k (github.com/dubr1k), PR #33.
