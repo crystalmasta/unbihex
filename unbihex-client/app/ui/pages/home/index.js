@@ -6,6 +6,7 @@ import { selectedServer } from "../../entities/server/index.js";
 import { MODE_HINTS, ROUTING_HINTS } from "../../entities/settings/index.js";
 import { quotaHtml } from "../../entities/subscription/index.js";
 import { activeTemplate, templates } from "../../entities/template/index.js";
+import { initAppUpdate } from "../../features/app-update/index.js";
 import { toggleConnect } from "../../features/connect/index.js";
 import { relaunchAdmin } from "../../features/elevate/index.js";
 import { updateSettings } from "../../features/quick-settings/index.js";
@@ -103,6 +104,7 @@ function renderHomeTemplate(set) {
 }
 
 export function initHome() {
+  initAppUpdate();
   $("#power").addEventListener("click", toggleConnect);
   $$("#mode-seg button").forEach((b) =>
     b.addEventListener("click", () => {

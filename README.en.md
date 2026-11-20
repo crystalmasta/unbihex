@@ -25,6 +25,11 @@ There are no ready files for macOS (Apple Silicon): an unofficial build script i
 Windows SmartScreen may warn about an unknown publisher: "More info" → "Run anyway".
 File checksums are in `SHA256SUMS.txt` of the same release.
 
+The home screen shows newer stable versions when a GitHub release includes build artifacts. On Windows x64,
+the update button downloads the setup program or portable archive for the current installation, checks its SHA‑256
+against GitHub's release metadata, closes the client, installs the build, and launches it again. The installer may
+request administrator privileges. For installations that require a manual update, the button opens the release page.
+
 ## Source code
 
 | Folder | What it is |

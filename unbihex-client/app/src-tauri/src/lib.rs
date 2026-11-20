@@ -3,6 +3,7 @@
 #[cfg(target_os = "android")]
 mod android_vpn;
 mod logs;
+mod updater;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +27,8 @@ struct AppState {
     /// A message for the UI to show once, such as a failed auto-connect at
     /// login: the window may not have existed when it happened.
     notice: parking_lot::Mutex<Option<String>>,
+    #[cfg(windows)]
+    upgrade: tokio::sync::Mutex<()>,
 }
 
 // By akurach (github.com/akurach), PR #51.
@@ -381,6 +384,40 @@ async fn sync_mobile_state(app: &AppHandle, state: &AppState) {
 }
 
 // ---------------------------------------------------------------- data
+
+#[tauri::command]
+async fn check_release_update() -> Result<Option<updater::ReleaseView>, String> {
+    Ok(updater::latest(updater::package_kind()).await?.map(|update| update.view))
+}
+
+#[tauri::command]
+async fn install_release_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    version: String,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _upgrade = state.upgrade.try_lock().map_err(|_| "обновление уже скачивается")?;
+        let kind = updater::package_kind().ok_or("скачайте сборку со страницы релиза")?;
+        let update = updater::latest(Some(kind)).await?
+            .filter(|update| update.view.version == version)
+            .ok_or("релиз изменился, повторите проверку обновлений")?;
+        let artifact = update.artifact.ok_or("на GitHub нет проверяемой сборки для этой установки")?;
+        let profile = state.client.dir();
+        let prepared = updater::prepare(artifact, profile).await?;
+        let _op = state.op.lock().await;
+        prepared.launch(profile)?;
+        do_disconnect(&app, &state.client).await;
+        app.exit(0);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, state, version);
+        Err("скачайте сборку со страницы релиза".into())
+    }
+}
 
 #[tauri::command]
 async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
@@ -1093,7 +1130,7 @@ pub fn run() {
                 platform_name()
             );
             #[cfg(windows)]
-            let notice = apply_saved_autostart(&client);
+            let notice = apply_saved_autostart(&client).or_else(|| updater::take_install_error(client.dir()));
             #[cfg(not(windows))]
             let notice = None;
             app.manage(AppState {
@@ -1105,6 +1142,8 @@ pub fn run() {
                 #[cfg(not(target_os = "android"))]
                 op: Arc::new(tokio::sync::Mutex::new(())),
                 notice: parking_lot::Mutex::new(notice),
+                #[cfg(windows)]
+                upgrade: tokio::sync::Mutex::new(()),
             });
             #[cfg(desktop)]
             if let Err(e) = setup_tray(app) {
@@ -1122,6 +1161,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            check_release_update,
+            install_release_update,
             get_state,
             add_input,
             update_subscription,

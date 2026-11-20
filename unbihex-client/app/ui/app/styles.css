@@ -148,6 +148,7 @@ textarea { resize: vertical; font-family: ui-monospace, "Cascadia Mono", Consola
 .stat-t { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .panel { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; }
+.app-update { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .panel-title { font-weight: 600; margin-bottom: 10px; }
 label.panel-title { display: block; color: var(--text); font-size: inherit; }
 #template-panel select { text-overflow: ellipsis; }

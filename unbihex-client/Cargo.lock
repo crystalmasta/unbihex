@@ -5685,20 +5685,27 @@ dependencies = [
 name = "unbihex-client"
 version = "0.2.11"
 dependencies = [
+ "base64 0.22.1",
+ "hex",
  "jni 0.21.1",
  "once_cell",
  "parking_lot",
+ "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
  "tauri-plugin-unbihex-vpn",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "unbihex-client-core",
  "uuid",
+ "winreg 0.55.0",
 ]
 
 [[package]]

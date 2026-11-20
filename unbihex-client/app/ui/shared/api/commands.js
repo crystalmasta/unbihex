@@ -6,6 +6,8 @@ export const getState = () => invoke("get_state");
 export const getStatus = () => invoke("status");
 export const connect = () => invoke("connect");
 export const disconnect = () => invoke("disconnect");
+export const checkReleaseUpdate = () => invoke("check_release_update");
+export const installReleaseUpdate = (version) => invoke("install_release_update", { version });
 
 // Settings
 export const saveSettings = (settings) => invoke("save_settings", { settings });

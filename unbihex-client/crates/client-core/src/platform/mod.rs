@@ -276,6 +276,7 @@ const SYSTEM_PROGRAMS: &[&str] = &[
     "networksetup",
     "id",
     "schtasks",
+    "powershell",
 ];
 
 /// Absolute path of an allowed system tool. Never searched in `PATH` or next to
@@ -314,7 +315,11 @@ fn find_system_program(name: &str) -> Result<PathBuf> {
         buf.resize(n, 0);
     }
     let mut path = PathBuf::from(std::ffi::OsString::from_wide(&buf));
-    path.push(format!("{name}.exe"));
+    if name == "powershell" {
+        path.extend(["WindowsPowerShell", "v1.0", "powershell.exe"]);
+    } else {
+        path.push(format!("{name}.exe"));
+    }
     Ok(path)
 }
 
