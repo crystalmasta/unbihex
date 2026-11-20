@@ -77,7 +77,7 @@ export function renderHome() {
   // Quota of the subscription the selected server belongs to.
   const sub = sel && S.data.subscriptions.find((x) => x.id === sel.subscription_id);
   const qp = $("#quota-panel");
-  if (sub && (sub.info || sub.updated_at)) {
+  if (sub) {
     qp.hidden = false;
     qp.innerHTML = `<div class="panel-title">${esc(sub.name)}</div>${quotaHtml(sub)}`;
   } else {

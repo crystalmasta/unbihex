@@ -165,6 +165,8 @@ label.panel-title { display: block; color: var(--text); font-size: inherit; }
 .bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 99px; }
 .bar.high > i { background: var(--bad); }
 .quota-row { display: flex; justify-content: space-between; color: var(--muted); font-size: 13px; gap: 8px; flex-wrap: wrap; }
+.quota-status { color: var(--text); font-weight: 600; }
+.quota-status.expired { color: var(--bad); }
 
 /* Servers */
 .group { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 14px; overflow: hidden; }
