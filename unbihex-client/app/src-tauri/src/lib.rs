@@ -597,8 +597,9 @@ async fn save_settings(
         let (now, want) = (autostart(), Autostart::new(settings.auto_start, settings.auto_start_admin));
         (now != want).then_some((now, want))
     };
-    logs::set_level(&state.level, &settings.log_level);
+    let log_level = settings.log_level.clone();
     state.client.set_settings(settings).map_err(err)?;
+    logs::set_level(&state.level, &log_level);
     #[cfg(windows)]
     if let Some((now, want)) = autostart {
         use unbihex_client_core::platform;

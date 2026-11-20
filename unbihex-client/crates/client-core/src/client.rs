@@ -377,6 +377,8 @@ impl Client {
 
     /// Replaces the settings (keeps the device id and the LAN password).
     pub fn set_settings(&self, mut s: Settings) -> Result<()> {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::plan::validate_proxy_ports(&s)?;
         // The LAN proxy is open to the whole network: no guessable passwords.
         let pass = s.lan_password.trim();
         if !pass.is_empty() && pass.chars().count() < MIN_LAN_PASSWORD {
@@ -1121,6 +1123,33 @@ mod tests {
         let plain = state("subscription").replace(r#""auto_marked":true"#, r#""auto_marked":false"#);
         std::fs::write(dir.join(STATE_FILE), plain).unwrap();
         assert!(Client::open(&dir).unwrap().snapshot().auto_templates.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn duplicate_or_zero_proxy_ports_do_not_replace_saved_settings() {
+        let dir = tmp();
+        let client = Client::open(&dir).unwrap();
+        let original = client.settings();
+        client.set_settings(original.clone()).unwrap();
+        let saved = std::fs::read(dir.join(STATE_FILE)).unwrap();
+        for port in [0, original.http_port] {
+            let invalid = Settings { socks_port: port, ..original.clone() };
+            let message = client.set_settings(invalid.clone()).unwrap_err().to_string();
+            assert!(message.contains("порты локального прокси"));
+            assert_eq!(client.settings().socks_port, original.socks_port);
+            assert_eq!(std::fs::read(dir.join(STATE_FILE)).unwrap(), saved);
+            // Applies to existing profiles written by an older version as well.
+            let result = crate::plan::build_config_json(
+                &[],
+                &invalid,
+                &client.geo(),
+                crate::plan::Target::DesktopProxy,
+            );
+            assert_eq!(result.unwrap_err().to_string(), message);
+        }
+        drop(client);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
