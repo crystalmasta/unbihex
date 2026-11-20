@@ -1,9 +1,27 @@
 import { fmtAgo, fmtBytes, fmtDate } from "../../shared/lib/index.js";
 
+function expiryHtml(expire, now) {
+  if (expire === 0) {
+    return '<div class="quota-row"><strong class="quota-status">Бессрочная подписка</strong></div>';
+  }
+  const date = new Date(expire * 1000);
+  if (!expire || expire < 0 || !Number.isFinite(date.getTime())) {
+    return '<div class="quota-row"><span>Дата окончания не указана</span></div>';
+  }
+  const expired = date <= now;
+  const today = date.toDateString() === new Date(now).toDateString();
+  const status = expired ? "Срок истёк" : today ? "Истекает сегодня" : "Активна";
+  const dateLabel = expired ? "Дата окончания" : "Действует до";
+  return `<div class="quota-row">
+    <strong class="quota-status${expired ? " expired" : ""}">${status}</strong>
+    <span>${dateLabel} <time datetime="${date.toISOString()}">${fmtDate(expire)}</time></span>
+  </div>`;
+}
+
 // Traffic, expiry and the last update of a subscription.
-export function quotaHtml(sub) {
+export function quotaHtml(sub, now = Date.now()) {
   const i = sub.info;
-  let html = '<div class="quota">';
+  let html = `<div class="quota">${expiryHtml(i?.expire, now)}`;
   if (i) {
     const used = i.upload + i.download;
     if (i.total > 0) {
@@ -12,11 +30,6 @@ export function quotaHtml(sub) {
       html += `<div class="quota-row"><span>Израсходовано ${fmtBytes(used)} из ${fmtBytes(i.total)}</span><span>${pct.toFixed(0)}%</span></div>`;
     } else {
       html += `<div class="quota-row"><span>Израсходовано ${fmtBytes(used)} · без ограничения трафика</span></div>`;
-    }
-    if (i.expire) {
-      const days = Math.ceil((i.expire - Date.now() / 1000) / 86400);
-      const left = days < 0 ? "истекла" : days === 0 ? "истекает сегодня" : `осталось ${days} дн.`;
-      html += `<div class="quota-row"><span>Действует до ${fmtDate(i.expire)}</span><span>${left}</span></div>`;
     }
   }
   if (sub.updated_at) html += `<div class="quota-row"><span>Обновлено ${fmtAgo(sub.updated_at)}</span></div>`;

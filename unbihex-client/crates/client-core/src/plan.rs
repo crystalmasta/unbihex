@@ -335,6 +335,18 @@ pub fn tun_mtu(settings: &Settings, target: Target) -> u16 {
     settings.mtu.clamp(1280, max)
 }
 
+pub(crate) fn validate_proxy_ports(settings: &Settings) -> Result<()> {
+    if settings.socks_port == 0 || settings.http_port == 0 {
+        return Err(ClientError::Input("порты локального прокси должны быть от 1 до 65535".into()));
+    }
+    if settings.socks_port == settings.http_port {
+        return Err(ClientError::Input(
+            "порты локального прокси SOCKS5/HTTP и HTTP должны отличаться".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The engine config as JSON text, validated by the engine. `servers`: the
 /// selected server first, then the rest of its auto-select group.
 pub fn build_config_json(
@@ -362,6 +374,7 @@ pub fn build_config_json(
         inbounds.push(tun);
     }
     if target != Target::Mobile {
+        validate_proxy_ports(settings)?;
         // The SOCKS port also serves HTTP clients (HTTP_PROXY=http://127.0.0.1:<socks_port>).
         let ports = [("mixed", "socks-in", settings.socks_port), ("http", "http-in", settings.http_port)];
         for (kind, tag, port) in ports {

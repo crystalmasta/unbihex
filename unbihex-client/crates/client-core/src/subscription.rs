@@ -643,16 +643,16 @@ pub fn parse_userinfo(h: &str) -> Option<SubscriptionInfo> {
         let n = v
             .parse::<u64>()
             .ok()
-            .or_else(|| v.parse::<f64>().ok().map(|f| f.max(0.0) as u64));
+            .or_else(|| v.parse::<f64>().ok().filter(|f| f.is_finite() && *f >= 0.0).map(|f| f as u64));
         let Some(n) = n else { continue };
-        any = true;
         match k.trim().to_ascii_lowercase().as_str() {
             "upload" => info.upload = n,
             "download" => info.download = n,
             "total" => info.total = n,
-            "expire" => info.expire = (n > 0).then_some(n),
-            _ => {}
+            "expire" => info.expire = Some(n),
+            _ => continue,
         }
+        any = true;
     }
     any.then_some(info)
 }
@@ -719,7 +719,10 @@ mod tests {
         assert_eq!(i.total, 10737418240);
         assert_eq!(i.expire, Some(1767225600));
         let i = parse_userinfo("upload=0;download=5.0;total=0;expire=0").unwrap();
-        assert_eq!((i.download, i.expire), (5, None));
+        assert_eq!((i.download, i.expire), (5, Some(0)));
+        assert_eq!(parse_userinfo("upload=1").unwrap().expire, None);
+        assert_eq!(parse_userinfo("upload=1;expire=NaN").unwrap().expire, None);
+        assert_eq!(parse_userinfo("expire=-1"), None);
         assert!(parse_userinfo("garbage").is_none());
         assert_eq!(decode_title("base64:0JzQvtC5IFZQTg=="), "Мой VPN");
         assert_eq!(decode_title("Plain"), "Plain");

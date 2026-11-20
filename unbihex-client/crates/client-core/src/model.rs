@@ -20,7 +20,7 @@ pub struct SubscriptionInfo {
     pub download: u64,
     /// Quota in bytes; 0 means unlimited.
     pub total: u64,
-    /// Expiry as Unix seconds; `None` or 0 means never.
+    /// Expiry as Unix seconds. Zero means unlimited, and `None` means unreported.
     pub expire: Option<u64>,
 }
 

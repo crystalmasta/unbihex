@@ -1,1 +1,1 @@
-export { store, onRender, render, refresh } from "./store.js";
+export { store, onRender, render, refresh, refreshStatus } from "./store.js";

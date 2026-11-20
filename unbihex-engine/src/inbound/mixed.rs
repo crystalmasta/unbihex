@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::{http, socks};
@@ -35,10 +36,13 @@ pub async fn serve(
     cancel: CancellationToken,
 ) {
     let cfg = Arc::new(cfg);
+    let mut connections = JoinSet::new();
     tracing::info!("mixed inbound {} listening on {}", cfg.tag, cfg.listen);
     loop {
         let (stream, peer) = tokio::select! {
-            _ = cancel.cancelled() => return,
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = connections.join_next(), if !connections.is_empty() => continue,
             r = listener.accept() => match r {
                 Ok(x) => x,
                 Err(e) => {
@@ -53,7 +57,7 @@ pub async fn serve(
             continue;
         };
         let (cfg, d) = (cfg.clone(), dispatcher.clone());
-        tokio::spawn(async move {
+        connections.spawn(async move {
             // By Pavel Shakhmin (github.com/pshakhmin), PR #18.
             crate::net::socket::tune_tcp(&stream);
             let r = tokio::time::timeout(handshake_timeout, handshake(stream, peer, &cfg)).await;
@@ -66,6 +70,8 @@ pub async fn serve(
             }
         });
     }
+    drop(listener);
+    connections.shutdown().await;
 }
 
 /// SOCKS5 starts with its version byte 0x05; anything else is treated as HTTP.

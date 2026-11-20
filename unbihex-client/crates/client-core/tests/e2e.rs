@@ -66,7 +66,7 @@ async fn connect_through_socks_upstream() {
     let web = origin().await;
 
     let dir = std::env::temp_dir().join(format!("unbihex-e2e-{}", uuid::Uuid::new_v4()));
-    let client = Client::open(&dir);
+    let client = Client::open(&dir).unwrap();
     let report = client
         .add_input(&format!("socks://127.0.0.1:{upstream_port}#Local upstream"))
         .await

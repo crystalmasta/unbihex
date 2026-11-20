@@ -78,7 +78,9 @@ export function syncSavedTemplate() {
 
 // A save the backend refused: the tab with the field it is about.
 export function showSettingsError(msg) {
-  const field = /DNS/.test(msg) ? "dns_upstream" : /пароль/.test(msg) ? "lan_password" : /отпечаток TLS/.test(msg) ? "tls_fingerprint" : null;
+  const field = /порты локального прокси/.test(msg) ? "socks_port"
+    : /DNS/.test(msg) ? "dns_upstream" : /пароль/.test(msg) ? "lan_password"
+    : /отпечаток TLS/.test(msg) ? "tls_fingerprint" : null;
   const section = field && $("#settings-form")[field].closest("[data-tab]");
   if (section) showSettingsTab(section.dataset.tab);
 }

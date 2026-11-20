@@ -11,11 +11,12 @@
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use jni::JNIEnv;
 use jni::objects::{JIntArray, JObject, JString, JValue};
 use jni::sys::{jlong, jstring};
+use once_cell::sync::OnceCell;
 use tauri::Manager;
 use unbihex_client_core::Client;
 
@@ -29,7 +30,7 @@ pub struct Owner {
     app: parking_lot::Mutex<Option<tauri::AppHandle>>,
 }
 
-static OWNER: OnceLock<Owner> = OnceLock::new();
+static OWNER: OnceCell<Owner> = OnceCell::new();
 
 /// The data directory as compared between the app and the tile.
 fn canonical(dir: &Path) -> PathBuf {
@@ -41,15 +42,17 @@ fn canonical(dir: &Path) -> PathBuf {
 
 /// The owner, created on first use for `dir`. A later caller with another
 /// directory gets the existing owner (logged): the app must start either way.
-pub fn owner(dir: &Path) -> &'static Owner {
+pub fn owner(dir: &Path) -> unbihex_client_core::Result<&'static Owner> {
     let dir = canonical(dir);
-    let owner = OWNER.get_or_init(|| Owner {
-        client: Arc::new(Client::open(&dir)),
-        op: Arc::new(tokio::sync::Mutex::new(())),
-        dir: dir.clone(),
-        active: parking_lot::Mutex::new(None),
-        app: parking_lot::Mutex::new(None),
-    });
+    let owner = OWNER.get_or_try_init(|| -> unbihex_client_core::Result<_> {
+        Ok(Owner {
+            client: Arc::new(Client::open(&dir)?),
+            op: Arc::new(tokio::sync::Mutex::new(())),
+            dir: dir.clone(),
+            active: parking_lot::Mutex::new(None),
+            app: parking_lot::Mutex::new(None),
+        })
+    })?;
     if owner.dir != dir {
         tracing::warn!(
             "android: data directory {} differs from {}",
@@ -57,7 +60,7 @@ pub fn owner(dir: &Path) -> &'static Owner {
             owner.dir.display()
         );
     }
-    owner
+    Ok(owner)
 }
 
 /// Lets tile starts and external stops refresh the app's window.
@@ -143,7 +146,7 @@ fn start(
     let dir: String = env.get_string(&dir).map_err(|e| e.to_string())?.into();
     let dns: String = env.get_string(&dns).map_err(|e| e.to_string())?.into();
     let dns: Vec<std::net::SocketAddr> = serde_json::from_str(&dns).map_err(|e| e.to_string())?;
-    let owner = owner(Path::new(&dir));
+    let owner = owner(Path::new(&dir)).map_err(|e| e.to_string())?;
     // Only the tile start is refused: its settings would come from another place.
     if owner.dir != canonical(Path::new(&dir)) {
         return Err("папка данных плитки не совпадает с папкой приложения".into());
@@ -282,7 +285,7 @@ pub extern "system" fn Java_com_unbihex_vpn_NativeVpn_label(
 ) -> jstring {
     let label = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let dir: String = env.get_string(&dir).ok()?.into();
-        let owner = owner(Path::new(&dir));
+        let owner = owner(Path::new(&dir)).ok()?;
         Some(tauri::async_runtime::block_on(owner.client.tile_label()))
     }))
     .ok()

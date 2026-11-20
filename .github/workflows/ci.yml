@@ -1,0 +1,84 @@
+name: Pull request checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - name: Install Rust
+        run: rustup show active-toolchain
+      - name: Install Tauri dependencies on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+      - name: Test engine
+        run: cargo test --locked --all-features --manifest-path unbihex-engine/Cargo.toml
+      - name: Test client workspace
+        run: cargo test --locked --workspace --all-features --manifest-path unbihex-client/Cargo.toml
+      - name: Test server
+        run: cargo test --locked --manifest-path test_server/Cargo.toml
+      - name: Check UI imports
+        run: node unbihex-client/app/ui/tools/check-imports.mjs
+      - name: Test the UI
+        working-directory: unbihex-client
+        run: node --test
+
+  windows-gnullvm:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust target
+        run: rustup target add x86_64-pc-windows-gnullvm
+      - name: Install LLVM-MinGW
+        run: |
+          $llvmPackage = 'llvm-mingw-20261117-ucrt-x86_64'
+          $archive = Join-Path $env:RUNNER_TEMP "$llvmPackage.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/20261117/$llvmPackage.zip"
+          curl.exe -fLsS --retry 2 --max-time 180 -o $archive $url
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($sha256 -ne '4d002e330a0f703625aa5ccbc37e96f8f824413e163bfc7336774aabd2c3a412') {
+              throw 'LLVM-MinGW SHA-256 mismatch'
+          }
+          tar -xf $archive -C $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "$llvmPackage/bin")
+      - name: Build Windows GNU release
+        run: cargo build --locked --release --manifest-path unbihex-client/Cargo.toml --target x86_64-pc-windows-gnullvm -p unbihex-client
+      - name: Check release resources
+        run: |
+          $release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-gnullvm/release'
+          foreach ($name in 'unbihex-client.exe', 'wintun.dll', 'WebView2Loader.dll') {
+              $artifact = Get-Item -LiteralPath (Join-Path $release $name)
+              if ($artifact.Length -eq 0) { throw "Empty release artifact $name" }
+          }

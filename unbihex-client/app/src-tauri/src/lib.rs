@@ -3,6 +3,7 @@
 #[cfg(target_os = "android")]
 mod android_vpn;
 mod logs;
+mod updater;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +27,8 @@ struct AppState {
     /// A message for the UI to show once, such as a failed auto-connect at
     /// login: the window may not have existed when it happened.
     notice: parking_lot::Mutex<Option<String>>,
+    #[cfg(windows)]
+    upgrade: tokio::sync::Mutex<()>,
 }
 
 // By akurach (github.com/akurach), PR #51.
@@ -383,6 +386,40 @@ async fn sync_mobile_state(app: &AppHandle, state: &AppState) {
 // ---------------------------------------------------------------- data
 
 #[tauri::command]
+async fn check_release_update() -> Result<Option<updater::ReleaseView>, String> {
+    Ok(updater::latest(updater::package_kind()).await?.map(|update| update.view))
+}
+
+#[tauri::command]
+async fn install_release_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    version: String,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _upgrade = state.upgrade.try_lock().map_err(|_| "обновление уже скачивается")?;
+        let kind = updater::package_kind().ok_or("скачайте сборку со страницы релиза")?;
+        let update = updater::latest(Some(kind)).await?
+            .filter(|update| update.view.version == version)
+            .ok_or("релиз изменился, повторите проверку обновлений")?;
+        let artifact = update.artifact.ok_or("на GitHub нет проверяемой сборки для этой установки")?;
+        let profile = state.client.dir();
+        let prepared = updater::prepare(artifact, profile).await?;
+        let _op = state.op.lock().await;
+        prepared.launch(profile)?;
+        do_disconnect(&app, &state.client).await;
+        app.exit(0);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, state, version);
+        Err("скачайте сборку со страницы релиза".into())
+    }
+}
+
+#[tauri::command]
 async fn get_state(state: State<'_, AppState>) -> Result<StateView, String> {
     #[cfg(desktop)]
     let is_admin = unbihex_client_core::platform::is_elevated();
@@ -597,8 +634,9 @@ async fn save_settings(
         let (now, want) = (autostart(), Autostart::new(settings.auto_start, settings.auto_start_admin));
         (now != want).then_some((now, want))
     };
-    logs::set_level(&state.level, &settings.log_level);
+    let log_level = settings.log_level.clone();
     state.client.set_settings(settings).map_err(err)?;
+    logs::set_level(&state.level, &log_level);
     #[cfg(windows)]
     if let Some((now, want)) = autostart {
         use unbihex_client_core::platform;
@@ -740,6 +778,7 @@ fn clear_logs(state: State<'_, AppState>) {
 async fn relaunch_admin(app: AppHandle, state: State<'_, AppState>, autostart: Option<bool>) -> Result<(), String> {
     #[cfg(desktop)]
     {
+        let _op = state.op.lock().await;
         do_disconnect(&app, &state.client).await;
         #[cfg(windows)]
         let r = if autostart == Some(true) {
@@ -1043,6 +1082,23 @@ fn vpn_connected(app: &AppHandle) -> bool {
         .is_some_and(|state| tauri::async_runtime::block_on(state.client.controller.is_connected()))
 }
 
+#[cfg(windows)]
+fn open_desktop_client(dir: std::path::PathBuf) -> Result<Client, ClientError> {
+    // ShellExecute returns before the copy that requested elevation has exited.
+    let restarting = std::env::args_os().any(|arg| arg == "--elevated");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match Client::open(&dir) {
+            Err(ClientError::AlreadyRunning)
+                if restarting && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// App entry point (desktop `main` and the mobile entry).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1057,11 +1113,13 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir().join("unbihex"));
             #[cfg(target_os = "android")]
-            let owner = android_vpn::owner(&dir);
+            let owner = android_vpn::owner(&dir)?;
             #[cfg(target_os = "android")]
             let client = owner.client.clone();
-            #[cfg(not(target_os = "android"))]
-            let client = Arc::new(Client::open(dir));
+            #[cfg(windows)]
+            let client = Arc::new(open_desktop_client(dir)?);
+            #[cfg(not(any(target_os = "android", windows)))]
+            let client = Arc::new(Client::open(dir)?);
             #[cfg(target_os = "android")]
             android_vpn::attach(owner, app.handle().clone());
             logs::set_level(&level, &client.settings().log_level);
@@ -1072,7 +1130,7 @@ pub fn run() {
                 platform_name()
             );
             #[cfg(windows)]
-            let notice = apply_saved_autostart(&client);
+            let notice = apply_saved_autostart(&client).or_else(|| updater::take_install_error(client.dir()));
             #[cfg(not(windows))]
             let notice = None;
             app.manage(AppState {
@@ -1084,6 +1142,8 @@ pub fn run() {
                 #[cfg(not(target_os = "android"))]
                 op: Arc::new(tokio::sync::Mutex::new(())),
                 notice: parking_lot::Mutex::new(notice),
+                #[cfg(windows)]
+                upgrade: tokio::sync::Mutex::new(()),
             });
             #[cfg(desktop)]
             if let Err(e) = setup_tray(app) {
@@ -1101,6 +1161,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            check_release_update,
+            install_release_update,
             get_state,
             add_input,
             update_subscription,

@@ -826,7 +826,7 @@ mod tests {
     #[tokio::test]
     async fn draws_the_screen() {
         let dir = std::env::temp_dir().join(format!("unbihex-tui-{}", Uuid::new_v4()));
-        let client = Arc::new(Client::open(&dir));
+        let client = Arc::new(Client::open(&dir).unwrap());
         let link = "vless://11111111-2222-3333-4444-555555555555@example.com:443?security=tls&type=tcp#Test%20server";
         let report = client.add_input(link).await.expect("add");
         assert_eq!(report.servers, 1);

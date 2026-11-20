@@ -50,53 +50,88 @@ pub struct Client {
     data: parking_lot::RwLock<AppData>,
     /// The engine controller.
     pub controller: Arc<Controller>,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    _profile_lock: std::fs::File,
 }
 
 /// The saved state, and whether it must be saved right away: it lacked the LAN
 /// password (a new one was generated, LAN devices must keep working after a
 /// restart) or had the old auto-select marks (now a template).
-fn load(path: &Path) -> (AppData, bool) {
-    let parsed = std::fs::read(path).map(|bytes| {
-        serde_json::from_slice::<serde_json::Value>(&bytes).and_then(|v| {
-            let fresh = v.pointer("/settings/lan_password").is_none();
-            serde_json::from_value::<AppData>(v.clone()).map(|mut d| {
-                let migrated = d.migrate_marks(&v);
-                (d, fresh || migrated)
-            })
+fn load(path: &Path) -> Result<(AppData, bool)> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((AppData::default(), false)),
+        Err(e) => return Err(e.into()),
+    };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&bytes).and_then(|v| {
+        let fresh = v.pointer("/settings/lan_password").is_none();
+        serde_json::from_value::<AppData>(v.clone()).map(|mut d| {
+            let migrated = d.migrate_marks(&v);
+            (d, fresh || migrated)
         })
     });
     match parsed {
-        Ok(Ok(x)) => x,
-        Ok(Err(e)) => {
+        Ok(state) => Ok(state),
+        Err(e) => {
+            std::fs::copy(path, path.with_extension("json.bak"))?;
             tracing::error!("state file is damaged ({e}); a backup is kept as state.json.bak");
-            let _ = std::fs::copy(path, path.with_extension("json.bak"));
-            (AppData::default(), false)
+            Ok((AppData::default(), false))
         }
-        Err(_) => (AppData::default(), false),
     }
 }
 
+fn save_state(dir: &Path, data: &AppData) -> Result<()> {
+    use std::io::Write;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    let mut writer = std::io::BufWriter::new(tmp.as_file_mut());
+    serde_json::to_writer_pretty(&mut writer, data)?;
+    writer.flush()?;
+    drop(writer);
+    tmp.as_file().sync_all()?;
+    tmp.persist(dir.join(STATE_FILE)).map_err(|e| e.error)?;
+    Ok(())
+}
+
 impl Client {
-    /// Loads `dir/state.json` and rolls back system changes left by a crash.
-    pub fn open(dir: impl Into<PathBuf>) -> Client {
+    /// Locks the desktop profile before loading state or recovering system settings.
+    pub fn open(dir: impl Into<PathBuf>) -> Result<Client> {
         let dir = dir.into();
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        crate::platform::recover(&dir);
-        let (mut data, mut fresh) = load(&dir.join(STATE_FILE));
+        let profile_lock = {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(dir.join("client.lock"))?;
+            match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {}
+                Err(e) if e.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                    return Err(ClientError::AlreadyRunning);
+                }
+                Err(e) => return Err(e.into()),
+            }
+            // Keep the file even after exit: unlinking it can split contenders across two locks.
+            crate::platform::recover(&dir);
+            file
+        };
+        let (mut data, mut fresh) = load(&dir.join(STATE_FILE))?;
         // By dubr1k (github.com/dubr1k), PR #32.
         for server in &mut data.servers {
             fresh |= crate::links::refresh_support(server);
         }
-        let client = Client {
+        if fresh {
+            save_state(&dir, &data)?;
+        }
+        Ok(Client {
             controller: Arc::new(Controller::new(dir.clone())),
             data: parking_lot::RwLock::new(data),
             dir,
-        };
-        if fresh && let Err(e) = client.save() {
-            tracing::warn!("cannot save state: {e}");
-        }
-        client
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            _profile_lock: profile_lock,
+        })
     }
 
     /// The data folder.
@@ -114,19 +149,13 @@ impl Client {
         self.data.read().settings.clone()
     }
 
-    fn save(&self) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(&*self.data.read())?;
-        let path = self.dir.join(STATE_FILE);
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    }
-
-    fn mutate<T>(&self, f: impl FnOnce(&mut AppData) -> T) -> Result<T> {
-        let r = f(&mut self.data.write());
-        self.save()?;
-        Ok(r)
+    fn mutate<T>(&self, f: impl FnOnce(&mut AppData) -> Result<T>) -> Result<T> {
+        let mut current = self.data.write();
+        let mut next = current.clone();
+        let value = f(&mut next)?;
+        save_state(&self.dir, &next)?;
+        *current = next;
+        Ok(value)
     }
 
     /// Adds subscription URLs and/or share links pasted by the user.
@@ -180,6 +209,7 @@ impl Client {
                     }
                 }
                 d.ensure_selection();
+                Ok(())
             })?;
         }
         for url in sub_urls {
@@ -194,7 +224,10 @@ impl Client {
                 ..Default::default()
             };
             let id = sub.id;
-            self.mutate(|d| d.subscriptions.push(sub))?;
+            self.mutate(|d| {
+                d.subscriptions.push(sub);
+                Ok(())
+            })?;
             report.subscriptions += 1;
             match self.update_subscription(id).await {
                 Ok(n) => report.servers += n,
@@ -206,7 +239,7 @@ impl Client {
 
     /// Downloads a subscription again; returns the number of servers.
     pub async fn update_subscription(&self, id: Uuid) -> Result<usize> {
-        let (url, opts, as_json) = {
+        let (url, user_agent, opts, as_json) = {
             let d = self.data.read();
             let sub = d
                 .subscriptions
@@ -227,7 +260,12 @@ impl Client {
                 name: d.settings.device_name.clone(),
             });
             let retry_as_json = own.is_none() && !as_json;
-            (sub.url.clone(), FetchOptions { user_agent: ua, device, retry_as_json }, as_json)
+            (
+                sub.url.clone(),
+                sub.user_agent.clone(),
+                FetchOptions { user_agent: ua, device, retry_as_json },
+                as_json,
+            )
         };
         // Mobile whitelists may let through only the VPN server: then the panel is
         // asked again through it.
@@ -243,35 +281,34 @@ impl Client {
                 }
                 let n = servers.len();
                 self.mutate(|d| {
-                    d.replace_servers(id, servers);
-                    if let Some(sub) = d.subscription_mut(id) {
-                        if let Some(t) = f.title.filter(|_| !sub.custom_name) {
-                            sub.name = t;
-                        }
-                        sub.info = f.info;
-                        if let Some(h) = f.update_interval_hours {
-                            sub.update_interval_hours = h;
-                        }
-                        sub.support_url = f.support_url;
-                        sub.web_page_url = f.web_page_url;
-                        sub.updated_at = Some(now_secs());
-                        sub.last_error = None;
-                        // Remembered when the retry got JSON; forgotten when the
-                        // panel stops giving it.
-                        if f.json || as_json {
-                            sub.json_user_agent = f.json && sub.user_agent.is_none();
-                        }
+                    let sub = subscription_for_update(d, id, &url, user_agent.as_deref())?;
+                    if let Some(t) = f.title.filter(|_| !sub.custom_name) {
+                        sub.name = t;
                     }
+                    sub.info = f.info;
+                    if let Some(h) = f.update_interval_hours {
+                        sub.update_interval_hours = h;
+                    }
+                    sub.support_url = f.support_url;
+                    sub.web_page_url = f.web_page_url;
+                    sub.updated_at = Some(now_secs());
+                    sub.last_error = None;
+                    // Remembered when the retry got JSON; forgotten when the
+                    // panel stops giving it.
+                    if f.json || as_json {
+                        sub.json_user_agent = f.json && sub.user_agent.is_none();
+                    }
+                    d.replace_servers(id, servers);
                     d.ensure_selection();
-                })?;
-                Ok(n)
+                    Ok(n)
+                })
             }
             Err(e) => {
                 let msg = e.to_string();
                 self.mutate(|d| {
-                    if let Some(sub) = d.subscription_mut(id) {
-                        sub.last_error = Some(msg);
-                    }
+                    let sub = subscription_for_update(d, id, &url, user_agent.as_deref())?;
+                    sub.last_error = Some(msg);
+                    Ok(())
                 })?;
                 Err(e)
             }
@@ -320,7 +357,7 @@ impl Client {
                 sub.json_user_agent = false;
             }
             Ok(())
-        })?
+        })
     }
 
     /// Removes a subscription with its servers.
@@ -330,6 +367,7 @@ impl Client {
             d.servers.retain(|s| s.subscription_id != Some(id));
             d.prune_templates();
             d.ensure_selection();
+            Ok(())
         })
     }
 
@@ -339,6 +377,7 @@ impl Client {
             d.servers.retain(|s| s.id != id);
             d.prune_templates();
             d.ensure_selection();
+            Ok(())
         })
     }
 
@@ -351,11 +390,13 @@ impl Client {
                 .ok_or_else(|| ClientError::NotFound("сервер".into()))?;
             d.selected = Some(id);
             Ok(s)
-        })?
+        })
     }
 
     /// Replaces the settings (keeps the device id and the LAN password).
     pub fn set_settings(&self, mut s: Settings) -> Result<()> {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::plan::validate_proxy_ports(&s)?;
         // The LAN proxy is open to the whole network: no guessable passwords.
         let pass = s.lan_password.trim();
         if !pass.is_empty() && pass.chars().count() < MIN_LAN_PASSWORD {
@@ -397,6 +438,7 @@ impl Client {
                 s.auto_template = None;
             }
             d.settings = s;
+            Ok(())
         })
     }
 
@@ -484,6 +526,7 @@ impl Client {
                     s.ping_error = r.error.clone();
                 }
             }
+            Ok(())
         });
         results
     }
@@ -526,7 +569,7 @@ impl Client {
                 .ok_or_else(|| ClientError::NotFound("сервер".into()))?;
             s.auto_excluded = excluded;
             Ok(s.clone())
-        })?
+        })
     }
 
     /// Creates an auto-select template; servers that do not exist are left out.
@@ -537,7 +580,7 @@ impl Client {
             let t = AutoTemplate { id: Uuid::new_v4(), name, servers };
             d.auto_templates.push(t.clone());
             Ok(t)
-        })?
+        })
     }
 
     /// Renames a template and/or replaces its servers; `None` leaves that as it is.
@@ -553,7 +596,7 @@ impl Client {
                 t.servers = s;
             }
             Ok(t.clone())
-        })?
+        })
     }
 
     /// Adds a server to a template or takes it out.
@@ -572,7 +615,7 @@ impl Client {
                 _ => {}
             }
             Ok(t.clone())
-        })?
+        })
     }
 
     /// Deletes a template; when it was the active one, "all servers" takes over.
@@ -587,7 +630,7 @@ impl Client {
                 d.settings.auto_template = None;
             }
             Ok(())
-        })?
+        })
     }
 
     /// Sets the TLS fingerprint of one server (`None` or empty: the one from the
@@ -605,7 +648,7 @@ impl Client {
                 .ok_or_else(|| ClientError::NotFound("сервер".into()))?;
             s.fingerprint = fingerprint;
             Ok(s.clone())
-        })?
+        })
     }
 
     /// Desktop: connects to the selected server (or its auto-select group).
@@ -639,12 +682,18 @@ impl Client {
         let settings = self.settings();
         match crate::geo::update(&self.dir, &settings).await {
             Ok(status) => {
-                self.mutate(|d| d.geo = status.clone())?;
+                self.mutate(|d| {
+                    d.geo = status.clone();
+                    Ok(())
+                })?;
                 Ok(status)
             }
             Err(e) => {
                 let msg = e.to_string();
-                self.mutate(|d| d.geo.last_error = Some(msg))?;
+                self.mutate(|d| {
+                    d.geo.last_error = Some(msg);
+                    Ok(())
+                })?;
                 Err(e)
             }
         }
@@ -668,12 +717,18 @@ impl Client {
         let settings = self.settings();
         match crate::adblock::update(&self.dir, &settings).await {
             Ok(status) => {
-                self.mutate(|d| d.adblock = status.clone())?;
+                self.mutate(|d| {
+                    d.adblock = status.clone();
+                    Ok(())
+                })?;
                 Ok(status)
             }
             Err(e) => {
                 let msg = e.to_string();
-                self.mutate(|d| d.adblock.last_error = Some(msg))?;
+                self.mutate(|d| {
+                    d.adblock.last_error = Some(msg);
+                    Ok(())
+                })?;
                 Err(e)
             }
         }
@@ -725,6 +780,17 @@ pub fn short_label(name: &str) -> String {
 /// TLS fingerprints the client offers (`fp` as in Xray).
 pub const FINGERPRINTS: &[&str] =
     &["chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"];
+
+fn subscription_for_update<'a>(
+    data: &'a mut AppData,
+    id: Uuid,
+    url: &str,
+    user_agent: Option<&str>,
+) -> Result<&'a mut Subscription> {
+    data.subscription_mut(id)
+        .filter(|sub| sub.url == url && sub.user_agent.as_deref() == user_agent)
+        .ok_or_else(|| ClientError::State("обновление отменено: подписка удалена или изменена".into()))
+}
 
 fn check_fingerprint(fp: &str) -> Result<()> {
     if FINGERPRINTS.contains(&fp) {
@@ -783,7 +849,7 @@ mod tests {
     #[tokio::test]
     async fn saved_unsupported_cdn_is_rechecked_without_losing_identity() {
         let dir = tmp();
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         let extra = serde_json::json!({"seqPlacement":"query", "seqKey":"offset", "uplinkHTTPMethod":"GET"});
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("extra", &extra.to_string())
@@ -794,15 +860,14 @@ mod tests {
         .await
         .unwrap();
         let id = c.snapshot().servers[0].id;
-        {
-            let mut data = c.data.write();
+        c.mutate(|data| {
             data.servers[0].unsupported = Some("XHTTP unsupported".into());
             data.servers[0].ping_error = Some("не поддерживается".into());
             data.servers[0].name = "User label".into();
-        }
-        c.save().unwrap();
+            Ok(())
+        }).unwrap();
         drop(c);
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         let s = c.snapshot().servers.remove(0);
         assert_eq!(s.id, id);
         assert_eq!(s.name, "User label");
@@ -823,7 +888,7 @@ mod tests {
 
     #[tokio::test]
     async fn tile_label_is_the_selected_server_or_the_app_name() {
-        let c = Client::open(tmp());
+        let c = Client::open(tmp()).unwrap();
         assert_eq!(c.tile_label().await, "Unbihex");
         c.add_input(&format!("vless://{UUID}@a.example:443?security=tls#%F0%9F%87%A9%F0%9F%87%AA%20Berlin"))
             .await
@@ -833,7 +898,7 @@ mod tests {
 
     #[tokio::test]
     async fn pasted_json_configs_become_servers() {
-        let c = Client::open(tmp());
+        let c = Client::open(tmp()).unwrap();
         // The example from issue #12: sing-box, no TLS block.
         let sing_box = format!(
             r#"{{"outbounds":[{{"type":"vless","tag":"proxy","server":"example.com","server_port":443,"uuid":"{UUID}"}}]}}"#
@@ -853,7 +918,7 @@ mod tests {
     #[tokio::test]
     async fn manual_links_persist_and_select() {
         let dir = tmp();
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         let r = c
             .add_input(&format!(
                 "vless://{UUID}@a.com:443?security=tls#A\nhysteria://p@b.com:443#B\nnonsense"
@@ -865,7 +930,7 @@ mod tests {
         let d = c.snapshot();
         assert_eq!(d.selected_server().unwrap().name, "A");
         drop(c);
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         assert_eq!(c.snapshot().servers.len(), 2);
         let b = c.snapshot().servers[1].id;
         c.select(b).unwrap();
@@ -892,24 +957,89 @@ mod tests {
         assert_eq!(d.selected, None);
     }
 
+    #[tokio::test]
+    async fn a_delayed_subscription_response_cannot_undo_removal_or_edit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        for remove in [true, false] {
+            let dir = tmp();
+            let client = Client::open(&dir).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let sub = Subscription {
+                url: format!("http://{}/subscription", listener.local_addr().unwrap()),
+                ..Default::default()
+            };
+            let id = sub.id;
+            client.mutate(|data| {
+                data.subscriptions.push(sub);
+                Ok(())
+            }).unwrap();
+
+            let (request_received, request_started) = oneshot::channel();
+            let (edit_finished, release_response) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    header.push(socket.read_u8().await.unwrap());
+                }
+                request_received.send(()).unwrap();
+                release_response.await.unwrap();
+                let body = "socks://127.0.0.1:10808#late";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let edit = async {
+                request_started.await.unwrap();
+                if remove {
+                    client.remove_subscription(id).unwrap();
+                } else {
+                    client.edit_subscription(id, None, None, Some("new agent".into())).unwrap();
+                }
+                edit_finished.send(()).unwrap();
+            };
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(client.update_subscription(id), edit)
+            })
+            .await
+            .unwrap();
+            server.await.unwrap();
+
+            assert!(matches!(result, Err(ClientError::State(_))));
+            let state = client.snapshot();
+            assert!(state.servers.is_empty());
+            assert_eq!(state.subscriptions.len(), usize::from(!remove));
+            if let Some(sub) = state.subscriptions.first() {
+                assert_eq!(sub.user_agent.as_deref(), Some("new agent"));
+                assert!(sub.updated_at.is_none() && sub.last_error.is_none());
+            }
+            drop(client);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     // By dubr1k (github.com/dubr1k), PR #33.
     #[tokio::test]
     async fn saved_unsupported_hysteria2_is_rechecked_without_losing_identity() {
         let dir = tmp();
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         c.add_input("hy2://pw@hy.example#My%20server")
             .await
             .unwrap();
         let id = c.snapshot().servers[0].id;
-        {
-            let mut data = c.data.write();
+        c.mutate(|data| {
             data.servers[0].unsupported = Some("Hysteria пока не поддерживается ядром".into());
             data.servers[0].ping_error = Some("не поддерживается".into());
             data.servers[0].name = "User label".into();
-        }
-        c.save().unwrap();
+            Ok(())
+        }).unwrap();
         drop(c);
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         let s = c.snapshot().servers.remove(0);
         assert_eq!(s.id, id);
         assert_eq!(s.name, "User label");
@@ -964,7 +1094,7 @@ mod tests {
     #[test]
     fn auto_group_follows_exclusions_and_templates() {
         let link = |host: &str| parse_server(&format!("vless://{UUID}@{host}:443?security=tls&sid=1#{host}")).unwrap();
-        let c = Client::open(tmp());
+        let c = Client::open(tmp()).unwrap();
         let (s1, s2) = (Uuid::new_v4(), Uuid::new_v4());
         let ids = c
             .mutate(|d| {
@@ -974,7 +1104,7 @@ mod tests {
                 d.servers.push(x);
                 d.servers.push(Server { subscription_id: Some(s2), ..link("d.com") });
                 d.settings.auto_select = crate::model::AutoSelect::LeastPing;
-                d.servers.iter().map(|s| s.id).collect::<Vec<_>>()
+                Ok(d.servers.iter().map(|s| s.id).collect::<Vec<_>>())
             })
             .unwrap();
         let group = |c: &Client| c.connect_servers().unwrap().iter().map(|s| s.id).collect::<Vec<_>>();
@@ -1012,7 +1142,10 @@ mod tests {
         assert!(c.set_server_fingerprint(ids[0], Some("netscape".into())).is_err());
         // The flags survive an update with rewritten links.
         let fresh = |host: &str| parse_server(&format!("vless://{UUID}@{host}:443?security=tls&sid=2#{host}")).unwrap();
-        c.mutate(|d| d.replace_servers(s1, vec![fresh("c.com"), fresh("a.com"), fresh("b.com")])).unwrap();
+        c.mutate(|d| {
+            d.replace_servers(s1, vec![fresh("c.com"), fresh("a.com"), fresh("b.com")]);
+            Ok(())
+        }).unwrap();
         let d = c.snapshot();
         let a = d.server(ids[0]).unwrap();
         assert!(a.auto_excluded);
@@ -1021,7 +1154,10 @@ mod tests {
         // Updated servers go after the other subscription's: list order.
         assert_eq!(group(&c), [ids[1], ids[4], ids[0]]);
         // A server gone from the subscription leaves the templates.
-        c.mutate(|d| d.replace_servers(s1, vec![fresh("c.com"), fresh("b.com")])).unwrap();
+        c.mutate(|d| {
+            d.replace_servers(s1, vec![fresh("c.com"), fresh("b.com")]);
+            Ok(())
+        }).unwrap();
         assert_eq!(c.snapshot().active_template().unwrap().servers, [ids[3], ids[4]]);
         c.set_template_server(t.id, ids[4], false).unwrap();
         assert_eq!(group(&c), [ids[1]]);
@@ -1036,7 +1172,10 @@ mod tests {
         c.set_settings(s).unwrap();
         assert_eq!(c.settings().auto_template, None);
         // Off: only the selected server.
-        c.mutate(|d| d.settings.auto_select = crate::model::AutoSelect::Off).unwrap();
+        c.mutate(|d| {
+            d.settings.auto_select = crate::model::AutoSelect::Off;
+            Ok(())
+        }).unwrap();
         assert_eq!(group(&c), [ids[1]]);
         assert!(c.set_server_auto(Uuid::new_v4(), true).is_err());
     }
@@ -1064,7 +1203,7 @@ mod tests {
         // Marked mode: the template is active, the group stays the same.
         let dir = tmp();
         std::fs::write(dir.join(STATE_FILE), state("marked")).unwrap();
-        let cl = Client::open(&dir);
+        let cl = Client::open(&dir).unwrap();
         let d = cl.snapshot();
         assert_eq!(d.auto_templates.len(), 1);
         let t = &d.auto_templates[0];
@@ -1076,14 +1215,14 @@ mod tests {
         // Saved at once and only once: opening again keeps the same template.
         let saved = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
         assert!(!saved.contains("auto_marked") && !saved.contains("auto_group"), "{saved}");
-        let again = Client::open(&dir).snapshot();
+        drop(cl);
+        let again = Client::open(&dir).unwrap().snapshot();
         assert_eq!(again.auto_templates, d.auto_templates);
         assert_eq!(again.settings.auto_template, Some(t.id));
-        drop(cl);
         // Subscription mode: the marks are kept as a template, not active.
         let dir = tmp();
         std::fs::write(dir.join(STATE_FILE), state("subscription")).unwrap();
-        let d = Client::open(&dir).snapshot();
+        let d = Client::open(&dir).unwrap().snapshot();
         assert_eq!(d.auto_templates.len(), 1);
         assert_eq!(d.auto_templates[0].servers, [a, c]);
         assert_eq!(d.settings.auto_template, None);
@@ -1091,7 +1230,7 @@ mod tests {
         let dir = tmp();
         let none = state("marked").replace(r#""auto_marked":true"#, r#""auto_marked":false"#);
         std::fs::write(dir.join(STATE_FILE), none).unwrap();
-        let d = Client::open(&dir).snapshot();
+        let d = Client::open(&dir).unwrap().snapshot();
         assert_eq!(d.auto_templates.len(), 1);
         assert!(d.auto_templates[0].servers.is_empty());
         assert_eq!(d.settings.auto_template, Some(d.auto_templates[0].id));
@@ -1099,7 +1238,84 @@ mod tests {
         let dir = tmp();
         let plain = state("subscription").replace(r#""auto_marked":true"#, r#""auto_marked":false"#);
         std::fs::write(dir.join(STATE_FILE), plain).unwrap();
-        assert!(Client::open(&dir).snapshot().auto_templates.is_empty());
+        assert!(Client::open(&dir).unwrap().snapshot().auto_templates.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn duplicate_or_zero_proxy_ports_do_not_replace_saved_settings() {
+        let dir = tmp();
+        let client = Client::open(&dir).unwrap();
+        let original = client.settings();
+        client.set_settings(original.clone()).unwrap();
+        let saved = std::fs::read(dir.join(STATE_FILE)).unwrap();
+        for port in [0, original.http_port] {
+            let invalid = Settings { socks_port: port, ..original.clone() };
+            let message = client.set_settings(invalid.clone()).unwrap_err().to_string();
+            assert!(message.contains("порты локального прокси"));
+            assert_eq!(client.settings().socks_port, original.socks_port);
+            assert_eq!(std::fs::read(dir.join(STATE_FILE)).unwrap(), saved);
+            // Applies to existing profiles written by an older version as well.
+            let result = crate::plan::build_config_json(
+                &[],
+                &invalid,
+                &client.geo(),
+                crate::plan::Target::DesktopProxy,
+            );
+            assert_eq!(result.unwrap_err().to_string(), message);
+        }
+        drop(client);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_state_replacement_keeps_last_saved_settings() {
+        let dir = tmp();
+        let client = Client::open(&dir).unwrap();
+        let original = client.settings();
+        client.set_settings(original.clone()).unwrap();
+        let state = dir.join(STATE_FILE);
+        let backup = dir.join("test-state-original.json");
+        std::fs::rename(&state, &backup).unwrap();
+        // Replacing a directory with a file always fails, even as administrator.
+        std::fs::create_dir(&state).unwrap();
+        let new_port = original.http_port + 1;
+        let result = client.set_settings(Settings { http_port: new_port, ..original.clone() });
+        assert!(matches!(result, Err(ClientError::Io(_))));
+        assert_eq!(client.settings().http_port, original.http_port);
+        std::fs::remove_dir(&state).unwrap();
+        std::fs::rename(backup, state).unwrap();
+        drop(client);
+
+        let client = Client::open(&dir).unwrap();
+        assert_eq!(client.settings().http_port, original.http_port);
+        drop(client);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_updates_match_the_state_on_disk() {
+        let dir = tmp();
+        let client = Client::open(&dir).unwrap();
+        let writers = 12;
+        let start = std::sync::Barrier::new(writers);
+        std::thread::scope(|scope| {
+            for i in 0..writers {
+                let (client, start) = (&client, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    client.create_template(&format!("Template {i}"), vec![]).unwrap();
+                });
+            }
+        });
+        let expected = client.snapshot().auto_templates;
+        assert_eq!(expected.len(), writers);
+        drop(client);
+
+        let client = Client::open(&dir).unwrap();
+        assert_eq!(client.snapshot().auto_templates, expected);
+        drop(client);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1107,9 +1323,9 @@ mod tests {
         let dir = tmp();
         // A state file from a version without LAN credentials.
         std::fs::write(dir.join(STATE_FILE), r#"{"settings":{"allow_lan":true}}"#).unwrap();
-        let pass = Client::open(&dir).settings().lan_password;
+        let pass = Client::open(&dir).unwrap().settings().lan_password;
         assert_eq!(pass.len(), 32);
-        let c = Client::open(&dir);
+        let c = Client::open(&dir).unwrap();
         assert_eq!(c.settings().lan_password, pass);
         c.set_settings(Settings {
             lan_username: " ".into(),
@@ -1117,7 +1333,8 @@ mod tests {
             ..c.settings()
         })
         .unwrap();
-        let s = Client::open(&dir).settings();
+        drop(c);
+        let s = Client::open(&dir).unwrap().settings();
         assert_eq!((s.lan_username.as_str(), s.lan_password), ("unbihex", pass));
     }
 }

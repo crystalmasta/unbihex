@@ -287,6 +287,10 @@ and no release is published automatically.
 
 ## Building on Windows
 
+Rustup selects Rust 1.100.0 from [rust-toolchain.toml](../rust-toolchain.toml). Tauri copies
+Windows resources using the Cargo 1.100 layout. For Windows GNU builds from older tags with
+`tauri-build` 2.6, use `cargo +1.99.1`.
+
 1. Install Rust (https://rustup.rs) with the MSVC toolchain and "Build Tools for Visual Studio" (C++).
    WebView2 already ships with Windows 10/11.
 2. Quick start without an installer:
