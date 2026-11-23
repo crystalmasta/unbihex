@@ -270,7 +270,13 @@ impl Journal {
         }
         self.set_names(info);
         let rx = events.subscribe(CAPACITY);
-        self.inner.lock().events = Some(events.clone());
+        {
+            let mut inner = self.inner.lock();
+            inner.events = Some(events.clone());
+            // Connection numbers start over with every engine.
+            inner.apps.clear();
+            inner.owners.clear();
+        }
         self.start_session(info);
         let this = self.clone();
         let task = tokio::spawn(async move { this.drain(rx).await });

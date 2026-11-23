@@ -47,7 +47,7 @@ pub enum Event {
 /// A connection or flow was accepted.
 #[derive(Clone, Debug, Serialize)]
 pub struct ConnOpen {
-    /// Connection number, the same in its `close` event.
+    /// Connection number, the same in its `close` event; unique in the process.
     pub conn: u64,
     /// Unix ms.
     pub ts: u64,
@@ -168,7 +168,6 @@ pub struct Events {
     on: AtomicBool,
     tx: ArcSwapOption<mpsc::Sender<Event>>,
     dropped: AtomicU64,
-    next: AtomicU64,
     /// The member each balancer was last seen using.
     members: parking_lot::Mutex<HashMap<String, String>>,
 }
@@ -228,8 +227,10 @@ impl Events {
         }
     }
 
+    /// A connection number, unique in the process (across engine restarts too).
     pub(crate) fn next_conn(&self) -> u64 {
-        self.next.fetch_add(1, Ordering::Relaxed) + 1
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// The member `state` uses now; a `switch` event when it changed since the

@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
 import android.system.OsConstants
+import app.tauri.annotation.InvokeArg
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -14,6 +15,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 
 /** One connection whose owning app is asked for (the journal's `OwnerQuery`). */
+@InvokeArg
 class OwnerItem {
     var udp: Boolean = false
     var src: String = ""
