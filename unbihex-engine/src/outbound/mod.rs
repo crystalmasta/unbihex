@@ -129,9 +129,10 @@ fn force_fingerprint(cfg: &mut OutboundConfig, fp: &str) {
 }
 
 /// Adds the user's trusted leaf hashes to a link's TLS (REALITY ignores them).
-fn add_trusted_sha256(cfg: &mut OutboundConfig, hashes: &[String]) {
+fn add_trusted_sha256(cfg: &mut OutboundConfig, hashes: &[String]) -> Result<()> {
+    tls::parse_hashes("trusted_sha256", hashes)?;
     if hashes.is_empty() {
-        return;
+        return Ok(());
     }
     let tls = match cfg {
         OutboundConfig::Vless(v) => v.tls.as_mut(),
@@ -142,6 +143,7 @@ fn add_trusted_sha256(cfg: &mut OutboundConfig, hashes: &[String]) {
     if let Some(t) = tls {
         t.trusted_sha256.extend(hashes.iter().cloned());
     }
+    Ok(())
 }
 
 /// Shared services every outbound needs.
@@ -307,7 +309,7 @@ pub async fn build_outbound(
                 fingerprint::Fingerprint::from_name(Some(fp))?;
                 force_fingerprint(&mut parsed, fp);
             }
-            add_trusted_sha256(&mut parsed, &c.trusted_sha256);
+            add_trusted_sha256(&mut parsed, &c.trusted_sha256)?;
             apply_link_settings(&mut parsed, c);
             return Box::pin(build_outbound(&parsed, ctx)).await;
         }
@@ -350,7 +352,7 @@ mod tests {
         let h = vec!["ab".repeat(32)];
         let tls_of = |link: &str| {
             let mut c = crate::link::parse_link(link, "p").unwrap();
-            add_trusted_sha256(&mut c, &h);
+            add_trusted_sha256(&mut c, &h).unwrap();
             match c {
                 OutboundConfig::Vless(v) => v.tls.map(|t| t.trusted_sha256),
                 _ => None,

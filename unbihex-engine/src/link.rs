@@ -234,14 +234,12 @@ pub(crate) fn first_host(list: &str) -> Option<String> {
 /// value is an error (it would otherwise silently drop a requested restriction).
 pub(crate) fn pcs_list(v: &str) -> Result<Vec<String>> {
     v.split(',')
-        .map(|h| h.trim().replace(':', "").to_ascii_lowercase())
+        .map(str::trim)
         .filter(|h| !h.is_empty())
         .map(|h| {
-            if h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()) {
-                Ok(h)
-            } else {
-                Err(Error::config("link: pcs is not a SHA-256 hex"))
-            }
+            crate::outbound::tls::parse_sha256_hex(h)
+                .map(hex::encode)
+                .ok_or_else(|| Error::config("link: pcs is not a SHA-256 hex"))
         })
         .collect()
 }

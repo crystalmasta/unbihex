@@ -152,7 +152,6 @@ proptest! {
 /// `pcs` rejects what is not a hash; the config field must not be laxer
 /// (it drops every non-hex character before checking the length).
 #[test]
-#[ignore = "bug: TlsConfig.trusted_sha256 silently drops non-hex characters (parse_hashes), unlike pcs"]
 fn trusted_field_rejects_junk_around_a_hash() {
     let h = "ab".repeat(32);
     for bad in [format!("zz{h}"), format!("{h}!!"), format!("sha-{h}"), format!("{}-{}", &h[..32], &h[32..])] {

@@ -282,15 +282,27 @@ struct Trust {
     probe: Option<Arc<ProbeVerifier>>,
 }
 
-/// Parses hex SHA-256 values (`:` and spaces allowed) of a config field.
-fn parse_hashes(field: &str, list: &[String]) -> Result<Vec<[u8; 32]>> {
+/// Parses one hex SHA-256: exactly 64 hex digits, with optional `:` and whitespace
+/// separators and nothing else.
+pub(crate) fn parse_sha256_hex(h: &str) -> Option<[u8; 32]> {
+    let mut clean = String::with_capacity(64);
+    for c in h.chars() {
+        match c {
+            ':' => {}
+            c if c.is_whitespace() => {}
+            c if c.is_ascii_hexdigit() => clean.push(c),
+            _ => return None,
+        }
+    }
+    hex::decode(&clean).ok()?.try_into().ok()
+}
+
+/// Parses hex SHA-256 values of a config field.
+pub(crate) fn parse_hashes(field: &str, list: &[String]) -> Result<Vec<[u8; 32]>> {
     list.iter()
         .map(|h| {
-            let clean: String = h.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-            let bytes = hex::decode(&clean)
-                .map_err(|_| Error::config(format!("{field}: invalid hex")))?;
-            <[u8; 32]>::try_from(bytes)
-                .map_err(|_| Error::config(format!("{field}: expected 32 bytes")))
+            parse_sha256_hex(h)
+                .ok_or_else(|| Error::config(format!("{field}: expected a SHA-256 in hex")))
         })
         .collect()
 }
