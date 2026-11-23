@@ -12,12 +12,22 @@ use crate::geo::Geo;
 use crate::links::{b64_decode, is_share_link, parse_server};
 use crate::model::{AppData, AutoTemplate, Server, Settings, Subscription, now_secs};
 use crate::ping::{describe_error, measure};
+use crate::trust;
 use crate::subscription::{Device, FetchOptions, JSON_USER_AGENT, fallback_name, fetch_with};
 
 const STATE_FILE: &str = "state.json";
 /// Shortest LAN proxy password a user may set (generated ones are 32 characters).
 const MIN_LAN_PASSWORD: usize = 8;
 /// Delay tests running at the same time.
+/// What trusting a subscription's certificates came to.
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct TrustReport {
+    /// Servers whose certificate was pinned.
+    pub pinned: usize,
+    /// Eligible servers that could not be probed.
+    pub failed: usize,
+}
+
 const PING_PARALLEL: usize = 12;
 /// Longest auto-select template name, in characters.
 const MAX_TEMPLATE_NAME: usize = 60;
@@ -110,7 +120,11 @@ impl Client {
 
     /// A copy of everything for the UI.
     pub fn snapshot(&self) -> AppData {
-        self.data.read().clone()
+        let mut d = self.data.read().clone();
+        for s in &mut d.servers {
+            s.can_trust = trust::can_hold_pin(s);
+        }
+        d
     }
 
     /// Current settings.
@@ -302,6 +316,19 @@ impl Client {
                     }
                     d.ensure_selection();
                 })?;
+                // New eligible servers of a trusting subscription get their pin.
+                let trusting = self.data.read().subscriptions.iter().any(|s| s.id == id && s.trust_certs);
+                if trusting {
+                    let ids = self
+                        .data
+                        .read()
+                        .servers
+                        .iter()
+                        .filter(|s| s.subscription_id == Some(id))
+                        .map(|s| s.id)
+                        .collect();
+                    self.pin_servers(ids).await;
+                }
                 Ok(n)
             }
             Err(e) => {
@@ -662,6 +689,113 @@ impl Client {
         })?
     }
 
+    /// Reads the leaf certificate hash of a server (hex SHA-256) the way a ping reaches
+    /// it. Saves nothing: the user confirms it, then `set_server_trust` pins it.
+    pub async fn probe_server_cert(&self, id: Uuid) -> Result<String> {
+        let (server, fp) = {
+            let d = self.data.read();
+            let s = d.servers.iter().find(|s| s.id == id).ok_or_else(|| ClientError::NotFound("сервер".into()))?;
+            let fp = s.fingerprint.clone().or_else(|| Some(d.settings.tls_fingerprint.clone()));
+            (s.clone(), fp)
+        };
+        trust::probe(&server, fp.as_deref(), &self.controller.ping_env())
+            .await
+            .map_err(|e| {
+                tracing::debug!("cert probe {}: {e}", server.name);
+                e
+            })
+    }
+
+    /// Pins the certificate of one server (`None`: removes the pin). A pinned
+    /// connection accepts only that certificate; it applies from the next connect.
+    pub fn set_server_trust(&self, id: Uuid, sha256: Option<String>) -> Result<Server> {
+        let sha256 = sha256.filter(|h| !h.trim().is_empty()).map(|h| trust::normalize_hash(&h)).transpose()?;
+        self.mutate(|d| {
+            let s = d
+                .servers
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or_else(|| ClientError::NotFound("сервер".into()))?;
+            if sha256.is_some() && !trust::can_hold_pin(s) {
+                return Err(ClientError::Input("для этого сервера нельзя доверять сертификату".into()));
+            }
+            s.trusted_sha256 = sha256;
+            Ok(s.clone())
+        })?
+    }
+
+    /// Probes `ids` (at most [`trust::PROBE_PARALLEL`] at once) and pins what was
+    /// read. A server that got a pin meanwhile, or changed its address, is left alone.
+    async fn pin_servers(&self, ids: Vec<Uuid>) -> TrustReport {
+        let (servers, fp, env) = {
+            let d = self.data.read();
+            let servers: Vec<Server> =
+                d.servers.iter().filter(|s| ids.contains(&s.id) && trust::is_trust_candidate(s)).cloned().collect();
+            (servers, d.settings.tls_fingerprint.clone(), self.controller.ping_env())
+        };
+        let sem = Arc::new(tokio::sync::Semaphore::new(trust::PROBE_PARALLEL));
+        let mut set = tokio::task::JoinSet::new();
+        for s in servers {
+            let (sem, env, fp) = (sem.clone(), env.clone(), fp.clone());
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await;
+                let own = s.fingerprint.clone().or(Some(fp));
+                let r = trust::probe(&s, own.as_deref(), &env).await;
+                (s.id, s.host, s.port, r)
+            });
+        }
+        let mut found = Vec::new();
+        let mut failed = 0;
+        while let Some(done) = set.join_next().await {
+            match done {
+                Ok((id, host, port, Ok(h))) => found.push((id, host, port, h)),
+                Ok((_, _, _, Err(e))) => {
+                    tracing::debug!("cert probe: {e}");
+                    failed += 1;
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        let mut pinned = 0;
+        let saved = self.mutate(|d| {
+            for (id, host, port, h) in found {
+                if let Some(s) = d.servers.iter_mut().find(|s| s.id == id)
+                    && s.trusted_sha256.is_none()
+                    && s.host == host
+                    && s.port == port
+                {
+                    s.trusted_sha256 = Some(h);
+                    pinned += 1;
+                }
+            }
+        });
+        if let Err(e) = saved {
+            tracing::warn!("saving pins: {e}");
+            return TrustReport { pinned: 0, failed: failed + pinned };
+        }
+        TrustReport { pinned, failed }
+    }
+
+    /// Turns trust in a subscription's server certificates on or off. On: every
+    /// eligible server is probed and pinned; off: the pins of its servers are removed.
+    /// Connections pick the change up the next time they are made.
+    pub async fn set_subscription_trust(&self, sub_id: Uuid, on: bool) -> Result<TrustReport> {
+        let ids: Vec<Uuid> = self.mutate(|d| {
+            let sub = d
+                .subscription_mut(sub_id)
+                .ok_or_else(|| ClientError::NotFound("подписка".into()))?;
+            sub.trust_certs = on;
+            let ids = d.servers.iter().filter(|s| s.subscription_id == Some(sub_id)).map(|s| s.id).collect();
+            if !on {
+                for s in d.servers.iter_mut().filter(|s| s.subscription_id == Some(sub_id)) {
+                    s.trusted_sha256 = None;
+                }
+            }
+            Ok::<_, ClientError>(ids)
+        })??;
+        if on { Ok(self.pin_servers(ids).await) } else { Ok(TrustReport::default()) }
+    }
+
     /// Desktop: connects to the selected server (or its auto-select group).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub async fn connect(&self) -> Result<crate::controller::ConnectionInfo> {
@@ -948,6 +1082,79 @@ mod tests {
         assert_eq!(d.server(id).unwrap().ping_ms, Some(50));
         d.replace_servers(sub, vec![]);
         assert_eq!(d.selected, None);
+    }
+
+    #[test]
+    fn a_pin_survives_updates_at_the_same_address_only() {
+        let mut d = AppData::default();
+        let sub = Uuid::new_v4();
+        let link = |host: &str, port: u16| {
+            parse_server(&format!("vless://{UUID}@{host}:{port}?security=tls&type=tcp#A")).unwrap()
+        };
+        d.replace_servers(sub, vec![link("a.com", 443)]);
+        let id = d.servers[0].id;
+        d.servers[0].trusted_sha256 = Some("ab".repeat(32));
+        d.replace_servers(sub, vec![link("a.com", 443)]);
+        assert_eq!((d.servers[0].id, d.servers[0].trusted_sha256.clone()), (id, Some("ab".repeat(32))));
+        // The panel moved the server: the same id may stay, the pin does not.
+        d.replace_servers(sub, vec![link("a.com", 8443)]);
+        assert_eq!(d.servers[0].trusted_sha256, None);
+        d.servers[0].trusted_sha256 = Some("cd".repeat(32));
+        d.replace_servers(sub, vec![link("b.com", 8443)]);
+        assert_eq!(d.servers[0].trusted_sha256, None);
+    }
+
+    #[test]
+    fn old_state_loads_without_trust_fields() {
+        let sub = serde_json::to_value(Subscription::default()).unwrap();
+        let mut sub = sub;
+        sub.as_object_mut().unwrap().remove("trust_certs");
+        assert!(!serde_json::from_value::<Subscription>(sub).unwrap().trust_certs);
+        let s = parse_server(&format!("vless://{UUID}@a.com:443?security=tls#A")).unwrap();
+        let mut v = serde_json::to_value(&s).unwrap();
+        v.as_object_mut().unwrap().remove("trusted_sha256");
+        assert_eq!(serde_json::from_value::<Server>(v).unwrap().trusted_sha256, None);
+    }
+
+    #[tokio::test]
+    async fn trust_commands_pin_reset_and_validate() {
+        let c = Client::open(tmp());
+        c.add_input(&format!("vless://{UUID}@a.com:443?security=tls#A")).await.unwrap();
+        c.add_input(&format!("vless://{UUID}@b.com:443?security=none&type=tcp#B")).await.unwrap();
+        let (a, b) = {
+            let s = c.snapshot().servers;
+            (s[0].id, s[1].id)
+        };
+        let s = c.set_server_trust(a, Some(format!(" {} ", "AB".repeat(32)))).unwrap();
+        assert_eq!(s.trusted_sha256, Some("ab".repeat(32)));
+        assert!(c.set_server_trust(a, Some("xyz".into())).is_err());
+        assert!(c.set_server_trust(b, Some("ab".repeat(32))).is_err(), "no TLS: nothing to trust");
+        assert_eq!(c.set_server_trust(a, None).unwrap().trusted_sha256, None);
+        assert!(c.set_server_trust(Uuid::new_v4(), None).is_err());
+    }
+
+    #[tokio::test]
+    async fn turning_subscription_trust_off_removes_its_pins() {
+        let c = Client::open(tmp());
+        let sub = Subscription::default();
+        let sid = sub.id;
+        c.mutate(|d| {
+            d.subscriptions.push(sub);
+            let mut s = parse_server(&format!("vless://{UUID}@a.com:443?security=tls#A")).unwrap();
+            s.subscription_id = Some(sid);
+            s.trusted_sha256 = Some("ab".repeat(32));
+            let mut own = parse_server(&format!("vless://{UUID}@c.com:443?security=tls#C")).unwrap();
+            own.trusted_sha256 = Some("cd".repeat(32));
+            d.servers.push(s);
+            d.servers.push(own);
+        })
+        .unwrap();
+        c.set_subscription_trust(sid, false).await.unwrap();
+        let snap = c.snapshot();
+        assert!(!snap.subscriptions[0].trust_certs);
+        assert_eq!(snap.servers[0].trusted_sha256, None);
+        assert!(snap.servers[1].trusted_sha256.is_some(), "hand-added servers are not the subscription's");
+        assert!(c.set_subscription_trust(Uuid::new_v4(), true).await.is_err());
     }
 
     // By dubr1k (github.com/dubr1k), PR #33.

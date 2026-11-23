@@ -53,6 +53,9 @@ pub struct Subscription {
     /// The panel gave an Xray JSON for `subscription::JSON_USER_AGENT` when its share
     /// links lacked WebSocket settings: updates ask for the JSON right away.
     pub json_user_agent: bool,
+    /// The user trusts the certificates of this subscription's servers: eligible ones
+    /// are pinned (`Server::trusted_sha256`), also after updates.
+    pub trust_certs: bool,
 }
 
 impl Default for Subscription {
@@ -70,6 +73,7 @@ impl Default for Subscription {
             last_error: None,
             custom_name: false,
             json_user_agent: false,
+            trust_certs: false,
         }
     }
 }
@@ -120,6 +124,15 @@ pub struct Server {
     /// and the link's `fp`; kept across subscription updates.
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// Hex SHA-256 of the leaf certificate the user trusts for this server: the engine
+    /// accepts exactly that certificate without a chain or name check. Kept across
+    /// subscription updates while the id, host and port stay; never set silently.
+    #[serde(default)]
+    pub trusted_sha256: Option<String>,
+    /// For the interface: the user may trust this server's certificate (TLS without
+    /// REALITY, `allowInsecure`, `pcs` or a pin). Computed in `Client::snapshot`, never read back.
+    #[serde(skip_deserializing)]
+    pub can_trust: bool,
 }
 
 impl Server {
@@ -698,6 +711,10 @@ impl AppData {
                 s.ping_error = o.ping_error.clone();
                 s.auto_excluded = o.auto_excluded;
                 s.fingerprint = o.fingerprint.clone();
+                // A pin belongs to the address it was read from.
+                if o.host == s.host && o.port == s.port {
+                    s.trusted_sha256 = o.trusted_sha256.clone();
+                }
             }
             s.subscription_id = Some(sub_id);
             self.servers.push(s);

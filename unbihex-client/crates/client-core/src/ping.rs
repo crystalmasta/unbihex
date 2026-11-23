@@ -61,7 +61,7 @@ pub async fn measure(server: &Server, method: PingMethod, env: &PingEnv) -> Resu
 }
 
 /// Sockets and DNS for tests: they leave the device like the engine's own traffic.
-fn test_net(env: &PingEnv) -> (Arc<SocketFactory>, Arc<Resolver>) {
+pub(crate) fn test_net(env: &PingEnv) -> (Arc<SocketFactory>, Arc<Resolver>) {
     let sockets = Arc::new(SocketFactory::new(env.binding.clone(), env.protect.clone()));
     let resolver = Arc::new(match &env.own_dns {
         Some(dns) => match DnsClient::with_upstreams(dns.upstream.clone(), &dns.bootstrap, sockets.clone()) {
@@ -77,7 +77,7 @@ fn test_net(env: &PingEnv) -> (Arc<SocketFactory>, Arc<Resolver>) {
 }
 
 /// The server address to test: IPv4 first, as many networks still lack working IPv6.
-async fn server_ip(resolver: &Resolver, host: &str) -> Result<IpAddr> {
+pub(crate) async fn server_ip(resolver: &Resolver, host: &str) -> Result<IpAddr> {
     let ips = resolver.resolve(host).await?;
     ips.iter()
         .find(|ip| ip.is_ipv4())
@@ -340,6 +340,10 @@ pub fn describe_error(e: &ClientError) -> String {
     let l = s.to_ascii_lowercase();
     if l.contains("таймаут") || l.contains("timed out") {
         "таймаут".into()
+    } else if l.contains("does not match the trusted fingerprint") {
+        "сертификат сервера изменился".into()
+    } else if l.contains("not valid for name") || l.contains("notvalidforname") {
+        "сертификат не для этого адреса".into()
     } else if l.contains("tls") || l.contains("certificate") {
         "ошибка TLS".into()
     } else if l.contains("dns") {
@@ -357,6 +361,15 @@ pub fn describe_error(e: &ClientError) -> String {
 mod tests {
     use super::*;
     use crate::links::parse_server;
+
+    #[test]
+    fn certificate_errors_are_told_apart() {
+        let e = |m: &str| describe_error(&ClientError::State(m.into()));
+        assert_eq!(e("tls: certificate does not match the trusted fingerprint"), "сертификат сервера изменился");
+        assert_eq!(e("TLS: invalid peer certificate: NotValidForName"), "сертификат не для этого адреса");
+        assert_eq!(e("tls: certificate not valid for name \"x\""), "сертификат не для этого адреса");
+        assert_eq!(e("tls: unknown issuer"), "ошибка TLS");
+    }
 
     fn local(port: u16) -> Server {
         parse_server(&format!("vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.1:{port}?security=tls#t"))

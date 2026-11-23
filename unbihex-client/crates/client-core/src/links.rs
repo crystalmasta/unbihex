@@ -101,6 +101,8 @@ fn blank(protocol: &str) -> Server {
         ping_error: None,
         auto_excluded: false,
         fingerprint: None,
+        trusted_sha256: None,
+        can_trust: false,
     }
 }
 
@@ -426,6 +428,14 @@ pub fn outbound_json_with(server: &Server, mux: bool, default_fp: &str) -> Resul
             let fp = server.fingerprint.as_deref().unwrap_or(default_fp).trim();
             if !fp.is_empty() && matches!(server.protocol.as_str(), "vless" | "vmess" | "trojan" | "trusttunnel" | "naive") {
                 v["fingerprint"] = json!(fp);
+            }
+            // The user's pinned certificate: only for the protocols whose TLS the engine
+            // pins through a link (never REALITY, which has no certificate to trust).
+            if let Some(h) = &server.trusted_sha256
+                && matches!(server.protocol.as_str(), "vless" | "vmess" | "trojan")
+                && !server.transport.contains("reality")
+            {
+                v["trusted_sha256"] = json!([h]);
             }
             Ok(v)
         }

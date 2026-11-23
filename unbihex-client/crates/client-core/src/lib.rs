@@ -18,10 +18,11 @@ pub mod redact;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod platform;
 pub mod subscription;
+pub mod trust;
 pub mod update;
 pub mod whitelist;
 
-pub use client::{AddReport, Client, PingResult};
+pub use client::{AddReport, Client, PingResult, TrustReport};
 pub use controller::{ConnectionInfo, Controller, Status};
 pub use error::{ClientError, Result};
 pub use model::{AdblockStatus, AppData, AutoSelect, AutoTemplate, GeoStatus, PingMethod, ProxyMode, RoutingMode, Server, Settings, Subscription};

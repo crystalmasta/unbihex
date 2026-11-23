@@ -682,6 +682,40 @@ async fn set_server_fingerprint(
     reconnect_if_connected(&app, &state).await
 }
 
+/// Reads a server's leaf certificate hash (hex SHA-256) for the user to confirm.
+/// Nothing is saved; the connection is not touched.
+#[tauri::command]
+async fn probe_server_cert(state: State<'_, AppState>, id: Uuid) -> Result<String, String> {
+    state.client.probe_server_cert(id).await.map_err(err)
+}
+
+/// Pins (or, with `None`, forgets) the certificate of one server. A running
+/// connection is left alone: the change applies from the next connect.
+#[tauri::command]
+async fn set_server_trust(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: Uuid,
+    sha256: Option<String>,
+) -> Result<(), String> {
+    state.client.set_server_trust(id, sha256).map_err(err)?;
+    notify(&app);
+    Ok(())
+}
+
+/// Trusts (or stops trusting) the certificates of a subscription's servers.
+#[tauri::command]
+async fn set_subscription_trust(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    sub_id: Uuid,
+    on: bool,
+) -> Result<unbihex_client_core::TrustReport, String> {
+    let r = state.client.set_subscription_trust(sub_id, on).await.map_err(err);
+    notify(&app);
+    r
+}
+
 /// Android: the apps that can be put in or out of the VPN (issue #16).
 #[tauri::command]
 async fn android_apps(app: AppHandle) -> Result<Vec<tauri_plugin_unbihex_vpn::AppInfo>, String> {
@@ -1338,6 +1372,9 @@ pub fn run() {
             set_template_server,
             delete_template,
             set_server_fingerprint,
+            probe_server_cert,
+            set_server_trust,
+            set_subscription_trust,
             select_server,
             save_settings,
             default_settings,
