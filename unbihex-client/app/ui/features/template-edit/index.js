@@ -23,10 +23,20 @@ export function openTemplateDialog(id, withServer) {
   $("#dlg-tpl").showModal();
 }
 
+function serverMatcher() {
+  const q = $("#tpl-search").value.trim().toLowerCase();
+  return (s) => !s.unsupported && (!q || s.name.toLowerCase().includes(q) || s.host.toLowerCase().includes(q));
+}
+
+// Ids of the servers shown under the current search filter.
+function visibleServerIds() {
+  const match = serverMatcher();
+  return store.S.data.servers.filter(match).map((s) => s.id);
+}
+
 function renderTemplateServers() {
   const S = store.S;
-  const q = $("#tpl-search").value.trim().toLowerCase();
-  const match = (s) => !s.unsupported && (!q || s.name.toLowerCase().includes(q) || s.host.toLowerCase().includes(q));
+  const match = serverMatcher();
   const groups = S.data.subscriptions.map((sub) => [sub.name, serversOf(sub.id)]);
   groups.push(["Добавлены вручную", S.data.servers.filter((s) => !s.subscription_id)]);
   const html = groups
@@ -46,6 +56,11 @@ function renderTemplateServers() {
 }
 
 function tplCount() {
+  const ids = visibleServerIds();
+  const all = ids.length > 0 && ids.every((id) => tplPicked.has(id));
+  const btn = $("#tpl-all");
+  btn.textContent = all ? "Снять все" : "Выбрать все";
+  btn.disabled = !ids.length;
   const n = [...tplPicked].filter((id) => store.S.data.servers.some((s) => s.id === id)).length;
   $("#tpl-count").textContent = `выбрано: ${n}`;
 }
@@ -88,6 +103,15 @@ export function mountTemplateEdit() {
     if (e.target.checked) tplPicked.add(id);
     else tplPicked.delete(id);
     tplCount();
+  });
+  $("#tpl-all").addEventListener("click", () => {
+    const ids = visibleServerIds();
+    const all = ids.length > 0 && ids.every((id) => tplPicked.has(id));
+    for (const id of ids) {
+      if (all) tplPicked.delete(id);
+      else tplPicked.add(id);
+    }
+    renderTemplateServers();
   });
   $("#tpl-save").addEventListener("click", saveTemplate);
   $("#tpl-del").addEventListener("click", deleteTemplate);
