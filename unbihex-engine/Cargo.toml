@@ -94,6 +94,7 @@ uuid = "1"
 unbihex-engine = { path = ".", features = ["test-util"] }
 etherparse = "0.20"
 rcgen = "0.14"
+proptest = "1"
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
