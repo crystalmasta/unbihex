@@ -796,6 +796,13 @@ impl Client {
         if on { Ok(self.pin_servers(ids).await) } else { Ok(TrustReport::default()) }
     }
 
+    /// One-off: probes and pins every server that can still be trusted, manual and
+    /// from subscriptions. Subscriptions' `trust_certs` flags are left as they are.
+    pub async fn trust_all_servers(&self) -> TrustReport {
+        let ids: Vec<Uuid> = self.data.read().servers.iter().map(|s| s.id).collect();
+        self.pin_servers(ids).await
+    }
+
     /// Desktop: connects to the selected server (or its auto-select group).
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub async fn connect(&self) -> Result<crate::controller::ConnectionInfo> {

@@ -433,7 +433,7 @@ What it holds (fields an older file lacks get their defaults):
   the certificate, shows its SHA-256 fingerprint and, once confirmed, accepts only that certificate for the server (no chain
   or name check). A changed certificate is an error ("server certificate changed"); the pin is removed only by "Reset trusted
   certificate". The "Trust server certificates" switch on a subscription card does the same for all eligible servers and
-  pins new ones on updates; turning it off removes the pins of its servers. A change applies from the next connection.
+  pins new ones on updates; turning it off removes the pins of its servers. The "Trust all" button on the Servers screen pins, once, the certificates of every server that can still be trusted (subscription switches are unchanged, new servers are not pinned). A change applies from the next connection.
   Servers with `allowInsecure`, `pcs` in the link or REALITY are not eligible.
 - `auto_templates`: auto-select templates, `[{"id", "name", "servers": [server id, …]}]`. The old `auto_marked`
   marks and the `auto_group: "marked"` mode become the template "Отмеченные" the first time the file is opened.

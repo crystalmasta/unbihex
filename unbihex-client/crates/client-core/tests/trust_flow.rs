@@ -175,3 +175,31 @@ async fn a_manual_pin_survives_updates_and_a_mismatch_reads_as_changed() {
     let e = measure(&server, PingMethod::ProxyGet, &Default::default()).await.unwrap_err();
     assert_eq!(describe_error(&e), "сертификат сервера изменился", "{e}");
 }
+
+#[tokio::test]
+async fn trust_all_pins_manual_and_subscription_servers_but_only_candidates() {
+    let (p_sub, _a1, h_sub) = tls_server().await;
+    let (p_man, _a2, h_man) = tls_server().await;
+    let (p_done, _a3, _h3) = tls_server().await;
+    let (url, _body) = sub_server(link(p_sub)).await;
+    let c = Client::open(tmp());
+    c.add_input(&url).await.unwrap();
+    c.add_input(&link(p_man)).await.unwrap();
+    c.add_input(&link(p_done)).await.unwrap();
+    let reality = format!("vless://{UUID}@127.0.0.1:1?security=reality&type=tcp&pbk=abc&sni=x.test&fp=chrome#R\n");
+    let plain = format!("vless://{UUID}@127.0.0.1:2?security=none&type=tcp#N\n");
+    c.add_input(&reality).await.unwrap();
+    c.add_input(&plain).await.unwrap();
+    let by_port = |c: &Client, port: u16| c.snapshot().servers.into_iter().find(|s| s.port == port).unwrap();
+    let done = by_port(&c, p_done);
+    c.set_server_trust(done.id, Some("ab".repeat(32))).unwrap();
+
+    let rep = c.trust_all_servers().await;
+    assert_eq!((rep.pinned, rep.failed), (2, 0));
+    assert_eq!(by_port(&c, p_sub).trusted_sha256.as_deref(), Some(h_sub.as_str()));
+    assert_eq!(by_port(&c, p_man).trusted_sha256.as_deref(), Some(h_man.as_str()));
+    assert_eq!(by_port(&c, p_done).trusted_sha256, Some("ab".repeat(32)), "an existing pin is left alone");
+    assert_eq!(by_port(&c, 1).trusted_sha256, None);
+    assert_eq!(by_port(&c, 2).trusted_sha256, None);
+    assert!(c.snapshot().subscriptions.iter().all(|s| !s.trust_certs), "a one-off action sets no flag");
+}

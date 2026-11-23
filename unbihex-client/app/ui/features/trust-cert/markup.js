@@ -28,4 +28,17 @@ export const trustDialogMarkup = `<dialog id="dlg-trust">
         <button type="button" class="btn primary" id="trust-sub-ok">Включить</button>
       </div>
     </form>
+  </dialog>
+  <dialog id="dlg-trust-all">
+    <form method="dialog" class="dlg">
+      <h2>Доверять сертификатам всех серверов?</h2>
+      <p class="hint" id="trust-all-count"></p>
+      <p class="hint">Клиент прочитает сертификат каждого сервера, которому ещё не доверяет, и запомнит его. Новые серверы автоматически не закрепляются.</p>
+      <p class="hint reason">${WARNING}</p>
+      <div class="dlg-actions">
+        <span class="spacer"></span>
+        <button value="cancel" class="btn">Отмена</button>
+        <button type="button" class="btn primary" id="trust-all-ok">Доверять</button>
+      </div>
+    </form>
   </dialog>`;

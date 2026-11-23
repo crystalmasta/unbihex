@@ -22,6 +22,7 @@ export const setServerFingerprint = (id, fingerprint) => invoke("set_server_fing
 export const probeServerCert = (id) => invoke("probe_server_cert", { id });
 export const setServerTrust = (id, sha256) => invoke("set_server_trust", { id, sha256 });
 export const setSubscriptionTrust = (subId, on) => invoke("set_subscription_trust", { subId, on });
+export const trustAllServers = () => invoke("trust_all_servers");
 
 // Auto-select templates
 export const createTemplate = (name, servers) => invoke("create_template", { name, servers });

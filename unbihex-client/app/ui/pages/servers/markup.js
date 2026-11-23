@@ -12,6 +12,7 @@ export const serversMarkup = `
               <option value="icmp" title="Обычный ping адреса сервера; многие серверы на него не отвечают">ICMP</option>
             </select>
             <button class="btn" id="ping-all">Проверить пинг</button>
+            <button class="btn" id="trust-all" hidden>Доверять всем</button>
             <button class="btn primary" data-open="add">Добавить</button>
           </div>
         </header>

@@ -2,6 +2,7 @@
 import { $ } from "../../shared/lib/index.js";
 import { render, store } from "../../shared/model/index.js";
 import { pingAll, setPingMethod } from "../../features/ping/index.js";
+import { openTrustAllDialog, trustCandidates } from "../../features/trust-cert/index.js";
 import { initServerList, renderServerList, toggleSortByPing } from "../../widgets/server-list/index.js";
 import { openServerMenu } from "../../widgets/server-menu/index.js";
 import { serversMarkup } from "./markup.js";
@@ -13,6 +14,7 @@ export function mountServers() {
 export function renderServers() {
   $("#ping-method").value = store.S.data.settings.ping_method || "proxy_get";
   renderServerList();
+  $("#trust-all").hidden = !trustCandidates().length;
 }
 
 export function initServers() {
@@ -23,5 +25,6 @@ export function initServers() {
     render("servers");
   });
   $("#ping-all").addEventListener("click", () => pingAll($("#ping-all")));
+  $("#trust-all").addEventListener("click", openTrustAllDialog);
   $("#ping-method").addEventListener("change", (e) => setPingMethod(e.target.value));
 }

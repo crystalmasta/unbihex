@@ -716,6 +716,17 @@ async fn set_subscription_trust(
     r
 }
 
+/// One-off: pins the certificates of all servers that can still be trusted.
+#[tauri::command]
+async fn trust_all_servers(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<unbihex_client_core::TrustReport, String> {
+    let r = state.client.trust_all_servers().await;
+    notify(&app);
+    Ok(r)
+}
+
 /// Android: the apps that can be put in or out of the VPN (issue #16).
 #[tauri::command]
 async fn android_apps(app: AppHandle) -> Result<Vec<tauri_plugin_unbihex_vpn::AppInfo>, String> {
@@ -1375,6 +1386,7 @@ pub fn run() {
             probe_server_cert,
             set_server_trust,
             set_subscription_trust,
+            trust_all_servers,
             select_server,
             save_settings,
             default_settings,
