@@ -20,6 +20,7 @@ let lastSample = null;
 let pingedFor = null;
 let wasVisible = false;
 let wasConnected = false;
+let pingShown = null;
 
 // Measures one server (its result arrives as a "ping-result" event and is kept in S).
 async function measurePing(id) {
@@ -36,8 +37,21 @@ async function measurePing(id) {
   }
 }
 
-// The ping of the selected server under the chip; triggers a measurement on the events above.
-function renderHomePing(sel, connected) {
+// The server whose ping is shown: the one in use while connected (with auto-select
+// it is found by the name on the chip: the template's servers first, else all;
+// no single match — none), otherwise the selected one.
+function pingServer(sel, current) {
+  if (!current) return sel;
+  const tpl = activeTemplate();
+  const pool = tpl ? store.S.data.servers.filter((x) => tpl.servers.includes(x.id)) : store.S.data.servers;
+  const hit = pool.filter((x) => x.name === current);
+  return hit.length === 1 ? hit[0] : null;
+}
+
+// The ping of that server under the chip; triggers a measurement on the events above.
+function renderHomePing(current, sel, connected) {
+  sel = pingServer(sel, current);
+  pingShown = sel ? sel.id : null;
   const el = $("#chip-ping");
   // An unsupported server shows a ping only once one was measured (TCP/ICMP).
   const show = Boolean(sel) && (!sel.unsupported || pinging.has(sel.id) || sel.ping_ms != null || Boolean(sel.ping_error));
@@ -67,7 +81,7 @@ export function renderHome() {
   // the same name as in the tray, the Android notification and the tile.
   const current = st.connected ? st.auto_server || (st.info && st.info.server_name) : null;
   $("#chip-name").textContent = current || (sel ? sel.name : "не выбран");
-  renderHomePing(sel, st.connected && !busy);
+  renderHomePing(current, sel, st.connected && !busy);
 
   if (busy) {
     $("#status-text").textContent = st.connected ? "Отключение…" : "Подключение…";
@@ -147,7 +161,7 @@ function renderHomeTemplate(set) {
 export function initHome() {
   $("#power").addEventListener("click", toggleConnect);
   $("#chip-ping").addEventListener("click", () => {
-    const sel = selectedServer();
+    const sel = store.S.data.servers.find((x) => x.id === pingShown);
     if (sel && (!sel.unsupported || !pingUsesProtocol())) measurePing(sel.id);
   });
   $$("#mode-seg button").forEach((b) =>
