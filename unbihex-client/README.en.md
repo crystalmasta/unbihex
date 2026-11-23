@@ -425,7 +425,16 @@ What it holds (fields an older file lacks get their defaults):
 
 - `subscriptions`, `servers`: subscriptions and servers. Besides its link a server has `fingerprint` (its own TLS
   fingerprint, `null`: from the settings or the link) and `auto_excluded` (left out of auto-select's "All servers");
-  a server keeps its id across subscription updates, so these fields and the templates survive them.
+  a server keeps its id across subscription updates, so these fields and the templates survive them. `trusted_sha256` is
+  the server's trusted certificate (hex SHA-256 of the leaf, `null`: none; the pin is dropped when the server's host or port
+  changes). A subscription's `trust_certs` means trust in its servers' certificates is on.
+- **Trusting a server certificate.** When a TLS (not REALITY) server's certificate is for another name or self-signed
+  ("TLS error", "certificate is not for this address"), the server's "⋯" menu offers "Trust the certificate…": the client reads
+  the certificate, shows its SHA-256 fingerprint and, once confirmed, accepts only that certificate for the server (no chain
+  or name check). A changed certificate is an error ("server certificate changed"); the pin is removed only by "Reset trusted
+  certificate". The "Trust server certificates" switch on a subscription card does the same for all eligible servers and
+  pins new ones on updates; turning it off removes the pins of its servers. A change applies from the next connection.
+  Servers with `allowInsecure`, `pcs` in the link or REALITY are not eligible.
 - `auto_templates`: auto-select templates, `[{"id", "name", "servers": [server id, …]}]`. The old `auto_marked`
   marks and the `auto_group: "marked"` mode become the template "Отмеченные" the first time the file is opened.
 - `settings`: the settings. New in 0.2.9–0.2.10:
