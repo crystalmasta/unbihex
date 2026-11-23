@@ -229,6 +229,23 @@ pub(crate) fn first_host(list: &str) -> Option<String> {
     list.split(',').map(str::trim).find(|h| !h.is_empty()).map(String::from)
 }
 
+/// A link's `pcs` (Xray's pinnedPeerCertSha256): comma-separated SHA-256 of leaf
+/// certificates, hex with optional `:`. Normalised to lowercase hex; a malformed
+/// value is an error (it would otherwise silently drop a requested restriction).
+pub(crate) fn pcs_list(v: &str) -> Result<Vec<String>> {
+    v.split(',')
+        .map(|h| h.trim().replace(':', "").to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .map(|h| {
+            if h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()) {
+                Ok(h)
+            } else {
+                Err(Error::config("link: pcs is not a SHA-256 hex"))
+            }
+        })
+        .collect()
+}
+
 /// A link's `allowInsecure` / `insecure` value.
 pub(crate) fn insecure_flag(v: &str) -> bool {
     v == "1" || v.eq_ignore_ascii_case("true")
@@ -289,6 +306,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut fingerprint = None;
     let mut net = String::new();
     let mut insecure = false;
+    let mut pcs = Vec::new();
     let mut xhttp_fields = serde_json::Map::new();
     let mut headers = WsHeaders::default();
     let mut frag = finalmask::LinkFragment::default();
@@ -302,6 +320,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
             "security" => security = v.to_ascii_lowercase(),
             "sni" | "serverName" if !v.is_empty() => sni = Some(v),
             "allowInsecure" | "insecure" => insecure = insecure_flag(&v),
+            "pcs" => pcs.extend(pcs_list(&v)?),
             "alpn" => {
                 alpn = v
                     .split(',')
@@ -368,6 +387,7 @@ fn parse_vless(rest: &str, tag: &str) -> Result<OutboundConfig> {
                 sni: tls_sni(sni, ws.as_ref(), field(transport_host_key(&net)), &server),
                 alpn,
                 pinned_sha256: Vec::new(),
+                trusted_sha256: pcs,
                 allow_insecure: insecure,
                 fingerprint,
             }),
@@ -802,6 +822,40 @@ mod tests {
                 assert!(parse_link(&link, "p").is_err(), "{link}");
             }
         }
+    }
+
+    /// `pcs` (Xray's pinnedPeerCertSha256): one or several hashes, `:` allowed; a
+    /// malformed value is an error; REALITY keeps its own check and ignores it.
+    #[test]
+    fn pcs_becomes_trusted_sha256() {
+        let h1 = "ab".repeat(32);
+        let h2 = ["CD"; 32].join(":");
+        let tls = |q: &str| {
+            let OutboundConfig::Vless(v) =
+                parse_link(&format!("vless://{UUID}@13.143.178.155:443?security=tls&{q}"), "p").unwrap()
+            else {
+                panic!()
+            };
+            v.tls.unwrap()
+        };
+        assert!(tls("type=tcp").trusted_sha256.is_empty());
+        assert_eq!(tls(&format!("pcs={h1}")).trusted_sha256, std::slice::from_ref(&h1));
+        let t = tls(&format!("pcs={h1}%2C{h2}&allowInsecure=0"));
+        assert_eq!(t.trusted_sha256, [h1.clone(), "cd".repeat(32)]);
+        assert!(!t.allow_insecure);
+        for bad in ["zz", &h1[..62], &format!("{h1}00")] {
+            assert!(
+                parse_link(&format!("vless://{UUID}@h:443?security=tls&pcs={bad}"), "p").is_err(),
+                "{bad}"
+            );
+        }
+        let l = format!(
+            "vless://{UUID}@1.2.3.4:443?security=reality&sni=www.microsoft.com&fp=chrome             &pbk=wqnRlGxDByFn7nl1Wtjcx1811Rcam91h9fkwwUadKCE&sid=6ba85179e30d4fc2&pcs={h1}"
+        );
+        let OutboundConfig::Vless(v) = parse_link(&l, "p").unwrap() else {
+            panic!()
+        };
+        assert!(v.tls.is_none() && v.reality.is_some());
     }
 
     #[test]

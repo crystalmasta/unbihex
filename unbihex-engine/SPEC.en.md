@@ -265,7 +265,10 @@ percent-decoded, the host may be IPv6 in brackets.
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:
   - `security=tls|reality|none`; `sni` / `serverName`, `alpn`, `fp` / `fingerprint` (§11.2), `allowInsecure=1` /
-    `insecure=1` (`true` too) turns certificate verification off (`allow_insecure`, §11.2); REALITY takes `pbk` /
+    `insecure=1` (`true` too) turns certificate verification off (`allow_insecure`, §11.2); `pcs` (Xray's
+    `pinnedPeerCertSha256`) is a comma list of leaf SHA-256 hashes, hex with an optional `:`: that certificate is
+    accepted without the chain and name check (`trusted_sha256`, §11.2); a value that is not a SHA-256 hex is a link
+    error; REALITY does not use `pcs`; REALITY takes `pbk` /
     `publicKey`, `sid` / `shortId`;
   - **the TLS name without `sni`**, as in v2rayN / v2rayNG: the transport's host (`host` of `ws`/`httpupgrade`/
     `xhttp`, `Host` from `headers`, gRPC's `authority`; the first of a comma list), else the server address. Xray
@@ -304,15 +307,15 @@ as Xray 26 writes it; `obfs` wins; `salamander` with `packetSize` and other mask
   `tcp`/`raw` without header camouflage, `ws`, `httpupgrade` (§11.10), `grpc` (§11.18; in v2rayN JSON `serviceName`
   is in `path`, `authority` in `host`, the `multi`/`gun` mode in `type`; the URL form has `serviceName`, `authority`,
   `mode`); `host` is the first of a comma list; without
-  `sni` the TLS name is as with VLESS (`host`, gRPC's `authority`, then the server). `allowInsecure` / `insecure` as
-  with VLESS. `headers` and `ua` as with VLESS (in v2rayN
+  `sni` the TLS name is as with VLESS (`host`, gRPC's `authority`, then the server). `allowInsecure` / `insecure` and
+  `pcs` (a `pcs` field in v2rayN JSON) as with VLESS. `headers` and `ua` as with VLESS (in v2rayN
   JSON `headers` is an object or the same JSON as a string). Refused: other transports (`h2`,
   `xhttp`, …), `headerType` other than `none`, `security` other than `tls`, an unknown cipher
   (the error names it); `scy=none`/`zero` mean `auto` (§11.9).
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, `tls` by default; `sni` / `peer` /
   `serverName`, `alpn`, `fp`, and `pbk`, `sid` for REALITY; `type=tcp|raw|ws|httpupgrade` with `path`, `host`,
   `headers` and `ua`, or `type=grpc` with `serviceName`, `authority`, `mode` (as with VLESS, over TLS or REALITY);
-  the TLS name without `sni` and `allowInsecure` / `insecure` as with VLESS. Refused: `security=none` and others,
+  the TLS name without `sni`, `allowInsecure` / `insecure` and `pcs` as with VLESS. Refused: `security=none` and others,
   other transports, `headerType` other than `none`, `flow`, an empty password.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, versions 0–2, §11.11): `hostname`, `addresses` (port 443 by
   default), `custom_sni`, `has_ipv6`, user and password, `certificate` (a DER chain), `anti_dpi` → `fragment`, `name`.
@@ -683,6 +686,21 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = domain (1 B length + bytes), 0x03 = IPv6 (16 
   leaf certificate, checked **on top of** normal verification (instead of it with `allow_insecure`). One
   `ClientConfig` per outbound; the balancer's checks (§11.16) go through the same outbound, with the same `sni`,
   ALPN, fingerprint, `allow_insecure` and fragmentation.
+- **Trusted certificate** (`trusted_sha256`, a link's `pcs`). Subscription servers are often given by IP while the
+  certificate names a domain or another address, so verification fails (Xray-core fails the same way). The user can
+  explicitly trust one certificate: `trusted_sha256` is a list of hex SHA-256 of the DER leaf (`:` and case do not
+  matter; non-hex or not 32 bytes is a config error). When the list is not empty, a leaf with such a hash is accepted
+  **without** the chain and name check and any other is an `Error::Tls` ("certificate does not match the trusted
+  fingerprint"); the handshake signature is checked as usual. With `pinned_sha256` the leaf must match both;
+  `allow_insecure` does not weaken the trust. Verification is turned off only explicitly: an empty `trusted_sha256`
+  changes nothing. REALITY (§11.3) does not use the field. Hysteria 2 (QUIC) shares `TlsClient` but does not set the
+  field (§11.7).
+- **Fingerprint probe** `unbihex_engine::probe_leaf_sha256(stream, server_name, fingerprint, alpn) -> Result<[u8; 32]>`
+  (`outbound/tls.rs`): a handshake over an already open stream (the client opens the socket the same way as for a
+  ping) with the same ClientHello and ALPN; it accepts any certificate **only inside the probe** (the handshake
+  signature is checked: the server must own the key), returns the SHA-256 of the leaf and closes the connection
+  without sending data. An internal limit is 20 s, the caller sets the rest of the timeout; cancelling it drops
+  the stream.
 - **Browser fingerprint** (`fingerprint`, a link's `fp`). rustls's ClientHello is easy to tell from a browser's
   (JA3/JA4), and DPI blocks by it. The `vendor/rustls` patch hands the encoded ClientHello over before it is hashed and
   sent; the engine rebuilds it from a browser profile (`outbound/fingerprint.rs`, a `Profile` table after the uTLS
@@ -1186,7 +1204,8 @@ Android notification. A running connection takes the new settings by a hot reloa
 - Secrets (uuid, passwords, keys, links) never reach the logs: `Secret` and config `Debug` show `***`.
 - Logs never contain traffic contents; individual connections are logged at `debug` only.
 - TLS certificate verification is turned off only explicitly: `allow_insecure` in the config or `allowInsecure=1` /
-  `insecure=1` in a VLESS, VMess or Trojan link (as in v2rayNG and Happ); Hysteria 2, NaiveProxy and TrustTunnel
+  `insecure=1` in a VLESS, VMess or Trojan link (as in v2rayNG and Happ), or by explicitly trusting a fingerprint:
+  `trusted_sha256` / `pcs` (§11.2); Hysteria 2, NaiveProxy and TrustTunnel
   still refuse them. Unencrypted VLESS only with `allow_plaintext`.
 - An open proxy (SOCKS/HTTP without `users` off loopback) is a config error.
 

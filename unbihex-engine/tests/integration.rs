@@ -225,6 +225,7 @@ async fn vless_over_tls() {
         alpn: vec![],
         pinned_sha256: vec![],
         allow_insecure: false,
+        trusted_sha256: Vec::new(),
         fingerprint: None,
     };
     let tls =
@@ -276,6 +277,7 @@ async fn vless_over_tls() {
     let pinned = TlsConfig {
         pinned_sha256: vec!["00".repeat(32)],
         allow_insecure: false,
+        trusted_sha256: Vec::new(),
         ..tls_cfg.clone()
     };
     let tls =

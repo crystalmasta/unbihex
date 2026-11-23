@@ -1068,6 +1068,12 @@ pub struct TlsConfig {
     /// Hex SHA-256 of the leaf certificate (DER). Checked in addition to normal validation.
     #[serde(default)]
     pub pinned_sha256: Vec<String>,
+    /// Hex SHA-256 of leaf certificates (DER) the user trusts explicitly (a link's `pcs`).
+    /// When set, a leaf matching one is accepted without the chain and name check and any
+    /// other is refused; the handshake signature is still checked, `pinned_sha256` still
+    /// applies on top. Ignored by REALITY.
+    #[serde(default)]
+    pub trusted_sha256: Vec<String>,
     /// Accept any certificate (a link's `allowInsecure=1` / `insecure=1`, Xray's
     /// `allowInsecure`); `pinned_sha256`, when set, is still required.
     #[serde(default)]

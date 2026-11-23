@@ -33,6 +33,7 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use inbound::tun::TunInfo;
 pub use net::{InterfaceBinding, ProtectFn};
+pub use outbound::tls::probe_leaf_sha256;
 
 use config::InboundConfig;
 use dispatcher::{Dispatcher, LocalGuard};

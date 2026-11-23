@@ -218,6 +218,7 @@ mod tests {
             alpn: Vec::new(),
             pinned_sha256: Vec::new(),
             allow_insecure: false,
+            trusted_sha256: Vec::new(),
             fingerprint: Some(fingerprint.unwrap_or("none").into()),
         };
         let client = super::super::tls::TlsClient::new(&cfg, name).unwrap();

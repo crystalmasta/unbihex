@@ -100,6 +100,7 @@ impl NaiveOutbound {
             alpn: vec!["h2".into()],
             pinned_sha256: Vec::new(),
             allow_insecure: false,
+            trusted_sha256: Vec::new(),
             // Chrome unless set: NaiveProxy is Chromium's own network stack.
             fingerprint: Some(cfg.fingerprint.clone().unwrap_or_else(|| "chrome".into())),
         };

@@ -24,6 +24,7 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
     let mut headers = WsHeaders::default();
     let mut frag = LinkFragment::default();
     let mut insecure = false;
+    let mut pcs = Vec::new();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let v = v.into_owned();
         match k.as_ref() {
@@ -58,6 +59,7 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
                 return Err(Error::Unsupported(format!("trojan flow={v}")));
             }
             "allowInsecure" | "insecure" => insecure = super::insecure_flag(&v),
+            "pcs" => pcs.extend(super::pcs_list(&v)?),
             _ => {}
         }
     }
@@ -82,6 +84,7 @@ pub(super) fn parse(rest: &str, tag: &str) -> Result<OutboundConfig> {
                 sni: super::tls_sni(sni, ws.as_ref(), host, &server),
                 alpn,
                 pinned_sha256: Vec::new(),
+                trusted_sha256: pcs,
                 allow_insecure: insecure,
                 fingerprint: fp,
             };
@@ -205,6 +208,18 @@ mod tests {
         assert_eq!(tls("sni=s.example&type=ws&host=c.example&insecure=true").sni.as_deref(), Some("s.example"));
         assert!(tls("insecure=true").allow_insecure);
         assert_eq!(tls("").sni.as_deref(), Some("13.143.178.155"));
+    }
+
+    #[test]
+    fn pcs_becomes_trusted_sha256() {
+        let h = "ab".repeat(32);
+        let OutboundConfig::Trojan(t) =
+            parse_link(&format!("trojan://pw@1.2.3.4:443?pcs={h}%2C{h}"), "p").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(t.tls.unwrap().trusted_sha256, [h.clone(), h]);
+        assert!(parse_link("trojan://pw@1.2.3.4:443?pcs=nothex", "p").is_err());
     }
 
     #[test]

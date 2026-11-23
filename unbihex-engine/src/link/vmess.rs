@@ -24,6 +24,7 @@ struct Fields {
     alpn: String,
     fp: String,
     insecure: bool,
+    pcs: Vec<String>,
     headers: WsHeaders,
     fragment: LinkFragment,
     /// gRPC `serviceName`, `authority` and `mode` of the URL form.
@@ -70,6 +71,7 @@ fn url_form(rest: &str) -> Result<(String, String, u16, Fields)> {
             "alpn" => f.alpn = v,
             "fp" | "fingerprint" => f.fp = v,
             "allowInsecure" | "insecure" => f.insecure = super::insecure_flag(&v),
+            "pcs" => f.pcs.extend(super::pcs_list(&v)?),
             _ => {}
         }
     }
@@ -123,6 +125,7 @@ fn json_form(body: &str) -> Result<(String, String, u16, Fields)> {
         fp: field("fp"),
         insecure: super::insecure_flag(&field("allowInsecure"))
             || super::insecure_flag(&field("insecure")),
+        pcs: super::pcs_list(&field("pcs"))?,
         headers,
         // `fm` as a JSON string (like the URL parameter) or the object itself.
         fragment: LinkFragment {
@@ -202,6 +205,7 @@ fn build(tag: &str, uuid: String, server: String, port: u16, f: Fields) -> Resul
                     .map(String::from)
                     .collect(),
                 pinned_sha256: Vec::new(),
+                trusted_sha256: f.pcs.clone(),
                 allow_insecure: f.insecure,
                 fingerprint: Some(f.fp.clone()).filter(|s| !s.is_empty()),
             })
@@ -315,6 +319,32 @@ mod tests {
         };
         let t = v.tls.unwrap();
         assert_eq!((t.sni.as_deref(), t.allow_insecure), (Some("a.example"), true));
+    }
+
+    #[test]
+    fn pcs_becomes_trusted_sha256() {
+        let h = "ab".repeat(32);
+        let OutboundConfig::Vmess(v) = parse_link(
+            &v2rayn(serde_json::json!({"add":"87.192.1.2","port":"443","id":UUID,"tls":"tls","pcs":h})),
+            "p",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(v.tls.unwrap().trusted_sha256, std::slice::from_ref(&h));
+        let OutboundConfig::Vmess(v) = parse_link(
+            &format!("vmess://{UUID}@87.192.1.2:443?security=tls&pcs={h}"),
+            "p",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(v.tls.unwrap().trusted_sha256, [h]);
+        assert!(parse_link(
+            &v2rayn(serde_json::json!({"add":"a","port":1,"id":UUID,"tls":"tls","pcs":"zz"})),
+            "p"
+        )
+        .is_err());
     }
 
     #[test]

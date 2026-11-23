@@ -435,6 +435,7 @@ async fn vision_and_reality_against_xray() {
         alpn: Vec::new(),
         pinned_sha256: Vec::new(),
         allow_insecure: false,
+        trusted_sha256: Vec::new(),
         fingerprint: None,
     };
     let tls = TlsClient::with_extra_roots(&tls_cfg, "vless.test", vec![outer.cert_der.clone()])
@@ -637,6 +638,7 @@ async fn xhttp_cdn_obfuscation_against_xray() {
                 alpn: protocols.clone(),
                 pinned_sha256: Vec::new(),
                 allow_insecure: false,
+                trusted_sha256: Vec::new(),
                 fingerprint: Some("none".into()),
             };
             TlsClient::with_extra_roots(&tc, "cdn.test", vec![outer.cert_der.clone()]).unwrap()
@@ -712,6 +714,7 @@ async fn xhttp_uplink_placement_against_xray() {
             alpn: vec!["h2".into()],
             pinned_sha256: Vec::new(),
             allow_insecure: false,
+            trusted_sha256: Vec::new(),
             fingerprint: Some("none".into()),
         };
         let tls =
@@ -807,6 +810,7 @@ async fn xhttp_against_xray() {
         alpn: vec!["h2".into(), "http/1.1".into()],
         pinned_sha256: Vec::new(),
         allow_insecure: false,
+        trusted_sha256: Vec::new(),
         fingerprint: None,
     };
     let alpn = tls_cfg.alpn.clone();
@@ -967,6 +971,7 @@ async fn vmess_against_xray() {
                         alpn: Vec::new(),
                         pinned_sha256: Vec::new(),
                         allow_insecure: false,
+                        trusted_sha256: Vec::new(),
                         fingerprint: None,
                     }),
                     fragment: None,
@@ -1006,6 +1011,7 @@ fn test_tls(sni: &str) -> unbihex_engine::config::TlsConfig {
         alpn: Vec::new(),
         pinned_sha256: Vec::new(),
         allow_insecure: false,
+        trusted_sha256: Vec::new(),
         fingerprint: None,
     }
 }

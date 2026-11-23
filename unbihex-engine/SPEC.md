@@ -264,7 +264,10 @@ IPv6 в скобках:
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:
   - `security=tls|reality|none`; `sni` / `serverName`, `alpn`, `fp` / `fingerprint` (§11.2), `allowInsecure=1` /
-    `insecure=1` (`true` тоже) — без проверки сертификата (`allow_insecure`, §11.2); для REALITY — `pbk` /
+    `insecure=1` (`true` тоже) — без проверки сертификата (`allow_insecure`, §11.2); `pcs` (Xray
+    `pinnedPeerCertSha256`) — SHA-256 leaf-сертификатов через запятую, hex с необязательным `:`: сертификат принимается
+    без проверки цепочки и имени (`trusted_sha256`, §11.2); значение не из SHA-256 hex — ошибка ссылки; для REALITY
+    `pcs` не используется; для REALITY — `pbk` /
     `publicKey`, `sid` / `shortId`;
   - **имя для TLS без `sni`** — как в v2rayN / v2rayNG: host транспорта (`host` у `ws`/`httpupgrade`/`xhttp`, `Host`
     из `headers`, у gRPC — `authority`; первый из списка через запятую), иначе адрес сервера. Сам Xray берёт только
@@ -297,14 +300,14 @@ IPv6 в скобках:
   `tcp`/`raw` без маскировки заголовка, `ws`, `httpupgrade` (§11.10), `grpc` (§11.18; в JSON v2rayN `serviceName` в
   `path`, `authority` в `host`, режим `multi`/`gun` в `type`; в URL-виде — `serviceName`, `authority`, `mode`); `host` — первый из списка через запятую; без
   `sni` имя для TLS — как у VLESS (`host`, у gRPC — `authority`, затем сервер). `allowInsecure` / `insecure` — как у
-  VLESS. `headers` и `ua` — как у VLESS (в JSON v2rayN
+  VLESS; `pcs` — тоже (в JSON v2rayN — поле `pcs`). `headers` и `ua` — как у VLESS (в JSON v2rayN
   `headers` — объект или та же JSON-строка). Отклоняются: другие транспорты (`h2`,
   `xhttp`, …), `headerType` кроме `none`, `security` кроме `tls`, незнакомый шифр (ошибка
   называет его); `scy=none`/`zero` — это `auto` (§11.9).
 - `trojan://<password>@<host>:<port>?…#<name>` (§11.12): `security=tls|reality`, по умолчанию `tls`; `sni` / `peer` /
   `serverName`, `alpn`, `fp`, для REALITY — `pbk`, `sid`; `type=tcp|raw|ws|httpupgrade` с `path`, `host`, `headers` и
   `ua` или `type=grpc` с `serviceName`, `authority`, `mode` (как у VLESS, поверх TLS или REALITY); имя для TLS без
-  `sni` и `allowInsecure` / `insecure` — как у VLESS. Отклоняются: `security=none` и другие, другие транспорты,
+  `sni`, `allowInsecure` / `insecure` и `pcs` — как у VLESS. Отклоняются: `security=none` и другие, другие транспорты,
   `headerType` кроме `none`, `flow`, пустой пароль.
 - `tt://?<base64url TLV>` (TrustTunnel DEEP_LINK.md, версии 0–2, §11.11): `hostname`, `addresses` (порт по умолчанию
   443), `custom_sni`, `has_ipv6`, логин и пароль, `certificate` (цепочка DER), `anti_dpi` → `fragment`, `name`.
@@ -665,6 +668,19 @@ atyp:    0x01 = IPv4 (4 B), 0x02 = домен (1 B длина + байты), 0x0
   не проверяются, подпись рукопожатия — проверяется. `pinned_sha256` — SHA-256 DER leaf-сертификата **поверх**
   обычной проверки (с `allow_insecure` — вместо неё). `ClientConfig` один на outbound; проверки балансировщика
   (§11.16) идут через тот же outbound — с теми же `sni`, ALPN, отпечатком, `allow_insecure` и фрагментацией.
+- **Доверенный сертификат** (`trusted_sha256`, `pcs` ссылки). Серверы подписки часто заданы по IP, а сертификат выдан
+  на домен или другой адрес, и проверка падает (Xray-core — так же). Пользователь может явно довериться
+  конкретному сертификату: `trusted_sha256` — список hex SHA-256 DER leaf-сертификата (`:` и регистр не важны; не
+  hex или не 32 байта — ошибка конфига). Если список не пуст, leaf с таким хешем принимается **без** проверки
+  цепочки и имени, любой другой — `Error::Tls` («certificate does not match the trusted fingerprint»); подпись
+  рукопожатия проверяется как обычно. Вместе с `pinned_sha256` leaf обязан совпасть с обоими; `allow_insecure` доверие
+  не ослабляет. Проверка отключается только явно: пустой `trusted_sha256` ничего не меняет. REALITY (§11.3) поле не
+  использует. Hysteria 2 (QUIC) тот же `TlsClient`, но поле не выставляет (§11.7).
+- **Проба отпечатка** `unbihex_engine::probe_leaf_sha256(stream, server_name, fingerprint, alpn) -> Result<[u8; 32]>`
+  (`outbound/tls.rs`): рукопожатие поверх уже открытого потока (сокет открывает клиент тем же путём, что и ping) с
+  теми же ClientHello и ALPN; принимает любой сертификат **только внутри пробы** (подпись рукопожатия проверяется:
+  сервер обязан владеть ключом), возвращает SHA-256 leaf и закрывает соединение, не отправив данных. Внутренний
+  предел — 20 с, остальной таймаут за вызывающим; при его отмене поток закрывается.
 - **Отпечаток браузера** (`fingerprint`, `fp` ссылки). ClientHello rustls легко отличить от браузерного (JA3/JA4), и
   DPI блокирует по нему. Патч `vendor/rustls` отдаёт закодированный ClientHello до хеширования и отправки; ядро
   пересобирает его по профилю браузера (`outbound/fingerprint.rs`, таблица `Profile` по пресетам uTLS, на которых
@@ -1145,7 +1161,8 @@ Android. Работающее подключение получает новые
 - Секреты (uuid, пароли, ключи, ссылки) не пишутся в логи: `Secret` и `Debug` конфигов показывают `***`.
 - В логах нет содержимого трафика; отдельные соединения пишутся только на уровне `debug`.
 - Проверка сертификата TLS отключается только явно: `allow_insecure` в конфиге или `allowInsecure=1` / `insecure=1`
-  в ссылке VLESS, VMess, Trojan (как в v2rayNG и Happ); у Hysteria 2, NaiveProxy, TrustTunnel такие параметры
+  в ссылке VLESS, VMess, Trojan (как в v2rayNG и Happ) или явное доверие отпечатку: `trusted_sha256` / `pcs`
+  (§11.2); у Hysteria 2, NaiveProxy, TrustTunnel такие параметры
   по-прежнему отклоняются. VLESS без шифрования — только с `allow_plaintext`.
 - Открытый прокси (SOCKS/HTTP без `users` не на loopback) — ошибка конфига.
 
