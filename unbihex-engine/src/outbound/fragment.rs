@@ -127,7 +127,7 @@ impl FragmentConfig {
             let len = usize::from(u16::from_be_bytes([rest[3], rest[4]]));
             let Some(body) = rest.get(5..5 + len) else { break };
             let header = &rest[..3];
-            if rest[0] != 0x16 {
+            if rest[0] != 0x16 || body.is_empty() {
                 out.push(rest[..5 + len].to_vec());
             } else {
                 // With `sni_split` the piece that would cross the middle of the
@@ -578,7 +578,6 @@ mod tests {
 
     /// An empty handshake record is valid TLS framing and must not vanish.
     #[test]
-    #[ignore = "bug: split_records drops zero-length handshake records (5 header bytes lost)"]
     fn zero_length_handshake_record_is_kept() {
         let flight = [0x16, 0x03, 0x01, 0x00, 0x00];
         let parts = frag("10-20", "0", false).split_records(&flight).unwrap();
