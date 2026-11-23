@@ -141,7 +141,11 @@ pub(super) fn from_finalmask(v: &Value, tag: &str) -> Result<Option<FragmentConf
         // Xray has no `interval` here (panels copy it from the old freedom
         // fragment) and ignores it: no pause, the records go out in one write.
         if s.get("interval").is_some() && s.get("delay").is_none() && s.get("delays").is_none() {
-            tracing::debug!("{tag}: finalmask fragment interval is not an Xray field, ignored");
+            // Once per process: every link parse (each ping) would repeat it.
+            static NOTED: std::sync::Once = std::sync::Once::new();
+            NOTED.call_once(|| {
+                tracing::debug!("{tag}: finalmask fragment interval is not an Xray field, ignored")
+            });
         }
         let f = FragmentConfig {
             length: first_range(s, "length", "lengths", tag).unwrap_or_else(|| "0".into()),
