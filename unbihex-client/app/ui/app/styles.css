@@ -326,10 +326,12 @@ label.check input { width: 18px; height: 18px; margin: 1px 0 0; flex: none; acce
   font: inherit; font-size: 13px; color: var(--text);
 }
 
-/* Logs */
+/* Logs: the view fills .main, so only .logs scrolls and the head stays put */
+#view-logs.active { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+#view-logs .view-head { flex: none; }
 .logs {
   background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow);
-  padding: 14px; margin: 0; min-height: 300px; max-height: calc(100vh - 160px); overflow: auto;
+  padding: 14px; margin: 0; flex: 1 1 auto; min-height: 200px; overflow: auto;
   font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; word-break: break-all;
 }
 
