@@ -128,6 +128,22 @@ fn force_fingerprint(cfg: &mut OutboundConfig, fp: &str) {
     }
 }
 
+/// Adds the user's trusted leaf hashes to a link's TLS (REALITY ignores them).
+fn add_trusted_sha256(cfg: &mut OutboundConfig, hashes: &[String]) {
+    if hashes.is_empty() {
+        return;
+    }
+    let tls = match cfg {
+        OutboundConfig::Vless(v) => v.tls.as_mut(),
+        OutboundConfig::Vmess(v) => v.tls.as_mut(),
+        OutboundConfig::Trojan(t) => t.tls.as_mut(),
+        _ => None,
+    };
+    if let Some(t) = tls {
+        t.trusted_sha256.extend(hashes.iter().cloned());
+    }
+}
+
 /// Shared services every outbound needs.
 #[derive(Clone)]
 pub struct OutboundContext {
@@ -291,6 +307,7 @@ pub async fn build_outbound(
                 fingerprint::Fingerprint::from_name(Some(fp))?;
                 force_fingerprint(&mut parsed, fp);
             }
+            add_trusted_sha256(&mut parsed, &c.trusted_sha256);
             apply_link_settings(&mut parsed, c);
             return Box::pin(build_outbound(&parsed, ctx)).await;
         }
@@ -325,6 +342,23 @@ fn apply_link_settings(parsed: &mut OutboundConfig, c: &crate::config::LinkConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The client's trusted hash joins a link's TLS; REALITY and plain links ignore it.
+    #[test]
+    fn trusted_hashes_join_the_links_tls_only() {
+        let u = "b831381d-6324-4d53-ad4f-8cda48b30811";
+        let h = vec!["ab".repeat(32)];
+        let tls_of = |link: &str| {
+            let mut c = crate::link::parse_link(link, "p").unwrap();
+            add_trusted_sha256(&mut c, &h);
+            match c {
+                OutboundConfig::Vless(v) => v.tls.map(|t| t.trusted_sha256),
+                _ => None,
+            }
+        };
+        assert_eq!(tls_of(&format!("vless://{u}@h.com:443?security=tls")), Some(h.clone()));
+        assert_eq!(tls_of(&format!("vless://{u}@h.com:443?security=none")), None);
+    }
 
     /// The client's global fragmentation reaches every TLS/REALITY link without its
     /// own; a subscription's `fm` wins; plain VMess gets none.

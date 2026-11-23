@@ -256,10 +256,10 @@ impl Instance {
 
 ### 5.4 Share-ссылки (`type: "link"`)
 
-Outbound `{"type": "link", "tag", "url", "allow_plaintext"?, "fragment"?, "mux"?, "fingerprint"?}` разбирает ссылку при
+Outbound `{"type": "link", "tag", "url", "allow_plaintext"?, "fragment"?, "mux"?, "fingerprint"?, "trusted_sha256"?}` разбирает ссылку при
 сборке outbound-а; `allow_plaintext` и `fragment` переносятся в VLESS, `fragment` — ещё в Trojan, VMess с TLS и
 TrustTunnel без `anti_dpi`. `fingerprint` (имя как у `fp`, §11.2; неизвестное — ошибка) заменяет отпечаток ссылки у
-VLESS, VMess, Trojan (TLS и REALITY), TrustTunnel и NaiveProxy — так клиент задаёт отпечаток для всех серверов или одного. Разбор (`link.rs`), все параметры percent-decoded, host может быть
+VLESS, VMess, Trojan (TLS и REALITY), TrustTunnel и NaiveProxy — так клиент задаёт отпечаток для всех серверов или одного. `trusted_sha256` (hex SHA-256 листьев, §11.2) добавляется к доверенным листьям TLS ссылки VLESS, VMess и Trojan (не REALITY) — так клиент закрепляет сертификат сервера. Разбор (`link.rs`), все параметры percent-decoded, host может быть
 IPv6 в скобках:
 
 - `vless://<uuid>@<host>:<port>?…#<name>`:

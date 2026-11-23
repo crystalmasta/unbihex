@@ -1143,6 +1143,10 @@ pub struct LinkConfig {
     /// NaiveProxy; `None` keeps the link's.
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// Hex SHA-256 of leaf certificates the user trusts (see [`TlsConfig::trusted_sha256`]),
+    /// added to those of a `vless://`, `vmess://` or `trojan://` link's TLS (not REALITY).
+    #[serde(default)]
+    pub trusted_sha256: Vec<String>,
 }
 
 /// Routing: ordered rules and a fallback outbound.
@@ -1634,6 +1638,7 @@ impl Config {
                     fragment: None,
                     mux: None,
                     fingerprint: None,
+                    trusted_sha256: Vec::new(),
                 }),
                 OutboundConfig::Direct(TagOnly {
                     tag: "direct".into(),
@@ -1892,6 +1897,17 @@ mod tests {
         let off: LinkConfig =
             serde_json::from_str(r#"{"tag":"proxy","url":"vless://x@h:1","mux":false}"#).unwrap();
         assert_eq!(off.mux, Some(false));
+    }
+
+    #[test]
+    fn a_link_takes_trusted_hashes() {
+        let l: LinkConfig = serde_json::from_str(
+            r#"{"tag":"proxy","url":"vless://x@h:1","trusted_sha256":["ab"]}"#,
+        )
+        .unwrap();
+        assert_eq!(l.trusted_sha256, ["ab"]);
+        let none: LinkConfig = serde_json::from_str(r#"{"tag":"proxy","url":"vless://x@h:1"}"#).unwrap();
+        assert!(none.trusted_sha256.is_empty());
     }
 
     #[test]
