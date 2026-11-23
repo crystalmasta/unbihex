@@ -1,9 +1,10 @@
 // "Главная": the power button, traffic, mode, routing, auto-select template, quota.
 // Its markup stays in index.html: it is on screen before the modules load.
 import { $, $$, esc, fmtBytes, fmtDuration } from "../../shared/lib/index.js";
-import { store } from "../../shared/model/index.js";
-import { fillSelect, setHtml } from "../../shared/ui/index.js";
-import { selectedServer } from "../../entities/server/index.js";
+import { pingServers } from "../../shared/api/index.js";
+import { refresh, render, store } from "../../shared/model/index.js";
+import { fillSelect, setHtml, toast } from "../../shared/ui/index.js";
+import { pingHtml, pingUsesProtocol, pinging, selectedServer } from "../../entities/server/index.js";
 import { MODE_HINTS, ROUTING_HINTS } from "../../entities/settings/index.js";
 import { quotaHtml } from "../../entities/subscription/index.js";
 import { activeTemplate, templates } from "../../entities/template/index.js";
@@ -14,6 +15,42 @@ import { allowStoreApps, undoStoreApps } from "../../features/store-apps/index.j
 
 // The previous traffic counters, for the speed.
 let lastSample = null;
+// For the ping of the current server: one measurement per event (home opened,
+// server changed, connected) — no timer of its own.
+let pingedFor = null;
+let wasVisible = false;
+let wasConnected = false;
+
+// Measures one server (its result arrives as a "ping-result" event and is kept in S).
+async function measurePing(id) {
+  if (pinging.has(id)) return;
+  pinging.add(id);
+  render("home");
+  try {
+    await pingServers([id]);
+  } catch (e) {
+    toast(String(e), "error");
+  } finally {
+    pinging.delete(id);
+    await refresh();
+  }
+}
+
+// The ping of the selected server under the chip; triggers a measurement on the events above.
+function renderHomePing(sel, connected) {
+  const el = $("#chip-ping");
+  // An unsupported server shows a ping only once one was measured (TCP/ICMP).
+  const show = Boolean(sel) && (!sel.unsupported || pinging.has(sel.id) || sel.ping_ms != null || Boolean(sel.ping_error));
+  el.hidden = !show;
+  if (show) setHtml(el, pingHtml(sel));
+  const visible = $("#view-home").classList.contains("active");
+  const fire = Boolean(sel) && visible && (!wasVisible || sel.id !== pingedFor || (connected && !wasConnected));
+  wasVisible = visible;
+  wasConnected = connected;
+  if (!fire) return;
+  pingedFor = sel.id;
+  if (!sel.unsupported || !pingUsesProtocol()) measurePing(sel.id);
+}
 
 export function renderHome() {
   const S = store.S;
@@ -30,6 +67,7 @@ export function renderHome() {
   // the same name as in the tray, the Android notification and the tile.
   const current = st.connected ? st.auto_server || (st.info && st.info.server_name) : null;
   $("#chip-name").textContent = current || (sel ? sel.name : "не выбран");
+  renderHomePing(sel, st.connected && !busy);
 
   if (busy) {
     $("#status-text").textContent = st.connected ? "Отключение…" : "Подключение…";
@@ -108,6 +146,10 @@ function renderHomeTemplate(set) {
 
 export function initHome() {
   $("#power").addEventListener("click", toggleConnect);
+  $("#chip-ping").addEventListener("click", () => {
+    const sel = selectedServer();
+    if (sel && (!sel.unsupported || !pingUsesProtocol())) measurePing(sel.id);
+  });
   $$("#mode-seg button").forEach((b) =>
     b.addEventListener("click", () => {
       if (store.S.data.settings.mode !== b.dataset.mode) updateSettings({ mode: b.dataset.mode });

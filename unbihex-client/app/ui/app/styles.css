@@ -167,6 +167,8 @@ select option { background: var(--surface); color: var(--text); }
 .server-chip:hover { border-color: var(--accent); }
 .chip-label { color: var(--muted); font-size: 12px; }
 .chip-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-ping { margin-top: 6px; border: 0; background: none; padding: 4px 10px; cursor: pointer; }
+.chip-ping .ping { min-width: 0; text-align: center; }
 .chev { color: var(--muted); }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; width: 100%; max-width: 420px; margin-top: 14px; }
 .stat { background: var(--surface-2); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; }
