@@ -37,11 +37,11 @@ async function measurePing(id) {
   }
 }
 
-// The server whose ping is shown: the one in use while connected (with auto-select
-// it is found by the name on the chip: the template's servers first, else all;
-// no single match — none), otherwise the selected one.
-function pingServer(sel, current) {
-  if (!current) return sel;
+// The server whose ping is shown: with auto-select running, the one in use (found by
+// the name on the chip: the template's servers first, else all; no single match —
+// none); otherwise the selected one.
+function pingServer(sel, current, auto) {
+  if (!auto || !current) return sel;
   const tpl = activeTemplate();
   const pool = tpl ? store.S.data.servers.filter((x) => tpl.servers.includes(x.id)) : store.S.data.servers;
   const hit = pool.filter((x) => x.name === current);
@@ -49,8 +49,8 @@ function pingServer(sel, current) {
 }
 
 // The ping of that server under the chip; triggers a measurement on the events above.
-function renderHomePing(current, sel, connected) {
-  sel = pingServer(sel, current);
+function renderHomePing(current, auto, sel, connected) {
+  sel = pingServer(sel, current, auto);
   pingShown = sel ? sel.id : null;
   const el = $("#chip-ping");
   // An unsupported server shows a ping only once one was measured (TCP/ICMP).
@@ -81,7 +81,7 @@ export function renderHome() {
   // the same name as in the tray, the Android notification and the tile.
   const current = st.connected ? st.auto_server || (st.info && st.info.server_name) : null;
   $("#chip-name").textContent = current || (sel ? sel.name : "не выбран");
-  renderHomePing(current, sel, st.connected && !busy);
+  renderHomePing(current, st.connected && st.auto_server, sel, st.connected && !busy);
 
   if (busy) {
     $("#status-text").textContent = st.connected ? "Отключение…" : "Подключение…";
