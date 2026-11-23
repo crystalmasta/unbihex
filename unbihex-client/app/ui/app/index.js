@@ -5,6 +5,7 @@ import { on, startDataClicks } from "../shared/lib/index.js";
 import { onRender, refresh, store } from "../shared/model/index.js";
 import { toast } from "../shared/ui/index.js";
 import { mountAddInput } from "../features/add-input/index.js";
+import { mountTrustCert } from "../features/trust-cert/index.js";
 import { mountFingerprint } from "../features/fingerprint/index.js";
 import { initOpenLinks } from "../features/open-link/index.js";
 import { mountSubscriptionEdit } from "../features/subscription-edit/index.js";
@@ -31,6 +32,7 @@ mountAddInput();
 mountSubscriptionEdit();
 mountServerMenu();
 mountFingerprint();
+mountTrustCert();
 mountTemplateEdit();
 mountAppsList({ readSettings: settings.readSettings });
 

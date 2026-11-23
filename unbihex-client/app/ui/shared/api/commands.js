@@ -19,6 +19,10 @@ export const removeServer = (id) => invoke("remove_server", { id });
 export const setServerAuto = (id, excluded) => invoke("set_server_auto", { id, excluded });
 export const setServerFingerprint = (id, fingerprint) => invoke("set_server_fingerprint", { id, fingerprint });
 
+export const probeServerCert = (id) => invoke("probe_server_cert", { id });
+export const setServerTrust = (id, sha256) => invoke("set_server_trust", { id, sha256 });
+export const setSubscriptionTrust = (subId, on) => invoke("set_subscription_trust", { subId, on });
+
 // Auto-select templates
 export const createTemplate = (name, servers) => invoke("create_template", { name, servers });
 export const updateTemplate = (id, name, servers) => invoke("update_template", { id, name, servers });

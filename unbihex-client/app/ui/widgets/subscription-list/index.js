@@ -3,6 +3,7 @@ import { $, esc, onDataClick } from "../../shared/lib/index.js";
 import { store } from "../../shared/model/index.js";
 import { maskUrl, quotaHtml, serversOf } from "../../entities/subscription/index.js";
 import { openSubDialog } from "../../features/subscription-edit/index.js";
+import { toggleSubscriptionTrust } from "../../features/trust-cert/index.js";
 import { updateSubscription } from "../../features/subscription-update/index.js";
 
 export function renderSubscriptionList() {
@@ -27,6 +28,7 @@ export function renderSubscriptionList() {
         </div>
         <div class="sub-url">${esc(maskUrl(sub.url))}</div>
         ${quotaHtml(sub)}
+        <label class="check sub-trust"><input type="checkbox" data-trust-sub="${sub.id}"${sub.trust_certs ? " checked" : ""} /> <span>Доверять сертификатам серверов</span></label>
         ${sub.last_error ? `<div class="sub-error">${esc(sub.last_error)}</div>` : ""}
         ${links.length ? `<div class="sub-links">${links.join("")}</div>` : ""}
       </div>`;
@@ -36,5 +38,10 @@ export function renderSubscriptionList() {
 
 export function initSubscriptionList() {
   onDataClick("data-update-sub", (t) => updateSubscription(t, t.dataset.updateSub));
+  onDataClick("data-trust-sub", (t, e) => {
+    // The switch moves only after the answer: the list is redrawn from the state.
+    e.preventDefault();
+    toggleSubscriptionTrust(t.dataset.trustSub);
+  });
   onDataClick("data-edit-sub", (t) => openSubDialog(t.dataset.editSub));
 }

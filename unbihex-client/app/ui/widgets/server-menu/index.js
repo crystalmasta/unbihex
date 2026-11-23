@@ -5,11 +5,14 @@ import { copyText, mountDialog } from "../../shared/ui/index.js";
 import { findServer, hasFp } from "../../entities/server/index.js";
 import { activeTemplate, autoTitle, templates } from "../../entities/template/index.js";
 import { toggleAuto, toggleTemplateServer } from "../../features/auto-select/index.js";
+import { openTrustDialog, resetTrust } from "../../features/trust-cert/index.js";
 import { openFpDialog } from "../../features/fingerprint/index.js";
 import { removeServer } from "../../features/remove-server/index.js";
 import { selectServer } from "../../features/select-server/index.js";
 import { openTemplateDialog } from "../../features/template-edit/index.js";
 import { serverMenuMarkup } from "./markup.js";
+
+const CERT_NAME_ERROR = "сертификат не для этого адреса";
 
 let menuServer = null;
 
@@ -27,6 +30,9 @@ export function openServerMenu(id) {
   $("#srv-select").hidden = !!s.unsupported || s.id === S.data.selected;
   $("#srv-fp").hidden = !hasFp(s);
   $("#srv-fp").textContent = `Отпечаток TLS: ${s.fingerprint || "как в настройках"}…`;
+  $("#srv-trust").hidden = !s.can_trust || !!s.trusted_sha256;
+  $("#srv-untrust").hidden = !s.trusted_sha256;
+  $("#srv-cert-hint").hidden = !(s.can_trust && !s.trusted_sha256 && s.ping_error === CERT_NAME_ERROR);
   const auto = S.data.settings.auto_select !== "off" && !s.unsupported && !activeTemplate();
   $("#srv-auto").hidden = !auto;
   $("#srv-auto").textContent = auto ? autoTitle(s) : "";
@@ -58,6 +64,8 @@ export function mountServerMenu() {
   });
   $("#srv-select").addEventListener("click", () => serverMenuAction(selectServer));
   $("#srv-fp").addEventListener("click", () => serverMenuAction(openFpDialog));
+  $("#srv-trust").addEventListener("click", () => serverMenuAction(openTrustDialog));
+  $("#srv-untrust").addEventListener("click", () => serverMenuAction(resetTrust));
   $("#srv-auto").addEventListener("click", () => serverMenuAction(toggleAuto));
   $("#srv-tpls").addEventListener("click", (e) => {
     const b = e.target.closest("button");

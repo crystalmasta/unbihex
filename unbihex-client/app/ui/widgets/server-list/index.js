@@ -19,6 +19,7 @@ function serverHtml(s) {
   // An unsupported server shows a ping only once one was measured (TCP/ICMP).
   if (!s.unsupported || pinging.has(s.id) || s.ping_ms != null || s.ping_error) meta.push(pingHtml(s));
   if (s.fingerprint && hasFp(s)) meta.push(`<span class="s-fp">отпечаток ${esc(s.fingerprint)}</span>`);
+  if (s.trusted_sha256) meta.push('<span class="s-fp" title="Сертификат сервера доверен: принимается только он">сертификат доверен</span>');
   if (s.unsupported) meta.push(`<span class="reason">${esc(s.unsupported)}</span>`);
   const off = autoOff(s);
   return `<div class="server${sel ? " selected" : ""}${s.unsupported ? " unsupported" : ""}${off ? " auto-off" : ""}" data-server="${s.id}"${sel ? ' aria-current="true"' : ""}>

@@ -259,6 +259,8 @@ label.panel-title { display: block; color: var(--text); font-size: inherit; }
 .sub-top .title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub-url { color: var(--muted); font-size: 12px; font-family: ui-monospace, Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub-error { color: var(--bad); font-size: 13px; }
+.sub-trust { font-size: 13px; }
+.fp-hash { display: block; padding: 8px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; user-select: all; }
 .sub-links { display: flex; gap: 12px; font-size: 13px; }
 .sub-links a { color: var(--accent); cursor: pointer; text-decoration: none; }
 
