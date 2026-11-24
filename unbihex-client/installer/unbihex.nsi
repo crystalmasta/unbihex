@@ -4,7 +4,7 @@ SetCompressor /SOLID lzma
 ManifestDPIAware true
 
 !define APPNAME "Unbihex"
-!define VERSION "0.2.11"
+!define VERSION "0.2.12"
 !define PUBLISHER "Crystalmasta"
 !define COPYRIGHT "© 2026 Crystalmasta (github.com/crystalmasta)"
 !define HOMEPAGE "https://github.com/crystalmasta"

@@ -179,6 +179,17 @@ The full plan is in `ROADMAP.en.md`. This file lists what is done and what comes
   any subscriptions; the marks survive subscription updates.
 - Links and JSON subscriptions: `fm` (Xray's finalmask) fragments the TLS ClientHello, as in Xray 26.10.31.
 
+## 24.11 — client 0.2.12, engine 0.1.10 (pre-release)
+- Trusting a server certificate: for TLS servers on a bare IP without `sni` (certificate issued for another name) — per server from its menu, for a whole subscription with the switch on its card or with "Trust all" on the Servers screen. The leaf SHA-256 is pinned; a changed certificate is an error. `pcs` in links (as in Xray).
+- Ping of the server in use on the home screen (under auto-select, the one the balancer picked).
+- Operator whitelists (#57): detection and switching of template and routing.
+- Global ClientHello fragmentation with presets and the cut inside the SNI; property tests, a lost empty handshake record fixed.
+- Developer mode: connection journal and reports.
+- Updates from inside the app (#54); save or share the log with secrets masked.
+- Engine: SOCKS5 UDP ASSOCIATE on socks/mixed, SNI/Host sniffing for bare IPs and SNI from QUIC Initial on 443 in TUN.
+- UI: the log toolbar stays in place while scrolling (#72), "Select all" in the template editor (#76).
+- Android: new signing key — does not install over 0.2.11, uninstall the old version first.
+
 ## 09.11 — client 0.2.11, engine 0.1.9 (unchanged)
 - The UI is laid out by Feature-Sliced Design on native ES modules, no bundler: 92 modules in the app / pages / widgets / features / entities / shared layers, backend calls only in `shared/api`. Rules in `app/ui/ARCHITECTURE.md`, import check `node app/ui/tools/check-imports.mjs`. Behaviour and look are unchanged.
 - "О программе" opens the General tab, with a "Поддержать автора" (support the author) link.
