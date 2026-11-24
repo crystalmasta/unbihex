@@ -4,6 +4,8 @@
 mod android_vpn;
 mod devmode;
 mod logs;
+#[cfg(windows)]
+mod single_instance;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -1306,6 +1308,23 @@ fn vpn_connected(app: &AppHandle) -> bool {
 /// App entry point (desktop `main` and the mobile entry).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    if let Err(e) = single_instance::wait_for_restart_parent() {
+        eprintln!("failed to wait for restart: {e}");
+        return;
+    }
+    #[cfg(windows)]
+    let mut instance = match single_instance::Instance::acquire(
+        !std::env::args().any(|arg| arg == "--autostart"),
+    ) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("failed to acquire application instance: {e}");
+            return;
+        }
+    };
+
     let (log_buffer, level) = logs::init("info");
 
     let builder = tauri::Builder::default()
@@ -1432,6 +1451,18 @@ pub fn run() {
             return;
         }
     };
+    #[cfg(windows)]
+    {
+        let handle = app.handle().clone();
+        if let Err(e) = instance.listen(move || {
+            let app = handle.clone();
+            if let Err(e) = handle.run_on_main_thread(move || show_window(&app)) {
+                tracing::warn!("instance activation: {e}");
+            }
+        }) {
+            tracing::error!("instance listener: {e}");
+        }
+    }
     app.run(|app, event| match event {
         // Closing the window keeps the VPN running in the tray. The window is
         // destroyed, not hidden: WebView2 and its processes (~200 MB) go away and

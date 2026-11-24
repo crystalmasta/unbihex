@@ -5838,6 +5838,7 @@ dependencies = [
  "tracing-subscriber",
  "unbihex-client-core",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
