@@ -794,6 +794,9 @@ accepted and unused.
 - In `stream-one` and `stream-up` writes go straight into the HTTP/2 request body and a separate task reads the
   download. A stream dropped without shutdown (a torn-down relay) resets its request (`RST_STREAM CANCEL`), the
   download stops and the session frees its connection.
+- In `packet-up`, a refused uplink `POST` (a connection error or a non-2xx status) ends the session at once: the
+  download request is reset (`RST_STREAM CANCEL` on HTTP/2, closed on HTTP/1.1), the stream reads EOF and the
+  connection is freed, without waiting for the next write (#67).
 - `path` (may carry a query), `host` (the TLS/REALITY name by default, then the server address), `headers` (no
   `Host`), browser-like headers, `no_grpc_header` (no `Content-Type: application/grpc` on streaming uploads),
   `sc_max_each_post_bytes` (1,000,000 by default) and `sc_min_posts_interval_ms` (30) for `packet-up`.
