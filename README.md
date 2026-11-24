@@ -39,7 +39,7 @@ Windows SmartScreen может предупредить о неизвестно�
 
 ## Участники
 
-Спасибо всем, чьи изменения вошли в проект:
+Спасибо всем, кто помог проекту кодом, идеями и сообщениями об ошибках:
 
 - [Павел Шахмин (pshakhmin)](https://github.com/pshakhmin) — производительность (окна TCP в TUN, буферы сокетов,
   REALITY; #18, #20, #25), отпечатки TLS (#41), пул соединений XHTTP (#42), MTU 16 КиБ для TUN на Linux (#45),
@@ -48,9 +48,22 @@ Windows SmartScreen может предупредить о неизвестно�
   VMess (#37), TrustTunnel (#38);
 - [emiliya-central-uni](https://github.com/emiliya-central-uni) — разбор hosts-списков (#31);
 - [Finorion](https://github.com/Finorion) — значки трея (#43), плашка сохранения настроек (#58);
-- [akurach](https://github.com/akurach) — сборка для macOS (#50), плитка быстрых настроек Android (#51);
-- [fenIXCoRp30](https://github.com/fenIXCoRp30) — идеи и сообщения об ошибках (#14, #15, #16, #27, #28, #30, #48, #57),
-  проверка тестовых сборок.
+- [akurach](https://github.com/akurach) — сборка для macOS (#50), плитка быстрых настроек Android (#51), идеи: VMess (#5),
+  Trojan (#6), отключение серверов подписки (#7), автовыбор сервера (#9);
+- [fenIXCoRp30](https://github.com/fenIXCoRp30) — идеи и сообщения об ошибках (#14, #15, #16, #27, #28, #30, #48, #57,
+  #72, #76), проверка тестовых сборок;
+- [steppovver](https://github.com/steppovver) — идеи: сборка для Linux ARM (#26), автозапуск в Windows (#39),
+  раздельное туннелирование на Android (#40), шифрованный DNS (#44); PR #63, #65, #71;
+- [Lezvix](https://github.com/Lezvix) — конфигурация в JSON (#12), PR #10, #11;
+- [poikilometis](https://github.com/poikilometis) — исправления клиента и автообновление (PR #75);
+- [kreeplambor](https://github.com/kreeplambor) — фоновая работа и уведомления на Android (#21, #22), обновление
+  из приложения (#54);
+- [Relax5180](https://github.com/Relax5180) — балансировщики (#46), имя устройства для провайдера (#47), ошибка правил
+  на Windows (#2);
+- [Bfirex](https://github.com/Bfirex) — приоритет правил (#24), именованные профили маршрутизации (#56);
+- [yujin1st](https://github.com/yujin1st) (#3), [bondarenko43391-png](https://github.com/bondarenko43391-png) (#8),
+  [Pepsicola96](https://github.com/Pepsicola96) (#13), [ikingmakers](https://github.com/ikingmakers) (#35) — идеи
+  и сообщения об ошибках.
 
 ## Автор и лицензия
 

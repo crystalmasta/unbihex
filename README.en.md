@@ -40,7 +40,7 @@ the engine design in [`unbihex-engine/SPEC.en.md`](unbihex-engine/SPEC.en.md), t
 
 ## Contributors
 
-Thanks to everyone whose changes are in the project:
+Thanks to everyone who helped the project with code, ideas and bug reports:
 
 - [Pavel Shakhmin (pshakhmin)](https://github.com/pshakhmin) — performance (TCP windows in TUN, socket buffers,
   REALITY; #18, #20, #25), TLS fingerprints (#41), the XHTTP connection pool (#42), the 16 KiB TUN MTU on Linux
@@ -49,9 +49,22 @@ Thanks to everyone whose changes are in the project:
   Android (#36), VMess (#37), TrustTunnel (#38);
 - [emiliya-central-uni](https://github.com/emiliya-central-uni) — the hosts list parser (#31);
 - [Finorion](https://github.com/Finorion) — tray icons (#43), the settings save bar (#58);
-- [akurach](https://github.com/akurach) — the macOS build (#50), the Android quick settings tile (#51);
-- [fenIXCoRp30](https://github.com/fenIXCoRp30) — ideas and bug reports (#14, #15, #16, #27, #28, #30, #48, #57),
-  testing of test builds.
+- [akurach](https://github.com/akurach) — the macOS build (#50), the Android quick settings tile (#51), ideas: VMess (#5),
+  Trojan (#6), disabling subscription servers (#7), automatic server selection (#9);
+- [fenIXCoRp30](https://github.com/fenIXCoRp30) — ideas and bug reports (#14, #15, #16, #27, #28, #30, #48, #57, #72,
+  #76), testing of test builds;
+- [steppovver](https://github.com/steppovver) — ideas: the Linux ARM build (#26), Windows autostart (#39), per-app
+  split tunneling on Android (#40), encrypted DNS (#44); PRs #63, #65, #71;
+- [Lezvix](https://github.com/Lezvix) — JSON configuration (#12), PRs #10, #11;
+- [poikilometis](https://github.com/poikilometis) — client fixes and auto-update (PR #75);
+- [kreeplambor](https://github.com/kreeplambor) — background work and notifications on Android (#21, #22), updates
+  from inside the app (#54);
+- [Relax5180](https://github.com/Relax5180) — balancers (#46), the device name for the provider (#47), the Windows
+  rules bug (#2);
+- [Bfirex](https://github.com/Bfirex) — rule priority (#24), named routing profiles (#56);
+- [yujin1st](https://github.com/yujin1st) (#3), [bondarenko43391-png](https://github.com/bondarenko43391-png) (#8),
+  [Pepsicola96](https://github.com/Pepsicola96) (#13), [ikingmakers](https://github.com/ikingmakers) (#35) — ideas
+  and bug reports.
 
 ## Author and license
 
