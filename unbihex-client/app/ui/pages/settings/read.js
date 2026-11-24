@@ -42,6 +42,7 @@ export function formSettings() {
     device_name: f.device_name.value.trim(),
     auto_start: f.auto_start.checked,
     auto_start_admin: f.auto_start_admin.checked,
+    auto_start_show_window: f.auto_start_show_window.checked,
     auto_connect: f.auto_connect.checked,
     check_updates: f.check_updates.checked,
     android_notification: f.android_notification.checked,
