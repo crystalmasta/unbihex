@@ -981,9 +981,30 @@ impl XhttpClient {
             .map_err(h2_err)?;
         let me = self.clone();
         tokio::spawn(async move {
-            let up = me.upload_packets_h2(&lease, &session, r);
+            // A refused POST has to end the session even when the server holds
+            // the GET open: the download waits for a response that never comes.
+            let (fail_tx, fail_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+            // Keep a sender alive: the end of the upload is not a failure, and
+            // the download must not take the closed channel for one.
+            let _keep_alive = fail_tx.clone();
+            let up = async {
+                let res = me.upload_packets_h2(&lease, &session, r).await;
+                if let Err(e) = &res {
+                    let _ = fail_tx.send(Some(e.to_string()));
+                }
+                res
+            };
+            let down = async move {
+                let mut fail_rx = fail_rx;
+                tokio::select! {
+                    d = download_h2(resp, w) => d,
+                    // Dropping the response resets the GET, and the lease goes
+                    // with this task; the caller's read side ends right here.
+                    _ = fail_rx.changed() => Ok(()),
+                }
+            };
             tokio::select! {
-                (u, d) = async { tokio::join!(up, download_h2(resp, w)) } => log_end(u, d),
+                (u, d) = async { tokio::join!(up, down) } => log_end(u, d),
                 // The caller dropped the session: dropping the response resets
                 // the GET, and the lease goes with this task.
                 _ = cancelled => {}
@@ -1031,12 +1052,21 @@ impl XhttpClient {
         let mut buf = vec![0u8; max.min(1 << 20)];
         let interval = self.cfg.post_interval();
         let in_metadata = matches!(self.cfg.uplink_placement(), "header" | "cookie");
-        let failed = Arc::new(AtomicBool::new(false));
+        // A failed POST has to end the session even while nothing is written:
+        // the server may leave the GET open forever, and the next read would
+        // never return to notice a flag.
+        let (fail_tx, mut fail_rx) = tokio::sync::watch::channel::<Option<String>>(None);
         let mut last = None;
         let mut seq = 0u64;
         loop {
-            let n = self.read_batch(&mut r, &mut buf, &mut last, interval).await?;
-            if n == 0 || failed.load(Ordering::Relaxed) {
+            let n = tokio::select! {
+                n = self.read_batch(&mut r, &mut buf, &mut last, interval) => n?,
+                _ = fail_rx.changed() => {
+                    let reason = fail_rx.borrow_and_update().clone().unwrap_or_default();
+                    return Err(Error::protocol(format!("xhttp upload: {reason}")));
+                }
+            };
+            if n == 0 {
                 return Ok(());
             }
             let req = if in_metadata {
@@ -1066,7 +1096,7 @@ impl XhttpClient {
             if !in_metadata {
                 send_data(&mut tx, Bytes::copy_from_slice(&buf[..n]), true).await?;
             }
-            let failed = failed.clone();
+            let fail_tx = fail_tx.clone();
             tokio::spawn(async move {
                 match resp.await {
                     Ok(r) if r.status() == http::StatusCode::OK => {
@@ -1075,11 +1105,11 @@ impl XhttpClient {
                     }
                     Ok(r) => {
                         tracing::info!("xhttp upload: status {}", r.status());
-                        failed.store(true, Ordering::Relaxed);
+                        let _ = fail_tx.send(Some(format!("server answered {}", r.status())));
                     }
                     Err(e) => {
                         tracing::info!("xhttp upload failed: {e}");
-                        failed.store(true, Ordering::Relaxed);
+                        let _ = fail_tx.send(Some(e.to_string()));
                     }
                 }
             });
@@ -1113,16 +1143,34 @@ impl XhttpClient {
         let (r, mut w) = tokio::io::split(inner);
         let me = self.clone();
         tokio::spawn(async move {
-            let down = async {
-                let res = h1::copy_body(&mut rd, head.body, Some(&mut w)).await;
-                let _ = w.shutdown().await;
-                drop(wr);
+            // A refused POST ends the session even when the server holds the
+            // response body open: the upload reports it, and the download stops.
+            let (fail_tx, fail_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+            // Keep a sender alive so the end of the upload is not a failure.
+            let _keep_alive = fail_tx.clone();
+            let up = async {
+                let res = me.upload_packets_h1(&session, r).await;
+                if let Err(e) = &res {
+                    let _ = fail_tx.send(Some(e.to_string()));
+                }
                 res
             };
-            tokio::select! {
-                (u, d) = async { tokio::join!(me.upload_packets_h1(&session, r), down) } => {
-                    log_end(u, d)
+            let down = async move {
+                let mut fail_rx = fail_rx;
+                let down = async {
+                    let res = h1::copy_body(&mut rd, head.body, Some(&mut w)).await;
+                    let _ = w.shutdown().await;
+                    drop(wr);
+                    res
+                };
+                tokio::select! {
+                    d = down => d,
+                    // Dropping the connection ends the caller's read side.
+                    _ = fail_rx.changed() => Ok(()),
                 }
+            };
+            tokio::select! {
+                (u, d) = async { tokio::join!(up, down) } => log_end(u, d),
                 // The caller dropped the session: close the download connection.
                 _ = cancelled => {}
             }
@@ -1597,6 +1645,68 @@ mod tests {
         drop(session);
 
         let reason = tokio::time::timeout(Duration::from_secs(5), seen)
+            .await
+            .expect("the server saw the GET end")
+            .unwrap();
+        assert_eq!(reason, Some(h2::Reason::CANCEL));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while c.pool.sessions() != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the lease was released");
+    }
+
+    /// A refused POST ends the session: the server keeps the GET open, so
+    /// waiting for the download would hang the caller and hold the pool slot.
+    #[tokio::test]
+    async fn a_refused_post_ends_the_session_and_frees_the_lease() {
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let (get_reset_tx, get_reset) = tokio::sync::oneshot::channel::<Option<h2::Reason>>();
+        tokio::spawn(async move {
+            let mut conn = h2::server::handshake(server_io).await.unwrap();
+            let (req, mut respond) = conn.accept().await.unwrap().unwrap();
+            assert_eq!(req.method(), http::Method::GET);
+            // Never answer the GET: only the client can end it, and it must.
+            tokio::spawn(async move {
+                let reason = std::future::poll_fn(|cx| respond.poll_reset(cx)).await.ok();
+                let _ = get_reset_tx.send(reason);
+            });
+            while let Some(Ok((req, mut respond))) = conn.accept().await {
+                assert_eq!(req.method(), http::Method::POST);
+                let resp = http::Response::builder().status(500).body(()).unwrap();
+                let mut send = respond.send_response(resp, false).unwrap();
+                send.send_data(Bytes::new(), true).unwrap();
+            }
+        });
+
+        let c = Arc::new(client(
+            XhttpConfig::from_xray(&serde_json::json!({ "mode": "packet-up" })).unwrap(),
+        ));
+        let (send, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let seed = c
+            .pool
+            .get(false, || async { Ok((send, Arc::new(AtomicBool::new(false)), None)) })
+            .await
+            .unwrap();
+        drop(seed);
+        let mut session = c.open().await.unwrap();
+        assert_eq!(c.pool.sessions(), 1);
+        session.write_all(b"hello").await.unwrap();
+
+        // The caller must stop waiting: EOF on the read side, not a hang.
+        let mut buf = [0u8; 16];
+        let n = tokio::time::timeout(Duration::from_secs(5), session.read(&mut buf))
+            .await
+            .expect("the session ends after a refused POST")
+            .expect("the pipe reports the end");
+        assert_eq!(n, 0);
+
+        let reason = tokio::time::timeout(Duration::from_secs(5), get_reset)
             .await
             .expect("the server saw the GET end")
             .unwrap();
